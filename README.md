@@ -181,6 +181,7 @@ Commit source, build configuration, patches, and documentation only. Do not comm
 
 ## Credits and notices
 
+- [Softmax and Namco Bandai Games](https://www.unrealengine.com/blog/magnacarta-2?lang=en-US) developed and published the original Magna Carta 2, built with Epic Games' Unreal Engine 3.
 - [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk) provides the recompilation toolchain and runtime used by this project.
 - [Xenia](https://github.com/xenia-project/xenia) provides foundational Xbox 360 research and technology incorporated into ReXGlue.
 - [SIMDe](https://github.com/simd-everywhere/simde) provides portable SIMD support used by the toolchain.
