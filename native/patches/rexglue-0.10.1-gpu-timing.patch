@@ -1,0 +1,210 @@
+diff --git a/include/rex/graphics/d3d12/command_processor.h b/include/rex/graphics/d3d12/command_processor.h
+index 96d362b..307f5ec 100644
+--- a/include/rex/graphics/d3d12/command_processor.h
++++ b/include/rex/graphics/d3d12/command_processor.h
+@@ -311,6 +311,10 @@ class D3D12CommandProcessor : public CommandProcessor {
+   // the submission to await to simply check status, or pass submission_current_
+   // to wait for all queue operations to be completed.
+   void CheckSubmissionFence(uint64_t await_submission);
++  void BeginGpuTimingFrame();
++  void CollectGpuTimingFrame();
++  void BeginGpuTimingDraw(uint64_t vertex_hash, uint64_t pixel_hash, uint32_t vertices);
++  void EndGpuTimingDraw();
+   // If is_guest_command is true, a new full frame - with full cleanup of
+   // resources and, if needed, starting capturing - is opened if pending (as
+   // opposed to simply resuming after mid-frame synchronization). Returns
+@@ -649,6 +653,19 @@ class D3D12CommandProcessor : public CommandProcessor {
+   std::unordered_map<uint64_t, ReadbackBuffer> memexport_readback_buffers_;
+ 
+   static constexpr uint32_t kMaxOcclusionQueries = 8192;
++  // One optional frame, read only after its submission fence has completed.
++  static constexpr uint32_t kMaxGpuTimingQueries = 16384;
++  Microsoft::WRL::ComPtr<ID3D12QueryHeap> gpu_timing_heap_;
++  Microsoft::WRL::ComPtr<ID3D12Resource> gpu_timing_readback_;
++  bool gpu_timing_active_ = false;
++  uint64_t gpu_timing_pending_ = 0;
++  uint64_t gpu_timing_frequency_ = 0;
++  uint32_t gpu_timing_query_count_ = 0;
++  struct GpuTimingDraw {
++    uint64_t vertex_hash, pixel_hash;
++    uint32_t vertices, query, sample_count;
++  };
++  std::vector<GpuTimingDraw> gpu_timing_draws_;
+   Microsoft::WRL::ComPtr<ID3D12QueryHeap> occlusion_query_heap_;
+   Microsoft::WRL::ComPtr<ID3D12Resource> occlusion_query_readback_;
+   uint64_t* occlusion_query_readback_mapping_ = nullptr;
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+index 19874a5..c0ad7f9 100644
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -35,6 +35,9 @@
+ REXCVAR_DEFINE_BOOL(d3d12_bindless, true, "GPU/D3D12", "Use bindless resources where available")
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ 
++REXCVAR_DEFINE_BOOL(d3d12_gpu_profile_frame, false, "GPU/D3D12",
++                    "Capture one frame of GPU draw timestamps to the log");
++
+ REXCVAR_DEFINE_BOOL(d3d12_readback_memexport, false, "GPU/D3D12",
+                     "Read data written by memory export in shaders on the CPU")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+@@ -1628,6 +1631,8 @@ bool D3D12CommandProcessor::SetupContext() {
+ 
+ void D3D12CommandProcessor::ShutdownContext() {
+   AwaitAllQueueOperationsCompletion();
++  gpu_timing_heap_.Reset();
++  gpu_timing_readback_.Reset();
+   InvalidateAllVertexBufferResidency();
+   ShutdownOcclusionQueryResources();
+ 
+@@ -2628,8 +2633,12 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+     SubmitBarriers();
+     PROFILE_DRAW_CALL();
+     PROFILE_VERTICES(primitive_processing_result.host_draw_vertex_count);
++    BeginGpuTimingDraw(vertex_shader->ucode_data_hash(),
++                       pixel_shader ? pixel_shader->ucode_data_hash() : 0,
++                       primitive_processing_result.host_draw_vertex_count);
+     deferred_command_list_.D3DDrawInstanced(primitive_processing_result.host_draw_vertex_count, 1,
+                                             0, 0);
++    EndGpuTimingDraw();
+   } else {
+     D3D12_INDEX_BUFFER_VIEW index_buffer_view;
+     index_buffer_view.SizeInBytes = primitive_processing_result.host_draw_vertex_count;
+@@ -2687,8 +2696,12 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+     SubmitBarriers();
+     PROFILE_DRAW_CALL();
+     PROFILE_VERTICES(primitive_processing_result.host_draw_vertex_count);
++    BeginGpuTimingDraw(vertex_shader->ucode_data_hash(),
++                       pixel_shader ? pixel_shader->ucode_data_hash() : 0,
++                       primitive_processing_result.host_draw_vertex_count);
+     deferred_command_list_.D3DDrawIndexedInstanced(
+         primitive_processing_result.host_draw_vertex_count, 1, 0, 0, 0);
++    EndGpuTimingDraw();
+     if (scratch_index_buffer != nullptr) {
+       ReleaseScratchGPUBuffer(scratch_index_buffer, D3D12_RESOURCE_STATE_INDEX_BUFFER);
+     }
+@@ -3102,6 +3115,83 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
+   return true;
+ }
+ 
++void D3D12CommandProcessor::BeginGpuTimingFrame() {
++  if (!REXCVAR_GET(d3d12_gpu_profile_frame) || gpu_timing_pending_) return;
++  REXCVAR_SET(d3d12_gpu_profile_frame, false);
++  auto& provider = GetD3D12Provider();
++  if (FAILED(provider.GetDirectQueue()->GetTimestampFrequency(&gpu_timing_frequency_)) ||
++      !gpu_timing_frequency_) {
++    REXGPU_ERROR("GPU timing: timestamp frequency unavailable");
++    return;
++  }
++  if (!gpu_timing_heap_) {
++    D3D12_QUERY_HEAP_DESC desc = {D3D12_QUERY_HEAP_TYPE_TIMESTAMP, kMaxGpuTimingQueries, 0};
++    if (FAILED(provider.GetDevice()->CreateQueryHeap(&desc, IID_PPV_ARGS(&gpu_timing_heap_)))) {
++      REXGPU_ERROR("GPU timing: query heap allocation failed");
++      return;
++    }
++  }
++  if (!gpu_timing_readback_) {
++    D3D12_RESOURCE_DESC desc;
++    ui::d3d12::util::FillBufferResourceDesc(desc, sizeof(uint64_t) * kMaxGpuTimingQueries,
++                                         D3D12_RESOURCE_FLAG_NONE);
++    if (FAILED(provider.GetDevice()->CreateCommittedResource(
++            &ui::d3d12::util::kHeapPropertiesReadback, provider.GetHeapFlagCreateNotZeroed(),
++            &desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
++            IID_PPV_ARGS(&gpu_timing_readback_)))) {
++      REXGPU_ERROR("GPU timing: readback allocation failed");
++      return;
++    }
++  }
++  gpu_timing_draws_.clear();
++  gpu_timing_query_count_ = 1;
++  gpu_timing_active_ = true;
++  deferred_command_list_.D3DEndQuery(gpu_timing_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
++}
++
++void D3D12CommandProcessor::BeginGpuTimingDraw(uint64_t vertex_hash, uint64_t pixel_hash,
++                                             uint32_t vertices) {
++  if (!gpu_timing_active_ || gpu_timing_query_count_ + 2 >= kMaxGpuTimingQueries) return;
++  gpu_timing_draws_.push_back({vertex_hash, pixel_hash, vertices, gpu_timing_query_count_,
++                             1u << uint32_t(register_file_->Get<reg::RB_SURFACE_INFO>().msaa_samples)});
++  deferred_command_list_.D3DEndQuery(gpu_timing_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
++                                    gpu_timing_query_count_++);
++}
++
++void D3D12CommandProcessor::EndGpuTimingDraw() {
++  if (!gpu_timing_active_ || gpu_timing_draws_.empty() ||
++      gpu_timing_draws_.back().query + 1 != gpu_timing_query_count_) return;
++  deferred_command_list_.D3DEndQuery(gpu_timing_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
++                                    gpu_timing_query_count_++);
++}
++
++void D3D12CommandProcessor::CollectGpuTimingFrame() {
++  if (!gpu_timing_pending_ || submission_completed_ < gpu_timing_pending_ ||
++      submission_completed_ == UINT64_MAX) return;
++  D3D12_RANGE range = {0, sizeof(uint64_t) * gpu_timing_query_count_};
++  void* data = nullptr;
++  if (FAILED(gpu_timing_readback_->Map(0, &range, &data))) {
++    REXGPU_ERROR("GPU timing: readback map failed");
++    gpu_timing_pending_ = 0;
++    return;
++  }
++  auto ticks = static_cast<const uint64_t*>(data);
++  double to_ms = 1000.0 / double(gpu_timing_frequency_);
++  double draw_ms = 0;
++  for (const auto& draw : gpu_timing_draws_) {
++    double ms = double(ticks[draw.query + 1] - ticks[draw.query]) * to_ms;
++    draw_ms += ms;
++    REXGPU_INFO("GPU timing draw: vs={:016X} ps={:016X} vertices={} ms={:.6f} samples={}",
++                draw.vertex_hash, draw.pixel_hash, draw.vertices, ms, draw.sample_count);
++  }
++  REXGPU_INFO("GPU timing frame: total_ms={:.6f} draw_ms={:.6f} draws={} queries={} submission={}",
++              double(ticks[gpu_timing_query_count_ - 1] - ticks[0]) * to_ms,
++              draw_ms, gpu_timing_draws_.size(), gpu_timing_query_count_, gpu_timing_pending_);
++  D3D12_RANGE no_writes = {0, 0};
++  gpu_timing_readback_->Unmap(0, &no_writes);
++  gpu_timing_pending_ = 0;
++}
++
+ void D3D12CommandProcessor::CheckSubmissionFence(uint64_t await_submission) {
+   if (await_submission >= submission_current_) {
+     if (submission_open_) {
+@@ -3144,6 +3234,7 @@ void D3D12CommandProcessor::CheckSubmissionFence(uint64_t await_submission) {
+   if (submission_completed_ < await_submission) {
+     REXGPU_ERROR("Failed to await a submission completion Direct3D 12 fence");
+   }
++  CollectGpuTimingFrame();
+   if (submission_completed_ <= submission_completed_before) {
+     // Not updated - no need to reclaim or download things.
+     return;
+@@ -3366,6 +3457,7 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
+     primitive_processor_->BeginFrame();
+ 
+     texture_cache_->BeginFrame();
++    BeginGpuTimingFrame();
+   }
+ 
+   return true;
+@@ -3373,6 +3465,8 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
+ 
+ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
+   const ui::d3d12::D3D12Provider& provider = GetD3D12Provider();
++  if (is_swap && frame_open_ && gpu_timing_active_ && !submission_open_ &&
++      !BeginSubmission(false)) return false;
+ 
+   // Make sure there is a command allocator to write commands to.
+   if (submission_open_ && !command_allocator_writable_first_) {
+@@ -3416,6 +3510,16 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
+ 
+     ID3D12CommandQueue* direct_queue = provider.GetDirectQueue();
+ 
++    if (is_closing_frame && gpu_timing_active_) {
++      deferred_command_list_.D3DEndQuery(gpu_timing_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
++                                        gpu_timing_query_count_++);
++      deferred_command_list_.D3DResolveQueryData(
++          gpu_timing_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, gpu_timing_query_count_,
++          gpu_timing_readback_.Get(), 0);
++      gpu_timing_pending_ = submission_current_;
++      gpu_timing_active_ = false;
++    }
++
+     // Submit the deferred command list.
+     // Only one deferred command list must be executed in the same
+     // ExecuteCommandLists - the boundaries of ExecuteCommandLists are a full

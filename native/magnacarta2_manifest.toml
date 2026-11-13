@@ -1,0 +1,40 @@
+# Magna Carta 2 Windows port, ReXGlue v0.10.1.
+# Both discs decode to the same executable; Disc 1 is the code target.
+# Eventual runtime requirement: install all disc content together and resolve
+# disc/content requests automatically without asking the player to swap discs.
+
+[project]
+name = "magnacarta2"
+sdk_version = "0.10.1"
+game_root = "../Magna Carta 2 Disc 1"
+
+[entrypoint]
+file_path = "../Magna Carta 2 Disc 1/default.xex"
+out_directory_path = "generated/default"
+includes = ["config/indirect_functions.toml"]
+
+[entrypoint.functions]
+# Leaf/tail functions absent from .pdata. Checked against the original PPC.
+# One-instruction tail thunk; padding follows it.
+0x82A3A7B0 = { size = 4 }
+# lwz / li / stw / blr, followed by a distinct adjustor thunk.
+0x82A2FF80 = { end = 0x82A2FF90 }
+# Floating-point leaf with two return paths; all 66 instructions are reachable.
+0x828E20A8 = { end = 0x828E21B0 }
+# Multi-return leaves whose later blocks branch back across an earlier blr.
+# Keep their complete control-flow ranges in a single generated function.
+0x82CE76D8 = { end = 0x82CE7710 }
+0x82DA6AF0 = { end = 0x82DA6B28 }
+# Cleanup funclets sharing their parent's FuncInfo. Preserve their recorded
+# .pdata ends; automatic EH expansion otherwise consumes following metadata/code.
+0x829198A8 = { end = 0x8291993C }
+0x829288DC = { end = 0x82928970 }
+0x829343EC = { end = 0x82934480 }
+0x82935454 = { end = 0x829354E8 }
+0x82939920 = { end = 0x829399B4 }
+# Observed in the first native boot: pointer-called constructor after a bctr.
+# Null check, vtable initialization, then blr at 0x823500F4.
+0x823500C8 = { end = 0x823500F8 }
+# Observed comparison callback: two list walks with an early-return suffix.
+0x82C1D0C0 = { end = 0x82C1D148 }
+0x82C1D134 = { parent = 0x82C1D0C0, end = 0x82C1D148 }

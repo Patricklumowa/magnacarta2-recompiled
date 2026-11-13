@@ -1,0 +1,124 @@
+diff --git a/src/input/input_system.cpp b/src/input/input_system.cpp
+index 40740ee..9d68254 100644
+--- a/src/input/input_system.cpp
++++ b/src/input/input_system.cpp
+@@ -12,6 +12,7 @@
+ #include <algorithm>
+ #include <cmath>
+ #include <cstring>
++#include <mutex>
+ 
+ #include <rex/dbg.h>
+ #include <rex/input/device_assignment.h>
+@@ -43,6 +44,11 @@ namespace rex::input {
+ 
+ namespace {
+ 
++// Guest input imports and the host UI poll concurrently. Hold this through
++// enumeration AND use of the device/assignment tables. A process-wide lock
++// preserves InputSystem's layout for clients of the prebuilt SDK.
++std::recursive_mutex input_mutex;
++
+ // Synthetic devices are parked past every physical ordinal so they cannot push
+ // a real pad off guest user 0. SlotAssignment routes them by their synthetic
+ // flag and never reads this value.
+@@ -62,6 +68,7 @@ X_STATUS InputSystem::Setup() {
+ }
+ 
+ void InputSystem::Shutdown() {
++  std::lock_guard guard(input_mutex);
+   // device_owners_ holds raw driver pointers.
+   devices_.clear();
+   device_owners_.clear();
+@@ -69,10 +76,12 @@ void InputSystem::Shutdown() {
+ }
+ 
+ void InputSystem::AddDriver(std::unique_ptr<InputDriver> driver) {
++  std::lock_guard guard(input_mutex);
+   drivers_.push_back(std::move(driver));
+ }
+ 
+ void InputSystem::AttachWindow(rex::ui::Window* window) {
++  std::lock_guard guard(input_mutex);
+   window_ = window;
+   for (auto& driver : drivers_) {
+     driver->OnWindowAvailable(window);
+@@ -80,12 +89,14 @@ void InputSystem::AttachWindow(rex::ui::Window* window) {
+ }
+ 
+ void InputSystem::SetActiveCallback(std::function<bool()> callback) {
++  std::lock_guard guard(input_mutex);
+   for (auto& driver : drivers_) {
+     driver->set_is_active_callback(callback);
+   }
+ }
+ 
+ void InputSystem::SetDeviceAssignment(std::unique_ptr<DeviceAssignment> assignment) {
++  std::lock_guard guard(input_mutex);
+   assignment_ = std::move(assignment);
+   if (assignment_) {
+     assignment_->OnDevicesChanged(devices_);
+@@ -218,6 +229,7 @@ DeviceId InputSystem::ChooseDeviceForUser(uint32_t user_index) const {
+ 
+ X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
+                                       X_INPUT_CAPABILITIES* out_caps) {
++  std::lock_guard guard(input_mutex);
+   SCOPE_profile_cpu_f("hid");
+   if (!out_caps || !assignment_) {
+     return X_ERROR_DEVICE_NOT_CONNECTED;
+@@ -270,6 +282,7 @@ void InputSystem::UpdateConnectedUser(uint32_t user_index, bool connected) {
+ }
+ 
+ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
++  std::lock_guard guard(input_mutex);
+   SCOPE_profile_cpu_f("hid");
+ 
+   // A dialog owns the controller.
+@@ -294,6 +307,7 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
+ }
+ 
+ X_RESULT InputSystem::GetStateForUI(uint32_t user_index, X_INPUT_STATE* out_state) {
++  std::lock_guard guard(input_mutex);
+   SCOPE_profile_cpu_f("hid");
+   if (!assignment_) {
+     return X_ERROR_DEVICE_NOT_CONNECTED;
+@@ -343,6 +357,7 @@ void InputSystem::AddUIInputBlocker() {
+ }
+ 
+ void InputSystem::RemoveUIInputBlocker() {
++  std::lock_guard guard(input_mutex);
+   // Whatever is held right now stays masked until released, so the press that
+   // dismissed the dialog is not also read as a press in the game.
+   X_INPUT_STATE state = {};
+@@ -416,6 +431,7 @@ X_INPUT_VIBRATION InputSystem::ModifyVibrationLevel(const X_INPUT_VIBRATION* vib
+ }
+ 
+ X_RESULT InputSystem::SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration) {
++  std::lock_guard guard(input_mutex);
+   SCOPE_profile_cpu_f("hid");
+   if (!assignment_ || !vibration) {
+     return X_ERROR_DEVICE_NOT_CONNECTED;
+@@ -461,6 +477,7 @@ X_RESULT InputSystem::SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration
+ 
+ X_RESULT InputSystem::GetKeystroke(uint32_t user_index, uint32_t flags,
+                                    X_INPUT_KEYSTROKE* out_keystroke) {
++  std::lock_guard guard(input_mutex);
+   SCOPE_profile_cpu_f("hid");
+   if (!assignment_) {
+     return X_ERROR_DEVICE_NOT_CONNECTED;
+diff --git a/thirdparty/CMakeLists.txt b/thirdparty/CMakeLists.txt
+index f102b56..e4324ae 100644
+--- a/thirdparty/CMakeLists.txt
++++ b/thirdparty/CMakeLists.txt
+@@ -125,8 +125,9 @@ target_include_directories(aes128 PUBLIC
+ target_compile_options(aes128 PRIVATE -w)
+ 
+ # libmspack - LZX decompression (only lzxd.c needed for XEX decompression)
+-# Uses cabextract version which has all needed headers in one place
+-set(MSPACK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/libmspack/cabextract/mspack")
++# Use the canonical sources; cabextract/mspack contains symlinks that Windows
++# Git checkouts with core.symlinks=false materialize as text files.
++set(MSPACK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/libmspack/libmspack/mspack")
+ add_library(mspack STATIC
+     ${MSPACK_DIR}/lzxd.c
+ )

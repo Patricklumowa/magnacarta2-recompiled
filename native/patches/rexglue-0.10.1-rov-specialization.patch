@@ -1,0 +1,305 @@
+diff --git a/include/rex/graphics/d3d12/pipeline_cache.h b/include/rex/graphics/d3d12/pipeline_cache.h
+index 7a9d6a2..848f428 100644
+--- a/include/rex/graphics/d3d12/pipeline_cache.h
++++ b/include/rex/graphics/d3d12/pipeline_cache.h
+@@ -341,6 +341,7 @@ class PipelineCache {
+   // Empty depth-only pixel shader for writing to depth buffer via ROV when no
+   // Xenos pixel shader provided.
+   std::vector<uint8_t> depth_only_pixel_shader_;
++  std::array<std::vector<uint8_t>, 3> depth_only_sample_pixel_shaders_;
+ 
+   struct Pipeline {
+     // nullptr if creation has failed.
+diff --git a/include/rex/graphics/pipeline/shader/dxbc_translator.h b/include/rex/graphics/pipeline/shader/dxbc_translator.h
+index 3b0fd61..2f74a05 100644
+--- a/include/rex/graphics/pipeline/shader/dxbc_translator.h
++++ b/include/rex/graphics/pipeline/shader/dxbc_translator.h
+@@ -111,7 +111,7 @@ class DxbcShaderTranslator : public ShaderTranslator {
+     // If anything in this is structure is changed in a way not compatible with
+     // the previous layout, invalidate the pipeline storages by increasing this
+     // version number (0xYYYYMMDD)!
+-    static constexpr uint32_t kVersion = 0x20260226;
++    static constexpr uint32_t kVersion = 0x20261114;
+ 
+     enum class DepthStencilMode : uint32_t {
+       kNoModifiers,
+@@ -176,6 +176,13 @@ class DxbcShaderTranslator : public ShaderTranslator {
+       uint32_t dynamic_addressable_register_count : 8;
+       // Non-ROV - depth / stencil output mode.
+       DepthStencilMode depth_stencil_mode : 2;
++      // ROV variants keyed by the draw's immutable output state. Zero keeps
++      // the generic translation used by existing callers and depth-only PS.
++      uint32_t rov_rt0_format_specialized : 1;
++      uint32_t rov_rt0_color_format : 5;
++      uint32_t rov_depth_stencil_disabled : 1;
++      // Zero retains all four conditional samples; 1/2/3 selects guest 1x/2x/4x.
++      uint32_t rov_msaa_samples_plus_one : 2;
+     } pixel;
+ 
+     explicit Modification(uint64_t modification_value = 0) : value(modification_value) {
+@@ -513,7 +520,7 @@ class DxbcShaderTranslator : public ShaderTranslator {
+ 
+   // Creates a special pixel shader without color outputs - this resets the
+   // state of the translator.
+-  std::vector<uint8_t> CreateDepthOnlyPixelShader();
++  std::vector<uint8_t> CreateDepthOnlyPixelShader(uint64_t modification = 0);
+ 
+   // Common functions useful not only for the translator, but also for render
+   // target reinterpretation.
+@@ -707,9 +714,14 @@ class DxbcShaderTranslator : public ShaderTranslator {
+   // 2x2 quads.
+   bool ROV_IsDepthStencilEarly() const {
+     assert_true(edram_rov_used_);
++    if (GetDxbcShaderModification().pixel.rov_depth_stencil_disabled) return false;
+     return !is_depth_only_pixel_shader_ && !current_shader().writes_depth() &&
+            !current_shader().memexport_eM_written();
+   }
++  uint32_t ROV_GetSampleCount() const {
++    uint32_t mode = GetDxbcShaderModification().pixel.rov_msaa_samples_plus_one;
++    return mode ? (1u << (mode - 1)) : 4u;
++  }
+   // Converts the pre-clamped depth value to 24-bit (storing the result in bits
+   // 0:23 and zeros in 24:31, not creating room for stencil - since this may be
+   // involved in comparisons) according to the format specified in the system
+@@ -718,6 +730,7 @@ class DxbcShaderTranslator : public ShaderTranslator {
+   void ROV_DepthTo24Bit(uint32_t d24_temp, uint32_t d24_temp_component, uint32_t d32_temp,
+                         uint32_t d32_temp_component, uint32_t temp_temp,
+                         uint32_t temp_temp_component);
++  dxbc::Src ROV_LoadColorFormatFlags(uint32_t rt_index);
+   // Does all the related to depth / stencil, including or not including
+   // writing based on whether it's late, or on whether it's safe to do it early.
+   // Updates system_temp_rov_params_ result and coverage if allowed and safe,
+diff --git a/src/graphics/d3d12/pipeline_cache.cpp b/src/graphics/d3d12/pipeline_cache.cpp
+index 8e6b854..cc4c145 100644
+--- a/src/graphics/d3d12/pipeline_cache.cpp
++++ b/src/graphics/d3d12/pipeline_cache.cpp
+@@ -61,6 +61,11 @@ REXCVAR_DEFINE_INT32(d3d12_pipeline_creation_threads, -1, "GPU/D3D12",
+ 
+ REXCVAR_DEFINE_BOOL(d3d12_tessellation_wireframe, false, "GPU/D3D12",
+                     "Render tessellation as wireframe");
++REXCVAR_DEFINE_BOOL(d3d12_rov_specialize_output, false, "GPU/D3D12",
++                    "Specialize ROV shaders for RT0 format and disabled depth/stencil")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++REXCVAR_DEFINE_BOOL(d3d12_rov_specialize_samples, false, "GPU/D3D12",
++                    "Specialize ROV shaders for the draw's unchanged MSAA sample count");
+ 
+ namespace rex::graphics::d3d12 {
+ 
+@@ -103,6 +108,12 @@ PipelineCache::PipelineCache(D3D12CommandProcessor& command_processor,
+ 
+   if (edram_rov_used) {
+     depth_only_pixel_shader_ = std::move(shader_translator_->CreateDepthOnlyPixelShader());
++    for (uint32_t i = 0; i < depth_only_sample_pixel_shaders_.size(); ++i) {
++      DxbcShaderTranslator::Modification modification;
++      modification.pixel.rov_msaa_samples_plus_one = i + 1;
++      depth_only_sample_pixel_shaders_[i] =
++          shader_translator_->CreateDepthOnlyPixelShader(modification.value);
++    }
+   }
+ }
+ 
+@@ -873,6 +884,22 @@ DxbcShaderTranslator::Modification PipelineCache::GetCurrentPixelShaderModificat
+     modification.pixel.param_gen_point = 0;
+   }
+ 
++  if (render_target_cache_.GetPath() == RenderTargetCache::Path::kPixelShaderInterlock &&
++      REXCVAR_GET(d3d12_rov_specialize_output)) {
++    modification.pixel.rov_rt0_format_specialized = 1;
++    modification.pixel.rov_rt0_color_format =
++        uint32_t(regs.Get<reg::RB_COLOR_INFO>().color_format);
++    modification.pixel.rov_depth_stencil_disabled =
++        !normalized_depth_control.z_enable && !normalized_depth_control.stencil_enable;
++  }
++
++  if (render_target_cache_.GetPath() == RenderTargetCache::Path::kPixelShaderInterlock &&
++      REXCVAR_GET(d3d12_rov_specialize_samples) &&
++      uint32_t(regs.Get<reg::RB_SURFACE_INFO>().msaa_samples) <= 2) {
++    modification.pixel.rov_msaa_samples_plus_one =
++        uint32_t(regs.Get<reg::RB_SURFACE_INFO>().msaa_samples) + 1;
++  }
++
+   if (render_target_cache_.GetPath() == RenderTargetCache::Path::kHostRenderTargets) {
+     using DepthStencilMode = DxbcShaderTranslator::Modification::DepthStencilMode;
+     if (render_target_cache_.depth_float24_convert_in_pixel_shader() &&
+@@ -1360,6 +1387,13 @@ bool PipelineCache::GetCurrentStateDescription(
+     runtime_description_out.pixel_shader = pixel_shader;
+     description_out.pixel_shader_hash = pixel_shader->shader().ucode_data_hash();
+     description_out.pixel_shader_modification = pixel_shader->modification();
++  } else if (render_target_cache_.GetPath() == RenderTargetCache::Path::kPixelShaderInterlock &&
++             REXCVAR_GET(d3d12_rov_specialize_samples) &&
++             uint32_t(regs.Get<reg::RB_SURFACE_INFO>().msaa_samples) <= 2) {
++    DxbcShaderTranslator::Modification modification;
++    modification.pixel.rov_msaa_samples_plus_one =
++        uint32_t(regs.Get<reg::RB_SURFACE_INFO>().msaa_samples) + 1;
++    description_out.pixel_shader_modification = modification.value;
+   }
+ 
+   // Rasterizer state.
+@@ -2836,8 +2870,11 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
+     state_desc.PS.pShaderBytecode = runtime_description.pixel_shader->translated_binary().data();
+     state_desc.PS.BytecodeLength = runtime_description.pixel_shader->translated_binary().size();
+   } else if (edram_rov_used) {
+-    state_desc.PS.pShaderBytecode = depth_only_pixel_shader_.data();
+-    state_desc.PS.BytecodeLength = depth_only_pixel_shader_.size();
++    uint32_t mode = DxbcShaderTranslator::Modification(description.pixel_shader_modification)
++                        .pixel.rov_msaa_samples_plus_one;
++    const auto& shader = mode ? depth_only_sample_pixel_shaders_[mode - 1] : depth_only_pixel_shader_;
++    state_desc.PS.pShaderBytecode = shader.data();
++    state_desc.PS.BytecodeLength = shader.size();
+   } else {
+     if (render_target_cache_.depth_float24_convert_in_pixel_shader() &&
+         (description.depth_func != xenos::CompareFunction::kAlways || description.depth_write) &&
+diff --git a/src/graphics/pipeline/shader/dxbc_translator.cpp b/src/graphics/pipeline/shader/dxbc_translator.cpp
+index 2c31a0e..3320eb0 100644
+--- a/src/graphics/pipeline/shader/dxbc_translator.cpp
++++ b/src/graphics/pipeline/shader/dxbc_translator.cpp
+@@ -79,13 +79,13 @@ DxbcShaderTranslator::DxbcShaderTranslator(ui::GraphicsProvider::GpuVendorID ven
+ }
+ DxbcShaderTranslator::~DxbcShaderTranslator() = default;
+ 
+-std::vector<uint8_t> DxbcShaderTranslator::CreateDepthOnlyPixelShader() {
++std::vector<uint8_t> DxbcShaderTranslator::CreateDepthOnlyPixelShader(uint64_t modification) {
+   is_depth_only_pixel_shader_ = true;
+   // TODO(Triang3l): Handle in a nicer way (is_depth_only_pixel_shader_ is a
+   // leftover from when a Shader object wasn't used during translation).
+   Shader shader(xenos::ShaderType::kPixel, 0, nullptr, 0);
+   shader.AnalyzeUcode(instruction_disassembly_buffer_);
+-  Shader::Translation& translation = *shader.GetOrCreateTranslation(0);
++  Shader::Translation& translation = *shader.GetOrCreateTranslation(modification);
+   TranslateAnalyzedShader(translation);
+   is_depth_only_pixel_shader_ = false;
+   return translation.translated_binary();
+diff --git a/src/graphics/pipeline/shader/dxbc_translator_om.cpp b/src/graphics/pipeline/shader/dxbc_translator_om.cpp
+index a7d508a..6f62461 100644
+--- a/src/graphics/pipeline/shader/dxbc_translator_om.cpp
++++ b/src/graphics/pipeline/shader/dxbc_translator_om.cpp
+@@ -22,6 +22,17 @@
+ namespace rex::graphics {
+ using namespace ucode;
+ 
++dxbc::Src DxbcShaderTranslator::ROV_LoadColorFormatFlags(uint32_t rt_index) {
++  const auto modification = GetDxbcShaderModification();
++  if (rt_index == 0 && modification.pixel.rov_rt0_format_specialized) {
++    return dxbc::Src::LU(RenderTargetCache::AddPSIColorFormatFlags(
++        xenos::ColorRenderTargetFormat(modification.pixel.rov_rt0_color_format)));
++  }
++  return LoadSystemConstant(SystemConstants::Index::kEdramRTFormatFlags,
++      offsetof(SystemConstants, edram_rt_format_flags) + sizeof(uint32_t) * rt_index,
++      dxbc::Src::kXXXX);
++}
++
+ void DxbcShaderTranslator::StartPixelShader_LoadROVParameters() {
+   bool any_color_targets_written = current_shader().writes_color_targets() != 0;
+ 
+@@ -362,6 +373,7 @@ void DxbcShaderTranslator::StartPixelShader_LoadROVParameters() {
+ }
+ 
+ void DxbcShaderTranslator::ROV_DepthStencilTest() {
++  if (GetDxbcShaderModification().pixel.rov_depth_stencil_disabled) return;
+   uint32_t temp = PushSystemTemp();
+   dxbc::Dest temp_x_dest(dxbc::Dest::R(temp, 0b0001));
+   dxbc::Src temp_x_src(dxbc::Src::R(temp, dxbc::Src::kXXXX));
+@@ -465,7 +477,8 @@ void DxbcShaderTranslator::ROV_DepthStencilTest() {
+     a_.OpAdd(temp_z_dest, temp_z_src, in_position_z);
+   }
+ 
+-  for (uint32_t i = 0; i < 4; ++i) {
++  uint32_t sample_count = ROV_GetSampleCount();
++  for (uint32_t i = 0; i < sample_count; ++i) {
+     // With early depth/stencil, depth/stencil writing may be deferred to the
+     // end of the shader to prevent writing in case something (like alpha test,
+     // which is dynamic GPU state) discards the pixel. So, write directly to the
+@@ -1011,9 +1024,13 @@ void DxbcShaderTranslator::ROV_DepthStencilTest() {
+     // +(80*scale_x+1), so need to do +(80*scale_x), -(80*scale_x-1),
+     // +(80*scale_x) and -(80*scale_x+1) after each sample).
+     uint32_t tile_width = xenos::kEdramTileWidthSamples * draw_resolution_scale_x_;
++    // Restore sample zero after the last active sample, including 1x and 2x.
++    int32_t next_offset = i + 1 == sample_count
++                              ? -int32_t((i & 1) * tile_width + (i >> 1))
++                              : ((i & 1) ? -int32_t(tile_width) + 2 - i : int32_t(tile_width));
+     a_.OpIAdd(dxbc::Dest::R(system_temp_rov_params_, 0b0010),
+               dxbc::Src::R(system_temp_rov_params_, dxbc::Src::kYYYY),
+-              dxbc::Src::LI((i & 1) ? -int32_t(tile_width) + 2 - i : int32_t(tile_width)));
++              dxbc::Src::LI(next_offset));
+   }
+ 
+   if (ROV_IsDepthStencilEarly()) {
+@@ -1077,10 +1094,7 @@ void DxbcShaderTranslator::ROV_UnpackColor(uint32_t rt_index, uint32_t packed_te
+   a_.OpMov(dxbc::Dest::R(color_temp, 0b1100), dxbc::Src::LF(0.0f, 0.0f, 0.0f, 1.0f));
+ 
+   // Choose the packing based on the render target's format.
+-  a_.OpSwitch(LoadSystemConstant(
+-      SystemConstants::Index::kEdramRTFormatFlags,
+-      offsetof(SystemConstants, edram_rt_format_flags) + sizeof(uint32_t) * rt_index,
+-      dxbc::Src::kXXXX));
++  a_.OpSwitch(ROV_LoadColorFormatFlags(rt_index));
+ 
+   // ***************************************************************************
+   // k_8_8_8_8
+@@ -1222,10 +1236,7 @@ void DxbcShaderTranslator::ROV_PackPreClampedColor(uint32_t rt_index, uint32_t c
+   a_.OpMov(dxbc::Dest::R(packed_temp, 1 << (packed_temp_components + 1)), dxbc::Src::LU(0));
+ 
+   // Choose the packing based on the render target's format.
+-  a_.OpSwitch(LoadSystemConstant(
+-      SystemConstants::Index::kEdramRTFormatFlags,
+-      offsetof(SystemConstants, edram_rt_format_flags) + sizeof(uint32_t) * rt_index,
+-      dxbc::Src::kXXXX));
++  a_.OpSwitch(ROV_LoadColorFormatFlags(rt_index));
+ 
+   // ***************************************************************************
+   // k_8_8_8_8
+@@ -1818,6 +1829,7 @@ void DxbcShaderTranslator::CompletePixelShader_AlphaToMask() {
+ }
+ 
+ void DxbcShaderTranslator::CompletePixelShader_WriteToROV() {
++  uint32_t sample_count = ROV_GetSampleCount();
+   uint32_t temp = PushSystemTemp();
+   dxbc::Dest temp_x_dest(dxbc::Dest::R(temp, 0b0001));
+   dxbc::Src temp_x_src(dxbc::Src::R(temp, dxbc::Src::kXXXX));
+@@ -1834,7 +1846,7 @@ void DxbcShaderTranslator::CompletePixelShader_WriteToROV() {
+   // depth writing.
+   if (ROV_IsDepthStencilEarly()) {
+     // Write modified depth/stencil.
+-    for (uint32_t i = 0; i < 4; ++i) {
++    for (uint32_t i = 0; i < sample_count; ++i) {
+       // Get if need to write to temp.x.
+       // temp.x = whether the depth sample needs to be written.
+       a_.OpAnd(temp_x_dest, dxbc::Src::R(system_temp_rov_params_, dxbc::Src::kXXXX),
+@@ -1856,7 +1868,7 @@ void DxbcShaderTranslator::CompletePixelShader_WriteToROV() {
+       // Go to the next sample (samples are at +0, +(80*scale_x), +1,
+       // +(80*scale_x+1), so need to do +(80*scale_x), -(80*scale_x-1),
+       // +(80*scale_x) and -(80*scale_x+1) after each sample).
+-      if (i < 3) {
++      if (i + 1 < sample_count) {
+         a_.OpIAdd(dxbc::Dest::R(system_temp_rov_params_, 0b0010),
+                   dxbc::Src::R(system_temp_rov_params_, dxbc::Src::kYYYY),
+                   dxbc::Src::LI((i & 1) ? -int32_t(tile_width) + 2 - i : int32_t(tile_width)));
+@@ -1924,9 +1936,7 @@ void DxbcShaderTranslator::CompletePixelShader_WriteToROV() {
+                                 offsetof(SystemConstants, color_exp_bias) + sizeof(float) * i,
+                                 dxbc::Src::kXXXX));
+ 
+-    dxbc::Src rt_format_flags_src(LoadSystemConstant(
+-        SystemConstants::Index::kEdramRTFormatFlags,
+-        offsetof(SystemConstants, edram_rt_format_flags) + sizeof(uint32_t) * i, dxbc::Src::kXXXX));
++    dxbc::Src rt_format_flags_src(ROV_LoadColorFormatFlags(i));
+ 
+     // Load whether the render target is 64bpp to system_temp_rov_params_.y to
+     // get the needed relative sample address.
+@@ -2020,7 +2030,7 @@ void DxbcShaderTranslator::CompletePixelShader_WriteToROV() {
+     a_.OpEndIf();
+ 
+     // Blend, mask and write all samples.
+-    for (uint32_t j = 0; j < 4; ++j) {
++    for (uint32_t j = 0; j < sample_count; ++j) {
+       // Get if the sample is covered.
+       // temp.z = whether the sample is covered.
+       a_.OpAnd(temp_z_dest, dxbc::Src::R(system_temp_rov_params_, dxbc::Src::kXXXX),
+@@ -2593,7 +2603,7 @@ void DxbcShaderTranslator::CompletePixelShader_WriteToROV() {
+       // +(80*scale_x) and -(80*scale_x+dwpp) after each sample).
+       // Though no need to do this for the last sample as for the next render
+       // target, the address will be recalculated.
+-      if (j < 3) {
++      if (j + 1 < sample_count) {
+         if (j & 1) {
+           // temp.z = whether the render target is 64bpp.
+           a_.OpAnd(temp_z_dest, rt_format_flags_src,

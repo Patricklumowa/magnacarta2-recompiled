@@ -1,0 +1,3 @@
+# Optional analysis and screenshot tools; the build helper uses the standard library.
+pycryptodome==3.23.0
+Pillow==12.3.0
