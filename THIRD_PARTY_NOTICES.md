@@ -1,5 +1,8 @@
 # Third-party notices
 
+Original project contributions use the [MIT License](LICENSE). The upstream
+portions identified below retain their existing licenses and copyright notices.
+
 This repository does not vendor the ReXGlue SDK or game data. The ReXGlue
 patches in `native/patches/`, the SDK-generated project integration in
 `native/generated/rexglue.cmake`, `native/CMakePresets.json`, and the ReXGlue-derived
@@ -78,8 +81,8 @@ SOFTWARE.
 ## plume
 
 The optional standalone native draw probe uses plume at revision
-`11926860e878e68626ea99ec88562ce2b8badc4f`. Its readback compatibility patch
-contains plume-derived source. The checkout is not vendored.
+`11926860e878e68626ea99ec88562ce2b8badc4f`. Its readback and pipeline-validation
+patches contain plume-derived source. The checkout is not vendored.
 
 https://github.com/renderbag/plume
 
