@@ -4,6 +4,10 @@
 #include <vector>
 
 namespace mc2::native {
+// Shared-constant bytes 288..351 hold one word per reflected fetch slot (0..15).
+// Zero bypasses interpretation for legacy callers with CPU-converted uploads.
+uint32_t PackTextureFetchMode(uint32_t swizzle,uint32_t gamma_mask,int32_t exp_adjust);
+
 // Immutable BC1/BC3 texture, uploaded once with every supplied mip. Input is
 // tightly packed native block order; fetch swizzle/gamma belong to the sampler.
 class SampledTexture {

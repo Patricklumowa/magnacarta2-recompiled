@@ -17,8 +17,93 @@ index e505a5e..4a6d712 100644
 +        target_compile_options(XenosRecompCheck PRIVATE -fms-extensions)
 +    endif()
 +endif()
+diff --git a/XenosRecomp/shader_common.h b/XenosRecomp/shader_common.h
+index 1c74034..aabb23b 100644
+--- a/XenosRecomp/shader_common.h
++++ b/XenosRecomp/shader_common.h
+@@ -30,6 +30,9 @@ struct PushConstants
+ #define g_SwappedTexcoords         vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 260)
+ #define g_HalfPixelOffset          vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + 264)
+ #define g_AlphaThreshold           vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 272)
++#ifndef UNLEASHED_RECOMP
++    #define TEXTURE_FETCH_MODE(index) vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 288 + (index) * 4)
++#endif
+ 
+ [[vk::constant_id(0)]] const uint g_SpecConstants = 0;
+ 
+@@ -37,11 +40,19 @@ struct PushConstants
+ 
+ #else
+ 
++#ifdef UNLEASHED_RECOMP
++    #define DEFINE_TEXTURE_FETCH_MODES()
++#else
++    #define DEFINE_TEXTURE_FETCH_MODES() uint4 g_TextureFetchModes[4] : packoffset(c18);
++    #define TEXTURE_FETCH_MODE(index) g_TextureFetchModes[(index) / 4][(index) % 4]
++#endif
++
+ #define DEFINE_SHARED_CONSTANTS() \
+     uint g_Booleans : packoffset(c16.x); \
+     uint g_SwappedTexcoords : packoffset(c16.y); \
+     float2 g_HalfPixelOffset : packoffset(c16.z); \
+-    float g_AlphaThreshold : packoffset(c17.x);
++    float g_AlphaThreshold : packoffset(c17.x); \
++    DEFINE_TEXTURE_FETCH_MODES()
+ 
+ uint g_SpecConstants();
+ 
+@@ -52,6 +63,49 @@ Texture3D<float4> g_Texture3DDescriptorHeap[] : register(t0, space1);
+ TextureCube<float4> g_TextureCubeDescriptorHeap[] : register(t0, space2);
+ SamplerState g_SamplerDescriptorHeap[] : register(s0, space3);
+ 
++#ifndef UNLEASHED_RECOMP
++// Piecewise gamma conversion adapted from ReXGlue/Xenia PWLGammaToLinear.
++// Copyright (c) 2018 Ben Vanik; (c) 2026 Tom Clay. BSD-3-Clause;
++// see the project's THIRD_PARTY_NOTICES.md. This follows the reference backend's
++// post-filter conversion, not an sRGB texture view.
++float textureGammaToLinear(float gamma)
++{
++    float scale, offset;
++    if (gamma >= 96.0 / 255.0)
++    {
++        scale = gamma >= 192.0 / 255.0 ? 8.0 : 4.0;
++        offset = gamma >= 192.0 / 255.0 ? -1024.0 : -256.0;
++    }
++    else
++    {
++        scale = gamma >= 64.0 / 255.0 ? 2.0 : 1.0;
++        offset = gamma >= 64.0 / 255.0 ? -64.0 : 0.0;
++    }
++    precise float decoded = saturate(gamma) * 255.0 * scale + offset;
++    decoded += trunc(decoded * (scale / 1024.0));
++    return decoded * (1.0 / 1023.0);
++}
++
++float4 applyTextureFetch(float4 value, uint mode)
++{
++    // Zero preserves existing callers whose CPU upload already applies swizzle.
++    if ((mode & 0x80000000u) == 0)
++        return value;
++    float4 result;
++    [unroll] for (uint component = 0; component < 4; ++component)
++    {
++        uint selector = (mode >> (component * 3)) & 7;
++        float componentValue = selector < 4 ? value[selector & 3] : (selector == 5 ? 1.0 : 0.0);
++        if ((mode & (1u << (12 + component))) != 0)
++            componentValue = textureGammaToLinear(componentValue);
++        result[component] = componentValue;
++    }
++    int exponent = int((mode >> 16) & 63);
++    if (exponent >= 32) exponent -= 64;
++    return result * asfloat(uint(exponent + 127) << 23);
++}
++#endif
++
+ uint2 getTexture2DDimensions(Texture2D<float4> texture)
+ {
+     uint2 dimensions;
 diff --git a/XenosRecomp/shader_recompiler.cpp b/XenosRecomp/shader_recompiler.cpp
-index 698a418..3b1efed 100644
+index 698a418..62bff01 100644
 --- a/XenosRecomp/shader_recompiler.cpp
 +++ b/XenosRecomp/shader_recompiler.cpp
 @@ -1,5 +1,6 @@
@@ -142,7 +227,7 @@ index 698a418..3b1efed 100644
  
      #ifdef UNLEASHED_RECOMP
          subtractFromOne = hasMtxPrevInvViewProjection && strcmp(constNamePtr, "sampZBuffer") == 0;
-@@ -277,78 +294,82 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+@@ -277,78 +294,91 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
      }
  #endif
  
@@ -181,10 +266,12 @@ index 698a418..3b1efed 100644
 +        #ifdef UNLEASHED_RECOMP
 +            if (subtractFromOne)
 +                out += "1.0 - ";
++        #else
++            if (instr.constIndex >= 16)
++                throw std::runtime_error("Texture fetch modes support only 16 slots");
++            out += "applyTextureFetch(";
 +        #endif
- 
--    std::string_view dimension;
--    uint32_t componentCount = 0;
++
 +            out += "tfetch";
 +            break;
 +        }
@@ -194,6 +281,11 @@ index 698a418..3b1efed 100644
 +            break;
 +        }
 +        }
+ 
+-    std::string_view dimension;
+-    uint32_t componentCount = 0;
++        std::string_view dimension;
++        uint32_t componentCount = 0;
  
 -    switch (instr.dimension)
 -    {
@@ -214,10 +306,6 @@ index 698a418..3b1efed 100644
 -        componentCount = 3;
 -        break;
 -    }
-+        std::string_view dimension;
-+        uint32_t componentCount = 0;
- 
--    out += dimension;
 +        switch (instr.dimension)
 +        {
 +        case TextureDimension::Texture1D:
@@ -238,18 +326,22 @@ index 698a418..3b1efed 100644
 +            break;
 +        }
  
+-    out += dimension;
++        out += dimension;
+ 
 -#ifdef UNLEASHED_RECOMP
 -    if (bicubic)
 -        out += "Bicubic";
 -#endif
-+        out += dimension;
- 
--    print("({0}_Texture{1}DescriptorIndex, {0}_SamplerDescriptorIndex, ", constNamePtr, dimension);
--    printSrcRegister(componentCount);
 +    #ifdef UNLEASHED_RECOMP
 +        if (bicubic)
 +            out += "Bicubic";
 +    #endif
+ 
+-    print("({0}_Texture{1}DescriptorIndex, {0}_SamplerDescriptorIndex, ", constNamePtr, dimension);
+-    printSrcRegister(componentCount);
++        print("({0}_Texture{1}DescriptorIndex, {0}_SamplerDescriptorIndex, ", constNamePtr, dimension);
++        printSrcRegister(componentCount);
  
 -    switch (instr.dimension)
 -    {
@@ -260,9 +352,6 @@ index 698a418..3b1efed 100644
 -        out += ", cubeMapData";
 -        break;
 -    }
-+        print("({0}_Texture{1}DescriptorIndex, {0}_SamplerDescriptorIndex, ", constNamePtr, dimension);
-+        printSrcRegister(componentCount);
-+
 +        switch (instr.dimension)
 +        {
 +        case TextureDimension::Texture2D:
@@ -272,10 +361,15 @@ index 698a418..3b1efed 100644
 +            out += ", cubeMapData";
 +            break;
 +        }
-+
-+        out += ").";
  
 -    out += ").";
++        out += ")";
++    #ifndef UNLEASHED_RECOMP
++        if (instr.opcode == FetchOpcode::TextureFetch)
++            print(", TEXTURE_FETCH_MODE({}))", instr.constIndex);
++    #endif
++        out += ".";
++
 +        printDstSwizzle(instr.dstSwizzle, true);
  
 -    printDstSwizzle(instr.dstSwizzle, true);
@@ -286,7 +380,7 @@ index 698a418..3b1efed 100644
  
      printDstSwizzle01(instr.dstRegister, instr.dstSwizzle);
  
-@@ -1171,16 +1192,30 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1171,16 +1201,30 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
  
          case RegisterSet::Sampler:
          {
@@ -324,7 +418,7 @@ index 698a418..3b1efed 100644
              break;
          }
  
-@@ -1228,16 +1263,19 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1228,16 +1272,19 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
  
          if (constantInfo->registerSet == RegisterSet::Sampler)
          {
@@ -352,7 +446,7 @@ index 698a418..3b1efed 100644
          }
      }
  
-@@ -1312,14 +1350,26 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1312,14 +1359,26 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
  
              value = vertexShader->vertexElementsAndInterpolators[vertexShader->field18 + i];
  
@@ -396,10 +490,10 @@ index b2e317d..f939308 100644
  
 diff --git a/XenosRecomp/shader_recompiler_check.cpp b/XenosRecomp/shader_recompiler_check.cpp
 new file mode 100644
-index 0000000..64470cf
+index 0000000..ac3e156
 --- /dev/null
 +++ b/XenosRecomp/shader_recompiler_check.cpp
-@@ -0,0 +1,169 @@
+@@ -0,0 +1,181 @@
 +// Synthetic fixtures only. No game shaders or generated game code.
 +#include "shader_recompiler.h"
 +#include <array>
@@ -546,6 +640,18 @@ index 0000000..64470cf
 +    const auto name = count > 1 ? fmt::format("Array_{}", count - 1) : "Array";
 +    require(recompiler.out.find(fmt::format("tfetch2D({0}_Texture2DDescriptorIndex, {0}_SamplerDescriptorIndex", name)) != std::string::npos,
 +        "Last array element did not use its reflected sampler slot");
++    require(recompiler.out.find("applyTextureFetch(tfetch2D(")!=std::string::npos &&
++            recompiler.out.find(fmt::format("TEXTURE_FETCH_MODE({})",uint32_t(fetch.constIndex)))!=std::string::npos,
++        "Texture interpretation did not use the actual fetch slot");
++    fetch.opcode=FetchOpcode::GetTextureWeights;
++    recompiler.out.clear(); recompiler.recompile(fetch,false);
++    require(recompiler.out.find("getWeights2D(")!=std::string::npos &&
++            recompiler.out.find("applyTextureFetch")==std::string::npos,
++        "Texture interpretation changed a weight query");
++    fetch.opcode=FetchOpcode::TextureFetch; fetch.constIndex=16;
++    bool rejected=false;
++    try { recompiler.recompile(fetch,false); } catch (const std::runtime_error&) { rejected=true; }
++    require(rejected,"Texture fetch indexed outside the interpretation constants");
 +}
 +
 +int main()
@@ -567,5 +673,5 @@ index 0000000..64470cf
 +        }
 +        require(rejected, "Unsupported sampler range was not explicitly rejected");
 +    }
-+    puts("PASS: sampler arrays and bounds, masked fetches, constant writes, predication, format-based vertex types");
++    puts("PASS: sampler arrays and bounds, masked fetches, constant writes, predication, format-based vertex types and fetch interpretation slots");
 +}

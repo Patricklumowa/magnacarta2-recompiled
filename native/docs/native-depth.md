@@ -163,6 +163,8 @@ transfer storage is bounded to 64 MiB. Smaller mip levels may have partial
 blocks. Input format, mip count and every payload extent are checked before
 allocating or submitting GPU work. Swizzle, filtering, exponent adjustment and
 the game's gamma conversion are not performed by this storage component.
+The patched shader's [texture fetch interpretation](shader-feasibility.md#texture-fetch-interpretation)
+handles swizzle, gamma and exponent after sampling; it has a separate GPU check.
 
 ```text
 mc2_native_texture_check

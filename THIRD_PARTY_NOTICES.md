@@ -8,6 +8,9 @@ patches in `native/patches/`, the SDK-generated project integration in
 `native/generated/rexglue.cmake`, `native/CMakePresets.json`, and the ReXGlue-derived
 application scaffold contain or derive from ReXGlue source. The executable
 inspection tools reference Xenia's documented XEX layout and conventions.
+The piecewise texture-gamma helper in the XenosRecomp patch is adapted from
+ReXGlue/Xenia's `PWLGammaToLinear` and retains BSD-3-Clause terms, including
+Copyright (c) 2018 Ben Vanik and Copyright (c) 2026 Tom Clay.
 
 ReXGlue v0.10.1 is pinned to revision
 `bd833a2ab69d305f99ddf57418fc38ffec8af93d`:
@@ -57,6 +60,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 The shader-converter patch targets hedge-dev/XenosRecomp revision
 `990d03b28a27b50277ee5d8d942e1c5f873869d1`. The converter is built locally; no
 game-derived shaders or compiled output are included in this repository.
+The gamma helper identified above retains its separate BSD-3-Clause notice.
 
 Copyright (c) 2025 hedge-dev and contributors
 

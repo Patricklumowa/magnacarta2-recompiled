@@ -2,7 +2,7 @@
 
 The native shader gate is **partially demonstrated, not passed**. The current
 187 captured boot/gameplay shaders all translate to HLSL and compile/link to DXIL
-after two focused translator fixes. Compilation does not establish native visual
+after focused translator fixes. Compilation does not establish native visual
 correctness, mini-fetch semantics, or complete game coverage.
 
 ## Reproducible probe
@@ -193,6 +193,50 @@ implemented.
 
 ## Validation performed
 
+### Texture fetch interpretation
+
+The first color draw's BC3 diffuse texture uses piecewise gamma on RGB while
+its BC1 normal texture does not. Native UNORM sampling alone misses that
+conversion, and an sRGB view uses a different curve. The converter patch now
+wraps texture samples with the captured component swizzle, selected gamma
+channels and signed six-bit exponent adjustment. Weight queries and instruction
+destination zero/one writes retain their existing behavior.
+
+Each of the sixteen reflected fetch slots has a mode word in shared-constant
+bytes 288..351 (`c18..c21`). `PackTextureFetchMode` validates the selectors and
+range before packing bits 0..11 (swizzle), 12..15 (post-swizzle gamma mask),
+16..21 (signed exponent), and 31 (enabled). Reserved selectors and gamma applied
+to constant selectors are rejected. Zero disables interpretation for existing
+movie uploads, which already expand/swizzle their source planes on the CPU.
+The converter indexes modes by the original fetch slot, independently of the
+native texture descriptor index. The existing `UNLEASHED_RECOMP` specialization
+does not use this path.
+
+The gamma helper is adapted from the BSD-3-Clause ReXGlue/Xenia
+`PWLGammaToLinear`; attribution is retained in the patch and
+[third-party notices](../../THIRD_PARTY_NOTICES.md). Like that reference backend,
+it converts **after filtering**. This establishes a reference implementation to
+compare with; it does not prove the original console's filtering order.
+
+Build `mc2_native_fetch_check` with the optional native probe enabled. Its
+original synthetic shader can be compiled using the patched converter header:
+
+```text
+dxc -T cs_6_0 -E main -HV 2021 -I <XenosRecomp-checkout>/XenosRecomp native/tests/texture_fetch_check.hlsl -Fo <local-output>/texture-fetch-check.dxil
+mc2_native_fetch_check <local-output>/texture-fetch-check.dxil
+```
+
+The test compares 8,576 GPU cases with a separate double-precision CPU
+calculation: all byte values, points either side of curve boundaries, NaN and
+infinity handling, channel selection, constant zero/one, exponent extremes,
+bit-exact disabled bypass, and all sixteen shared-buffer slots. Maximum
+relative error was 1.20e-7. The D3D12 debug layer was unavailable. The translated
+movie draw remains byte-identical to its previous 1280 x 720 output, and the
+persistent upload/presentation tests pass with the new shaders. All 187 captured
+shaders still compile/link; forward/reverse patch checks reproduce the tested
+sources. Live scene color draws, full sampler-state mapping and matched frame
+comparisons remain unfinished.
+
 `tools/check_mc2_shaders.py` passes synthetic checks for stage-aware deduplication,
 little-endian dump matching to an unaligned embedded container, feature counting,
 absent reflection, truncated/overflowing metadata extents, and malformed dumps.
@@ -200,5 +244,5 @@ The actual corpus inventory and Disc 1 scan completed without changing their
 inputs. The pinned XenosRecomp and its pinned submodules also built successfully
 with Clang 19.1.5 on Windows x64, with DXIL support enabled. The local executable
 is `out/native-renderer/xenosrecomp-build/XenosRecomp/XenosRecomp.exe`; its
-no-argument usage smoke check passed. The fresh capture run and offline compilation
-results above were subsequently added; native rendering remains unverified.
+no-argument usage smoke check passed. Subsequent capture, compilation and bounded
+native checks are described above; complete native scene rendering remains unverified.

@@ -9,6 +9,15 @@ namespace mc2::native {
 namespace {
 void Require(bool value,const char* message) { if (!value) throw std::runtime_error(message); }
 }
+uint32_t PackTextureFetchMode(uint32_t swizzle,uint32_t gamma_mask,int32_t exp_adjust) {
+    Require(swizzle<4096 && gamma_mask<16 && exp_adjust>=-32 && exp_adjust<=31,"Invalid native texture interpretation");
+    for (uint32_t component=0;component<4;++component) {
+        const auto selector=(swizzle>>(component*3))&7;
+        Require(selector<6,"Reserved native texture swizzle selector");
+        Require(selector<4 || !(gamma_mask&(1u<<component)),"Constant texture swizzle cannot have gamma interpretation");
+    }
+    return 0x80000000u|swizzle|(gamma_mask<<12)|((uint32_t(exp_adjust)&63)<<16);
+}
 struct SampledTexture::Impl {
     struct Mip {
         uint32_t width,height,rows,row_bytes,pitch;
