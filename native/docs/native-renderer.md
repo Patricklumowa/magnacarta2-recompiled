@@ -40,6 +40,11 @@ An optional live path now completes its two-sample clear, indexed draw and the
 following tiled HDR color clear before stopping at the first color draw.
 Full live scene composition is not implemented.
 
+Native BC1/BC3 texture uploads also preserve all captured mip levels. GPU
+readback of the first color draw's two textures matches every compressed byte.
+This is storage validation; native color drawing and texture sampling remain
+unfinished. See [compressed scene textures](native-depth.md#compressed-scene-textures).
+
 The optional bounded live movie comparison uses the same native drawing code
 on live guest inputs. Two movie draws passed the CPU comparison during a clean
 boot; the original renderer remains enabled and still owns game presentation.

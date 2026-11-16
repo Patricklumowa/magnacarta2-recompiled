@@ -149,3 +149,33 @@ the layout, predicate, scissor, clear color and cached attachment state.
 A live run with the Xenos DLL physically unavailable completed the first depth
 draw and this HDR tile clear, then stopped at the first color draw. That is a
 bounded runtime checkpoint, not a rendered scene or full-frame parity result.
+
+## Compressed scene textures
+
+`SampledTexture` uploads native-order BC1/BC3 blocks into an immutable D3D12
+texture with every supplied mip level. It keeps compression, aligns transfer
+rows to 256 bytes and subresources to 512 bytes, then completes a real fence
+before releasing the temporary upload. The texture remains ready for shader
+reads; optional diagnostic readback restores that state after copying.
+
+Top-level extents must be multiples of four and at most 8192 per dimension;
+transfer storage is bounded to 64 MiB. Smaller mip levels may have partial
+blocks. Input format, mip count and every payload extent are checked before
+allocating or submitting GPU work. Swizzle, filtering, exponent adjustment and
+the game's gamma conversion are not performed by this storage component.
+
+```text
+mc2_native_texture_check
+mc2_native_texture_check <first-color-draw-capture>/textures
+```
+
+The check independently queries D3D12's copy footprints and verifies GPU
+roundtrips for both formats, non-square sizes, partial edge blocks, tiny mip
+tails, independent retained textures and invalid inputs. The captured first
+color draw's two 64 x 64 textures each have seven mip levels; all fourteen
+uploaded levels read back byte-for-byte correctly. The D3D12 debug layer was
+unavailable. This validates storage, not filtering, pixel shading or a complete
+native color pass. No game-derived texture payload is included in the repository.
+
+Transfer alignment follows Microsoft's
+[texture upload documentation](https://learn.microsoft.com/en-us/windows/win32/direct3d12/upload-and-readback-of-texture-data).
