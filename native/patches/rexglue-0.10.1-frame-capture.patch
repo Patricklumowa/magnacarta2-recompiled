@@ -1,0 +1,109 @@
+--- a/src/kernel/xboxkrnl/xboxkrnl_video.cpp
++++ b/src/kernel/xboxkrnl/xboxkrnl_video.cpp
+@@ -15,10 +15,13 @@
+ #include <algorithm>
+ #include <atomic>
+ #include <chrono>
++#include <filesystem>
++#include <fstream>
+ #include <mutex>
+ #include <string>
+ 
+ #include <rex/cvar.h>
++#include <rex/graphics/guest_frame_csv.h>
+ #include <rex/graphics/pipeline/texture/info.h>
+ #include <rex/graphics/register_file.h>
+ #include <rex/graphics/video_mode_util.h>
+@@ -36,6 +39,8 @@
+ #include <rex/ui/flags.h>
+ 
+ REXCVAR_DEFINE_BOOL(guest_frame_stats, false, "GPU", "Log actual guest frame submission timing");
++REXCVAR_DEFINE_STRING(guest_frame_csv, "", "GPU",
++                     "Local CSV of guest submission intervals; set before launch, existing files are refused");
+ 
+ namespace {
+ // Display gamma type: 0 - linear, 1 - sRGB (CRT), 2 - BT.709 (HDTV), 3 - power
+@@ -44,13 +49,33 @@
+ constexpr double kDisplayGammaPower = 2.22222233;
+ 
+ void RecordGuestFrame() {
+-  if (!REXCVAR_GET(guest_frame_stats)) return;
++  const auto& csv_path = REXCVAR_GET(guest_frame_csv);
++  if (!REXCVAR_GET(guest_frame_stats) && csv_path.empty()) return;
+   using Clock = std::chrono::steady_clock;
+   static std::mutex mutex;
+   static Clock::time_point start, previous;
+   static uint64_t intervals = 0;
+   static double worst_ms = 0;
+   std::lock_guard lock(mutex);
++  // The destination is latched at the first captured submission. Never overwrite
++  // a previous benchmark and never flush to disk on every frame.
++  if (!csv_path.empty()) {
++    static std::ofstream csv;
++    static bool attempted = false;
++    if (!attempted) {
++      attempted = true;
++      std::error_code error;
++      const auto path = std::filesystem::u8path(csv_path);
++      if (!std::filesystem::exists(path, error) && !error) csv.open(path);
++      if (!csv.is_open()) {
++        REXKRNL_WARN("Guest frame CSV unavailable (existing file or invalid destination): {}", csv_path);
++        csv.setstate(std::ios::badbit);
++      }
++    }
++    static rex::graphics::GuestFrameCsv capture(csv);
++    capture.Record(Clock::now());
++  }
++  if (!REXCVAR_GET(guest_frame_stats)) return;
+   const auto now = Clock::now();
+   if (previous == Clock::time_point{}) {
+     start = previous = now;
+--- /dev/null
++++ b/include/rex/graphics/guest_frame_csv.h
+@@ -0,0 +1,46 @@
++// MC2 diagnostic patch: record guest submissions, not GPU completions or presents.
++#pragma once
++
++#include <chrono>
++#include <cstdint>
++#include <fstream>
++#include <iomanip>
++#include <ostream>
++
++namespace rex::graphics {
++// Caller serializes access. The first submission establishes the clock origin.
++// No per-frame allocation or flush; bounded captures stop without affecting GPU work.
++class GuestFrameCsv {
++ public:
++  using Clock = std::chrono::steady_clock;
++  explicit GuestFrameCsv(std::ostream& output, uint64_t limit = 36000)
++      : output_(output), limit_(limit) {
++    output_ << "frame_index,elapsed_seconds,guest_frame_ms\n";
++  }
++
++  void Record(Clock::time_point now) {
++    if (count_ >= limit_ || !output_) return;
++    if (!started_) {
++      started_ = true;
++      start_ = previous_ = now;
++      return;
++    }
++    // steady_clock cannot regress in production; reject bad injected samples.
++    if (now <= previous_) return;
++    const double interval = std::chrono::duration<double, std::milli>(now - previous_).count();
++    const double elapsed = std::chrono::duration<double>(now - start_).count();
++    previous_ = now;
++    output_ << ++count_ << ',' << std::fixed << std::setprecision(9) << elapsed
++            << ',' << std::setprecision(6) << interval << '\n';
++    if (count_ % 120 == 0 || count_ == limit_) output_.flush();
++  }
++
++  uint64_t count() const { return count_; }
++
++ private:
++  std::ostream& output_;
++  uint64_t limit_, count_ = 0;
++  bool started_ = false;
++  Clock::time_point start_{}, previous_{};
++};
++}  // namespace rex::graphics

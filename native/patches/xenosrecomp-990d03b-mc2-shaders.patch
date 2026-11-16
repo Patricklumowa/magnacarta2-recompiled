@@ -1,0 +1,492 @@
+diff --git a/XenosRecomp/CMakeLists.txt b/XenosRecomp/CMakeLists.txt
+index e505a5e..4a6d712 100644
+--- a/XenosRecomp/CMakeLists.txt
++++ b/XenosRecomp/CMakeLists.txt
+@@ -51,3 +51,14 @@ if (XENOS_RECOMP_DXIL)
+     target_compile_definitions(XenosRecomp PRIVATE XENOS_RECOMP_DXIL)
+     target_link_libraries(XenosRecomp PRIVATE Microsoft::DXIL)
+ endif()
++
++option(XENOS_RECOMP_BUILD_CHECKS "Build synthetic shader translation checks" OFF)
++if (XENOS_RECOMP_BUILD_CHECKS)
++    add_executable(XenosRecompCheck shader_recompiler_check.cpp shader_recompiler.cpp)
++    target_link_libraries(XenosRecompCheck PRIVATE Microsoft::DirectXShaderCompiler xxHash::xxhash libzstd_static fmt::fmt)
++    target_include_directories(XenosRecompCheck PRIVATE ${SMOLV_SOURCE_DIR})
++    target_precompile_headers(XenosRecompCheck PRIVATE pch.h)
++    if (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
++        target_compile_options(XenosRecompCheck PRIVATE -fms-extensions)
++    endif()
++endif()
+diff --git a/XenosRecomp/shader_recompiler.cpp b/XenosRecomp/shader_recompiler.cpp
+index 698a418..dd53995 100644
+--- a/XenosRecomp/shader_recompiler.cpp
++++ b/XenosRecomp/shader_recompiler.cpp
+@@ -1,5 +1,6 @@
+ #include "shader_recompiler.h"
+ #include "shader_common.h"
++#include <stdexcept>
+ 
+ static constexpr char SWIZZLES[] = 
+ { 
+@@ -130,6 +131,14 @@ static FetchDestinationSwizzle getDestSwizzle(uint32_t dstSwizzle, uint32_t inde
+     return FetchDestinationSwizzle((dstSwizzle >> (index * 3)) & 0x7);
+ }
+ 
++static bool hasFetchSourceComponents(uint32_t dstSwizzle)
++{
++    for (uint32_t i = 0; i < 4; i++)
++        if (getDestSwizzle(dstSwizzle, i) <= FetchDestinationSwizzle::W)
++            return true;
++    return false;
++}
++
+ void ShaderRecompiler::printDstSwizzle(uint32_t dstSwizzle, bool operand)
+ {
+     for (size_t i = 0; i < 4; i++)
+@@ -170,48 +179,52 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
+         ++indentation;
+     }
+ 
+-    indent();
+-    print("r{}.", instr.dstRegister);
+-    printDstSwizzle(instr.dstSwizzle, false);
++    if (hasFetchSourceComponents(instr.dstSwizzle))
++    {
++        indent();
++        print("r{}.", instr.dstRegister);
++        printDstSwizzle(instr.dstSwizzle, false);
+ 
+-    out += " = ";
++        out += " = ";
+ 
+-    auto findResult = vertexElements.find(address);
+-    assert(findResult != vertexElements.end());
++        auto findResult = vertexElements.find(address);
++        assert(findResult != vertexElements.end());
+ 
+-    switch (findResult->second.usage)
+-    {
+-    case DeclUsage::Normal:
+-    case DeclUsage::Tangent:
+-    case DeclUsage::Binormal:
+-        specConstantsMask |= SPEC_CONSTANT_R11G11B10_NORMAL;
+-        print("tfetchR11G11B10(");
+-        break;
++        switch (findResult->second.usage)
++        {
++        case DeclUsage::Normal:
++        case DeclUsage::Tangent:
++        case DeclUsage::Binormal:
++            specConstantsMask |= SPEC_CONSTANT_R11G11B10_NORMAL;
++            print("tfetchR11G11B10(");
++            break;
+ 
+-    case DeclUsage::TexCoord:
+-        print("tfetchTexcoord(g_SwappedTexcoords, ");
+-        break;
+-    }
++        case DeclUsage::TexCoord:
++            print("tfetchTexcoord(g_SwappedTexcoords, ");
++            break;
++        }
+ 
+-    print("i{}{}", USAGE_VARIABLES[uint32_t(findResult->second.usage)], uint32_t(findResult->second.usageIndex));
++        print("i{}{}", USAGE_VARIABLES[uint32_t(findResult->second.usage)], uint32_t(findResult->second.usageIndex));
+ 
+-    switch (findResult->second.usage)
+-    {
+-    case DeclUsage::Normal:
+-    case DeclUsage::Tangent:
+-    case DeclUsage::Binormal:
+-        out += ')';
+-        break;
++        switch (findResult->second.usage)
++        {
++        case DeclUsage::Normal:
++        case DeclUsage::Tangent:
++        case DeclUsage::Binormal:
++            out += ')';
++            break;
+ 
+-    case DeclUsage::TexCoord:
+-        print(", {})", uint32_t(findResult->second.usageIndex));
+-        break;
+-    }
++        case DeclUsage::TexCoord:
++            print(", {})", uint32_t(findResult->second.usageIndex));
++            break;
++        }
++
++        out += '.';
++        printDstSwizzle(instr.dstSwizzle, true);
+ 
+-    out += '.';
+-    printDstSwizzle(instr.dstSwizzle, true);
++        out += ";\n";
+ 
+-    out += ";\n";
++    }
+ 
+     printDstSwizzle01(instr.dstRegister, instr.dstSwizzle);
+ 
+@@ -255,7 +268,7 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+     auto findResult = samplers.find(instr.constIndex);
+     if (findResult != samplers.end())
+     {
+-        constNamePtr = findResult->second;
++        constNamePtr = findResult->second.c_str();
+ 
+     #ifdef UNLEASHED_RECOMP
+         subtractFromOne = hasMtxPrevInvViewProjection && strcmp(constNamePtr, "sampZBuffer") == 0;
+@@ -277,78 +290,82 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+     }
+ #endif
+ 
+-    indent();
+-    print("r{}.", instr.dstRegister);
+-    printDstSwizzle(instr.dstSwizzle, false);
+-
+-    out += " = ";
+-    switch (instr.opcode)
+-    {
+-    case FetchOpcode::TextureFetch:
++    if (hasFetchSourceComponents(instr.dstSwizzle))
+     {
+-    #ifdef UNLEASHED_RECOMP
+-        if (subtractFromOne)
+-            out += "1.0 - ";
+-    #endif
++        indent();
++        print("r{}.", instr.dstRegister);
++        printDstSwizzle(instr.dstSwizzle, false);
+ 
+-        out += "tfetch";
+-        break;
+-    }
+-    case FetchOpcode::GetTextureWeights:
+-    {
+-        out += "getWeights";
+-        break;
+-    }
+-    }
++        out += " = ";
++        switch (instr.opcode)
++        {
++        case FetchOpcode::TextureFetch:
++        {
++        #ifdef UNLEASHED_RECOMP
++            if (subtractFromOne)
++                out += "1.0 - ";
++        #endif
++
++            out += "tfetch";
++            break;
++        }
++        case FetchOpcode::GetTextureWeights:
++        {
++            out += "getWeights";
++            break;
++        }
++        }
+ 
+-    std::string_view dimension;
+-    uint32_t componentCount = 0;
++        std::string_view dimension;
++        uint32_t componentCount = 0;
+ 
+-    switch (instr.dimension)
+-    {
+-    case TextureDimension::Texture1D:
+-        dimension = "1D";
+-        componentCount = 1;
+-        break;
+-    case TextureDimension::Texture2D:
+-        dimension = "2D";
+-        componentCount = 2;
+-        break;
+-    case TextureDimension::Texture3D:
+-        dimension = "3D";
+-        componentCount = 3;
+-        break;
+-    case TextureDimension::TextureCube:
+-        dimension = "Cube";
+-        componentCount = 3;
+-        break;
+-    }
++        switch (instr.dimension)
++        {
++        case TextureDimension::Texture1D:
++            dimension = "1D";
++            componentCount = 1;
++            break;
++        case TextureDimension::Texture2D:
++            dimension = "2D";
++            componentCount = 2;
++            break;
++        case TextureDimension::Texture3D:
++            dimension = "3D";
++            componentCount = 3;
++            break;
++        case TextureDimension::TextureCube:
++            dimension = "Cube";
++            componentCount = 3;
++            break;
++        }
+ 
+-    out += dimension;
++        out += dimension;
+ 
+-#ifdef UNLEASHED_RECOMP
+-    if (bicubic)
+-        out += "Bicubic";
+-#endif
++    #ifdef UNLEASHED_RECOMP
++        if (bicubic)
++            out += "Bicubic";
++    #endif
+ 
+-    print("({0}_Texture{1}DescriptorIndex, {0}_SamplerDescriptorIndex, ", constNamePtr, dimension);
+-    printSrcRegister(componentCount);
++        print("({0}_Texture{1}DescriptorIndex, {0}_SamplerDescriptorIndex, ", constNamePtr, dimension);
++        printSrcRegister(componentCount);
+ 
+-    switch (instr.dimension)
+-    {
+-    case TextureDimension::Texture2D:
+-        print(", float2({}, {})", instr.offsetX * 0.5f, instr.offsetY * 0.5f);
+-        break;
+-    case TextureDimension::TextureCube:
+-        out += ", cubeMapData";
+-        break;
+-    }
++        switch (instr.dimension)
++        {
++        case TextureDimension::Texture2D:
++            print(", float2({}, {})", instr.offsetX * 0.5f, instr.offsetY * 0.5f);
++            break;
++        case TextureDimension::TextureCube:
++            out += ", cubeMapData";
++            break;
++        }
+ 
+-    out += ").";
++        out += ").";
+ 
+-    printDstSwizzle(instr.dstSwizzle, true);
++        printDstSwizzle(instr.dstSwizzle, true);
+ 
+-    out += ";\n";
++        out += ";\n";
++
++    }
+ 
+     printDstSwizzle01(instr.dstRegister, instr.dstSwizzle);
+ 
+@@ -1171,16 +1188,30 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+ 
+         case RegisterSet::Sampler:
+         {
+-            for (size_t j = 0; j < std::size(TEXTURE_DIMENSIONS); j++)
++            // Each descriptor dimension occupies sixteen uint slots, followed
++            // by the sixteen sampler slots. Reject ranges that would overlap.
++            const uint32_t firstRegister = constantInfo->registerIndex;
++            const uint32_t registerCount = constantInfo->registerCount;
++            if (firstRegister >= 16 || registerCount == 0 || registerCount > 16 - firstRegister)
++                throw std::runtime_error(fmt::format(
++                    "Sampler '{}' uses register {} with count {}; the shared-constant layout supports only 16 slots (0..15). Extend the descriptor layout before translating this shader.",
++                    constantName, firstRegister, registerCount));
++            for (uint32_t element = 0; element < constantInfo->registerCount; element++)
+             {
+-                println("#define {}_Texture{}DescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + {})",
+-                    constantName, TEXTURE_DIMENSIONS[j], j * 64 + constantInfo->registerIndex * 4);
+-            }
++                const uint32_t index = constantInfo->registerIndex + element;
++                const std::string name = constantInfo->registerCount > 1
++                    ? fmt::format("{}_{}", constantName, element) : constantName;
++                for (size_t j = 0; j < std::size(TEXTURE_DIMENSIONS); j++)
++                {
++                    println("#define {}_Texture{}DescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + {})",
++                        name, TEXTURE_DIMENSIONS[j], j * 64 + index * 4);
++                }
+ 
+-            println("#define {}_SamplerDescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + {})",
+-                constantName, std::size(TEXTURE_DIMENSIONS) * 64 + constantInfo->registerIndex * 4);
++                println("#define {}_SamplerDescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + {})",
++                    name, std::size(TEXTURE_DIMENSIONS) * 64 + index * 4);
+ 
+-            samplers.emplace(constantInfo->registerIndex, constantName);
++                samplers.emplace(index, name);
++            }
+             break;
+         }
+ 
+@@ -1228,16 +1259,19 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+ 
+         if (constantInfo->registerSet == RegisterSet::Sampler)
+         {
+-            const char* constantName = reinterpret_cast<const char*>(constantTableData + constantInfo->name);
+-
+-            for (size_t j = 0; j < std::size(TEXTURE_DIMENSIONS); j++)
++            for (uint32_t element = 0; element < constantInfo->registerCount; element++)
+             {
+-                println("\tuint {}_Texture{}DescriptorIndex : packoffset(c{}.{});",
+-                    constantName, TEXTURE_DIMENSIONS[j], j * 4 + constantInfo->registerIndex / 4, SWIZZLES[constantInfo->registerIndex % 4]);
+-            }
++                const uint32_t index = constantInfo->registerIndex + element;
++                const auto& name = samplers.at(index);
++                for (size_t j = 0; j < std::size(TEXTURE_DIMENSIONS); j++)
++                {
++                    println("\tuint {}_Texture{}DescriptorIndex : packoffset(c{}.{});",
++                        name, TEXTURE_DIMENSIONS[j], j * 4 + index / 4, SWIZZLES[index % 4]);
++                }
+ 
+-            println("\tuint {}_SamplerDescriptorIndex : packoffset(c{}.{});",
+-                constantName, 4 * std::size(TEXTURE_DIMENSIONS) + constantInfo->registerIndex / 4, SWIZZLES[constantInfo->registerIndex % 4]);
++                println("\tuint {}_SamplerDescriptorIndex : packoffset(c{}.{});",
++                    name, 4 * std::size(TEXTURE_DIMENSIONS) + index / 4, SWIZZLES[index % 4]);
++            }
+         }
+     }
+ 
+diff --git a/XenosRecomp/shader_recompiler.h b/XenosRecomp/shader_recompiler.h
+index b2e317d..f939308 100644
+--- a/XenosRecomp/shader_recompiler.h
++++ b/XenosRecomp/shader_recompiler.h
+@@ -30,7 +30,7 @@ struct ShaderRecompiler : StringBuffer
+     std::unordered_map<uint32_t, std::string> interpolators;
+     std::unordered_map<uint32_t, const ConstantInfo*> float4Constants;
+     std::unordered_map<uint32_t, const char*> boolConstants;
+-    std::unordered_map<uint32_t, const char*> samplers;
++    std::unordered_map<uint32_t, std::string> samplers;
+     std::unordered_map<uint32_t, uint32_t> ifEndLabels;
+     uint32_t specConstantsMask = 0;
+ 
+diff --git a/XenosRecomp/shader_recompiler_check.cpp b/XenosRecomp/shader_recompiler_check.cpp
+new file mode 100644
+index 0000000..d0f3e97
+--- /dev/null
++++ b/XenosRecomp/shader_recompiler_check.cpp
+@@ -0,0 +1,123 @@
++// Synthetic fixtures only. No game shaders or generated game code.
++#include "shader_recompiler.h"
++#include <array>
++#include <cstring>
++#include <stdexcept>
++
++static void require(bool condition, const char* message)
++{
++    if (!condition)
++        throw std::runtime_error(message);
++}
++
++static uint32_t swizzle(uint32_t x, uint32_t y, uint32_t z, uint32_t w)
++{
++    return x | (y << 3) | (z << 6) | (w << 9);
++}
++
++static void checkFetches()
++{
++    VertexFetchInstruction vertex{};
++    vertex.dstRegister = 5;
++    vertex.dstSwizzle = swizzle(7, 7, 7, 7);
++    ShaderRecompiler masked;
++    masked.recompile(vertex, 9);
++    require(masked.out.empty(), "Masked vertex fetch wrote a register");
++
++    vertex.dstSwizzle = swizzle(4, 5, 7, 7);
++    vertex.isPredicated = 1;
++    ShaderRecompiler constants;
++    constants.recompile(vertex, 9);
++    require(constants.out == "if (!p0)\n{\n\tr5.x = 0.0;\n\tr5.y = 1.0;\n}\n",
++        "Predicated constant writes changed");
++
++    vertex.isPredicated = 0;
++    vertex.dstSwizzle = swizzle(1, 4, 7, 5);
++    ShaderRecompiler mixed;
++    VertexElement element{};
++    element.usage = DeclUsage::Position;
++    mixed.vertexElements.emplace(9, element);
++    mixed.recompile(vertex, 9);
++    require(mixed.out == "r5.x = iPosition0.y;\nr5.y = 0.0;\nr5.w = 1.0;\n",
++        "Mixed source, constant, and keep components changed");
++
++    TextureFetchInstruction texture{};
++    texture.opcode = FetchOpcode::TextureFetch;
++    texture.dimension = TextureDimension::Texture2D;
++    texture.dstRegister = 5;
++    texture.dstSwizzle = swizzle(7, 7, 7, 7);
++    ShaderRecompiler textureMasked;
++    textureMasked.recompile(texture, false);
++    require(textureMasked.out.empty(), "Masked texture fetch wrote a register");
++    texture.dstSwizzle = swizzle(4, 5, 7, 7);
++    ShaderRecompiler textureConstants;
++    textureConstants.recompile(texture, false);
++    require(textureConstants.out == "r5.x = 0.0;\nr5.y = 1.0;\n",
++        "Texture constant writes changed");
++}
++
++static void checkSamplers(uint16_t count, uint16_t first = 3)
++{
++    // A minimal container with one sampler reflection entry and no instructions.
++    std::array<uint8_t, 268> data{};
++    auto put32 = [&](size_t offset, uint32_t value) {
++        for (size_t i = 0; i < 4; i++)
++            data[offset + i] = uint8_t(value >> (24 - 8 * i));
++    };
++    put32(0, 0x102A1100);
++    put32(4, 256);
++    put32(8, 12);
++    put32(16, 36);
++    put32(24, 200);
++    put32(36, 60);
++    put32(40, 28);
++    put32(52, 1); // Constant count.
++    put32(56, 28); // Entry offset relative to constant table at 40.
++    put32(68, 48); // Name offset relative to the same table.
++    put32(72, (uint32_t(RegisterSet::Sampler) << 16) | first);
++    put32(76, uint32_t(count) << 16);
++    std::memcpy(data.data() + 88, "Array", 6);
++    put32(228, PIXEL_SHADER_OUTPUT_COLOR0);
++    ShaderRecompiler recompiler;
++    recompiler.recompile(data.data(), "");
++    require(recompiler.samplers.size() == count, "Sampler reflection range lost");
++    for (uint32_t i = 0; i < count; i++)
++    {
++        const uint32_t index = first + i;
++        const auto name = count > 1 ? fmt::format("Array_{}", i) : "Array";
++        require(recompiler.samplers.at(index) == name, "Sampler register mapped to wrong name");
++        const auto vulkan = fmt::format("#define {}_Texture2DDescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + {})", name, index * 4);
++        require(recompiler.out.find(vulkan) != std::string::npos, "Vulkan sampler slot incorrect");
++        const auto dxil = fmt::format("uint {}_Texture2DDescriptorIndex : packoffset(c{}.{});", name, index / 4, "xyzw"[index % 4]);
++        require(recompiler.out.find(dxil) != std::string::npos, "DXIL sampler slot incorrect");
++    }
++    TextureFetchInstruction fetch{};
++    fetch.opcode = FetchOpcode::TextureFetch;
++    fetch.dimension = TextureDimension::Texture2D;
++    fetch.constIndex = first + count - 1;
++    fetch.dstSwizzle = swizzle(0, 1, 2, 3);
++    recompiler.out.clear();
++    recompiler.recompile(fetch, false);
++    const auto name = count > 1 ? fmt::format("Array_{}", count - 1) : "Array";
++    require(recompiler.out.find(fmt::format("tfetch2D({0}_Texture2DDescriptorIndex, {0}_SamplerDescriptorIndex", name)) != std::string::npos,
++        "Last array element did not use its reflected sampler slot");
++}
++
++int main()
++{
++    checkFetches();
++    checkSamplers(1);
++    checkSamplers(3);
++    checkSamplers(1, 15);
++    for (auto [count, first] : {std::pair<uint16_t, uint16_t>{2, 15}, {1, 16}, {0, 3}})
++    {
++        bool rejected = false;
++        try { checkSamplers(count, first); }
++        catch (const std::runtime_error& error)
++        {
++            rejected = std::string(error.what()).find("supports only 16 slots") != std::string::npos;
++        }
++        require(rejected, "Unsupported sampler range was not explicitly rejected");
++    }
++    puts("PASS: sampler arrays and bounds, masked fetches, constant writes, predication");
++}

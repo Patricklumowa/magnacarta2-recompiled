@@ -16,6 +16,8 @@
 !/native/patches/
 !/native/src/
 !/native/tests/
+!/native/docs/
+!/native/cmake/
 
 # This is SDK build glue, not recompiled game code.
 /native/generated/*
@@ -44,6 +46,9 @@ CMakeUserPresets.json
 *.pdb
 *.ilk
 *.bin
+*.container
+*.dxil
+*.spv
 *.iso
 *.xex
 *.xbe

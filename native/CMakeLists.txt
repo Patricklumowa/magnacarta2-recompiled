@@ -16,6 +16,7 @@ set(MAGNACARTA2_SOURCES
     src/magnacarta2_app.cpp
     src/frame_pacing.cpp
     src/graphics_copy.cpp
+    src/shader_capture.cpp
     src/math_polyfill.cpp
 )
 
@@ -38,6 +39,20 @@ endif()
 
 add_executable(mc2_math_check EXCLUDE_FROM_ALL
     tests/math_polyfill_check.cpp src/math_polyfill.cpp)
+
+add_executable(mc2_shader_capture_check EXCLUDE_FROM_ALL tests/shader_capture_check.cpp)
+add_executable(mc2_shader_capture_hook_check EXCLUDE_FROM_ALL
+    tests/shader_capture_hook_check.cpp src/shader_capture.cpp)
+target_include_directories(mc2_shader_capture_hook_check PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(mc2_shader_capture_hook_check PRIVATE rex::runtime)
+set_target_properties(mc2_shader_capture_hook_check PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${MC2_RUN_DIR}")
+
+# The diagnostic header is installed by the frame-capture runtime patch.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty/rexglue-sdk/include/rex/graphics/guest_frame_csv.h")
+    add_executable(mc2_frame_csv_check EXCLUDE_FROM_ALL tests/guest_frame_csv_check.cpp)
+    target_include_directories(mc2_frame_csv_check PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty/rexglue-sdk/include")
+endif()
 
 add_executable(mc2_controller_check EXCLUDE_FROM_ALL tests/controller_poll_check.cpp)
 target_link_libraries(mc2_controller_check PRIVATE rex::runtime)

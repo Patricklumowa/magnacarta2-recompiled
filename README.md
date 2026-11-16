@@ -150,6 +150,11 @@ The current priorities are consistent frame delivery while preserving the origin
 
 Experimental shader output/sample specialization and the fast constant-copy hook remain opt-in. Their presence in the source does not establish a validated whole-game improvement. GPU timing capture is also off by default.
 
+Native graphics migration has started with opt-in original shader capture, a
+verified partial graphics map, and raw guest-submission timing. These are
+diagnostics; the game still renders through Xenos. See the
+[implementation status and capture workflow](native/docs/native-renderer.md).
+
 ## Development
 
 | Path | Purpose |
@@ -186,6 +191,8 @@ Commit source, build configuration, patches, and documentation only. Do not comm
 - [Xenia](https://github.com/xenia-project/xenia) provides foundational Xbox 360 research and technology incorporated into ReXGlue.
 - [SIMDe](https://github.com/simd-everywhere/simde) provides portable SIMD support used by the toolchain.
 - [Unleashed Recompiled](https://github.com/hedge-dev/UnleashedRecomp) is a reference for the wider Xbox 360 recompilation effort and project documentation.
+- [XenosRecomp](https://github.com/hedge-dev/XenosRecomp) supplies the shader-conversion tool being evaluated for native graphics; MC2 shader compatibility is not yet established.
+- [plume](https://github.com/renderbag/plume) is the cross-platform rendering library evaluated for the planned native bridge.
 
 Third-party source and patch context retain their upstream terms; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). A project-wide license for original contributions has not yet been selected.
 
