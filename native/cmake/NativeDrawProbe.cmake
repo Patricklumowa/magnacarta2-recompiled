@@ -34,6 +34,7 @@ target_link_libraries(mc2_probe_plume PUBLIC d3d12 dxgi dxguid)
 add_library(mc2_native_quad STATIC "${MC2_PROBE_NATIVE_DIR}/src/native_quad.cpp"
     "${MC2_PROBE_NATIVE_DIR}/src/native_device.cpp"
     "${MC2_PROBE_NATIVE_DIR}/src/native_vertex_layout.cpp"
+    "${MC2_PROBE_NATIVE_DIR}/src/native_color_target.cpp"
     "${MC2_PROBE_NATIVE_DIR}/src/native_depth.cpp")
 target_include_directories(mc2_native_quad PUBLIC "${MC2_PROBE_NATIVE_DIR}/src")
 target_link_libraries(mc2_native_quad PUBLIC mc2_probe_plume)
@@ -45,4 +46,6 @@ if(MC2_BUILD_NATIVE_DRAW_PROBE)
     target_link_libraries(mc2_native_quad_check PRIVATE mc2_native_quad)
     add_executable(mc2_native_depth_check EXCLUDE_FROM_ALL "${MC2_PROBE_NATIVE_DIR}/tests/native_depth_check.cpp")
     target_link_libraries(mc2_native_depth_check PRIVATE mc2_native_quad)
+    add_executable(mc2_native_color_check EXCLUDE_FROM_ALL "${MC2_PROBE_NATIVE_DIR}/tests/native_color_check.cpp")
+    target_link_libraries(mc2_native_color_check PRIVATE mc2_native_quad)
 endif()

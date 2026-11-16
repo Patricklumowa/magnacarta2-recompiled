@@ -17,7 +17,7 @@ template<class F> void Reject(F&& action) {
 int main(int argc,char** argv) try {
     using namespace mc2::native;
     using mc2::capture::LoadBE32;
-    Check(argc==3,"Usage: mc2_native_scene_check <captured-depth-draw-directory> <verified-depth-shader-directory>");
+    Check(argc==3 || argc==4,"Usage: mc2_native_scene_check <captured-depth-draw-directory> <verified-depth-shader-directory> [captured-color-draw-directory]");
     const std::filesystem::path capture(argv[1]);
     const auto shaders=LoadDepthShaders(argv[2]);
     std::array<uint8_t,65536> memory{};
@@ -68,6 +68,33 @@ int main(int argc,char** argv) try {
     context.f1.f64=1; Reject([&] { ReadDepthClear(context,base); }); context.f1.f64=0;
     store(0x108,640); Reject([&] { ReadDepthClear(context,base); }); store(0x108,1280);
     context.r4.u32=0xf; Reject([&] { ReadDepthClear(context,base); });
+    if (argc==4) {
+        const std::filesystem::path color_capture(argv[3]);
+        constexpr uint32_t color_surface=0x8300;
+        copy(device,ReadNativeFile(color_capture/"device.bin"));
+        copy(color_surface,ReadNativeFile(color_capture/"targets/color-0.descriptor.bin"));
+        copy(surface,ReadNativeFile(color_capture/"targets/depth.descriptor.bin"));
+        for (uint32_t offset:{12448,12732,12736}) store(device+offset,color_surface);
+        for (uint32_t offset:{12464,12752}) store(device+offset,surface);
+        // The following captured draw has automatic predication. Reconstruct
+        // the immediately preceding clear's explicit first-tile selection,
+        // observed live and written by the engine's begin-frame routine.
+        store(device+12724,1); store(device+12716,2); store(device+10932,2);
+        context.r6.u32=0x200;
+        for (uint32_t i=0;i<4;++i) store(0x200+i*4,0);
+        const auto original_color=memory; const auto color_context=context;
+        const auto hdr=ReadSceneColorClear(context,base);
+        Check(hdr.surface.width==1280 && hdr.surface.height==720 && hdr.surface.samples==2 &&
+              hdr.surface.address==color_surface && hdr.rectangle==plume::RenderRect(0,0,1280,512),
+              "Tile clear incorrectly used the physical extent or cleared the second tile");
+        Check(memory==original_color && !std::memcmp(&context,&color_context,sizeof(context)),"Color snapshot modified guest state");
+        for (const auto [offset,value]:std::array<std::pair<uint32_t,uint32_t>,7>{{
+            {13192,512},{12736,0},{12724,0},{12716,8},{12788,719},{10372,0},{11864,1}}}) {
+            store(device+offset,value); Reject([&] { ReadSceneColorClear(context,base); }); memory=original_color;
+        }
+        store(0x200,0x3f800000); Reject([&] { ReadSceneColorClear(context,base); }); memory=original_color;
+        store(0x108,640); Reject([&] { ReadSceneColorClear(context,base); });
+    }
     std::cout<<"PASS: captured scene input reconstruction, unchanged guest state, clear-to-draw surface identity and unsupported-state rejection\n";
     return 0;
 } catch (const std::exception& error) {

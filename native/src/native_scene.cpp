@@ -19,8 +19,8 @@ struct DeviceState {
     }
     uint32_t Word(uint32_t offset) const { return LoadBE32(bytes.data()+offset); }
     float Float(uint32_t offset) const { return std::bit_cast<float>(Word(offset)); }
-    DepthSurface Surface(uint8_t* base) const {
-        DepthSurface result;
+    SceneSurface Surface(uint8_t* base) const {
+        SceneSurface result;
         for (uint32_t i = 0; i < 4; ++i)
             Require(Word(12448+i*4) == 0, "Color-target scene passes are not implemented");
         result.address = Word(12464);
@@ -36,7 +36,7 @@ struct DeviceState {
         result.description.assign(descriptor.begin()+24,descriptor.end());
         return result;
     }
-    void FullViewport(const DepthSurface& surface) const {
+    void FullViewport(const SceneSurface& surface) const {
         Require(Float(12656) == 0 && Float(12660) == 0 && Float(12664) == surface.width &&
                 Float(12668) == surface.height && Word(11864) == 0,
                 "Scene viewport/scissor differs from the verified pass");
@@ -54,7 +54,7 @@ DepthShaders LoadDepthShaders(const std::filesystem::path& directory) {
             "Scene depth shader input layout differs from the verified shader");
     return shaders;
 }
-DepthConfiguration ConfigureDepth(const DepthSurface& surface, const DepthShaders& shaders) {
+DepthConfiguration ConfigureDepth(const SceneSurface& surface, const DepthShaders& shaders) {
     DepthConfiguration configuration;
     configuration.width=surface.width; configuration.height=surface.height; configuration.sample_count=surface.samples;
     configuration.vertex_shader=shaders.dxil; configuration.inputs=shaders.inputs;
@@ -71,6 +71,52 @@ DepthClear ReadDepthClear(const PPCContext& ctx, uint8_t* base) {
             "Only the verified full surface clear is supported");
     Require(std::isfinite(ctx.f1.f64) && ctx.f1.f64 == 0, "Scene clear value differs from the verified zero depth/stencil clear");
     clear.value=0;
+    return clear;
+}
+SceneColorClear ReadSceneColorClear(const PPCContext& ctx,uint8_t* base) {
+    Require(ctx.r4.u32==0xf,"Only the verified scene color clear is supported");
+    DeviceState state(base,ctx.r3.u32);
+    Require(state.Word(12448)!=0 && state.Word(12452)==0 && state.Word(12456)==0 && state.Word(12460)==0,
+            "Native color clear requires the verified single attachment");
+    SceneColorClear clear;
+    auto& surface=clear.surface;
+    surface.address=state.Word(12448);
+    std::vector<uint8_t> descriptor;
+    Require(ReadGuest(base,surface.address,48,descriptor) && (LoadBE32(descriptor.data())&15)==4,
+            "Invalid native color surface");
+    const auto info=LoadBE32(descriptor.data()+24), color_info=LoadBE32(descriptor.data()+28);
+    const auto dimensions=LoadBE32(descriptor.data()+36);
+    Require(((dimensions>>18)&16383)+1==1280 && ((dimensions>>3)&32767)+1==512 &&
+            (info&16383)==1280 && ((info>>16)&3)==1 && ((color_info>>16)&1023)==3 &&
+            (LoadBE32(descriptor.data()+40)&63)==63 && state.Word(10372)==color_info,
+            "Scene color surface differs from the verified two-sample HDR format");
+    Require((state.bytes[10940]&0x20)!=0 && state.Word(12756)==2 && state.Word(13196)==2 &&
+            state.Word(13188)==1280 && state.Word(13192)==720 &&
+            state.Word(12732)==surface.address && state.Word(12736)==surface.address &&
+            state.Word(12740)==0 && state.Word(12744)==0 && state.Word(12748)==0 &&
+            state.Word(12464)!=0 && state.Word(12752)==state.Word(12464),
+            "Scene color clear has an unsupported tiling configuration");
+    constexpr uint32_t tiles[]={0,0,1280,512,0,512,1280,720};
+    for (uint32_t i=0;i<std::size(tiles);++i)
+        Require(state.Word(12760+i*4)==tiles[i],"Scene tile rectangles changed");
+    // Engine begin-frame sets predicate bit 1 for the first tile before this
+    // clear. Other tiles are resolved/cleared later; never clear them early.
+    Require(state.Word(12724)==1 && state.Word(12716)==2 && state.Word(10932)==2,
+            "Scene color clear uses an unsupported tile predicate");
+    surface.width=1280; surface.height=720; surface.samples=2;
+    surface.description.assign(descriptor.begin()+24,descriptor.end());
+    state.FullViewport(surface);
+    std::vector<uint8_t> rect,color;
+    Require(ReadGuest(base,ctx.r5.u32,16,rect) && LoadBE32(rect.data())==0 && LoadBE32(rect.data()+4)==0 &&
+            LoadBE32(rect.data()+8)==1280 && LoadBE32(rect.data()+12)==720,"Scene color clear rectangle changed");
+    Require(ReadGuest(base,ctx.r6.u32 ? ctx.r6.u32 : 0x82247720,16,color),"Unreadable scene clear color");
+    for (uint32_t i=0;i<4;++i) {
+        clear.value.rgba[i]=std::bit_cast<float>(LoadBE32(color.data()+i*4));
+        // Zero is exact in both the original 7e3/2-bit-alpha format and native
+        // float16 storage. General HDR quantization/blending is still pending.
+        Require(clear.value.rgba[i]==0,"Only the verified zero HDR clear is supported");
+    }
+    clear.rectangle=plume::RenderRect(0,0,1280,512);
     return clear;
 }
 SceneDepthDraw ReadSceneDepthDraw(const PPCContext& ctx, uint8_t* base, const DepthShaders& shaders) {

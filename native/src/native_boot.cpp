@@ -5,10 +5,12 @@
 #include "native_boot.h"
 #include "native_movie.h"
 #include "native_scene.h"
+#include "native_color_target.h"
 #include "guest_graphics_read.h"
 #include <rex/cvar.h>
 #include <rex/hook.h>
 #include <atomic>
+#include <algorithm>
 #include <mutex>
 #include <optional>
 #include <bit>
@@ -32,8 +34,9 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     std::shared_ptr<NativeDevice> gpu;
     std::unique_ptr<QuadRenderer> renderer;
     std::optional<DepthShaders> depth_shaders;
-    std::optional<DepthSurface> depth_surface;
+    std::optional<SceneSurface> depth_surface,color_surface;
     std::unique_ptr<DepthRenderer> depth_renderer;
+    std::unique_ptr<ColorTarget> color_target;
     uint64_t depth_draws = 0;
     std::optional<QuadDraw> pending;
     HWND window = nullptr;
@@ -59,7 +62,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     bool has_presentation() const override { return true; }
     void Shutdown() override {
         std::lock_guard lock(mutex);
-        pending.reset(); renderer.reset(); depth_renderer.reset(); gpu.reset();
+        pending.reset(); renderer.reset(); depth_renderer.reset(); color_target.reset(); gpu.reset();
     }
     void SetInterruptCallback(uint32_t callback, uint32_t user_data) override {
         Require(callback == 0x8236D4E0 && user_data != 0, "Unexpected legacy graphics interrupt callback");
@@ -70,12 +73,26 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     }
     void EnableReadPointerWriteBack(uint32_t, uint32_t) override {}
 
-    bool ClearDepth(const PPCContext& ctx, uint8_t* base) {
+    bool Clear(const PPCContext& ctx, uint8_t* base) {
         if (!depth_shaders) return false;
         if (!(ctx.r4.u32 & 0x30)) {
+            {
+                std::lock_guard lock(mutex);
+                if (!depth_renderer) return false;
+            }
+            const auto clear=ReadSceneColorClear(ctx,base);
+            Flush(base,ctx.r3.u32);
             std::lock_guard lock(mutex);
-            Require(!depth_renderer, "Color clear after native scene depth is not implemented");
-            return false;
+            if (!color_target) {
+                color_target=std::make_unique<ColorTarget>(clear.surface.width,clear.surface.height,clear.surface.samples,gpu);
+                color_surface=clear.surface;
+            }
+            Require(*color_surface==clear.surface,"Native color surface allocation changed");
+            completed=color_target->Clear(clear.value,&clear.rectangle);
+            REXLOG_INFO("MC2 native scene: cleared HDR rectangle [{},{},{},{}] on {}x{}, samples={}, completed={}",
+                clear.rectangle.left,clear.rectangle.top,clear.rectangle.right,clear.rectangle.bottom,
+                clear.surface.width,clear.surface.height,clear.surface.samples,completed);
+            return true;
         }
         const auto clear=ReadDepthClear(ctx,base);
         Flush(base,ctx.r3.u32);
@@ -130,13 +147,30 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             width = ((dimensions >> 18) & 16383) + 1;
             height = ((dimensions >> 3) & 32767) + 1;
         }
-        const auto trace = fmt::format("flags={:#x} colors=[{:#x},{:#x},{:#x},{:#x}] depth={:#x} {}x{} samples={} z={} rect=[{},{},{},{}] viewport=[{},{},{},{}] scissor_enabled={} scissor=[{},{},{},{}]",
+        const auto trace = fmt::format("flags={:#x} colors=[{:#x},{:#x},{:#x},{:#x}] depth={:#x} {}x{} samples={} z={} rect=[{},{},{},{}] viewport=[{},{},{},{}] scissor_enabled={} scissor=[{},{},{},{}] tiling={:#x} tiles={} logical={}x{} predicate_mode={} predicate={:#x}",
             ctx.r4.u32, word(12448), word(12452), word(12456), word(12460), depth, width, height, samples,
             ctx.f1.f64, LoadBE32(rect.data()), LoadBE32(rect.data()+4), LoadBE32(rect.data()+8), LoadBE32(rect.data()+12),
             number(12656), number(12660), number(12664), number(12668), word(11864),
-            word(12684), word(12688), word(12692), word(12696));
+            word(12684), word(12688), word(12692), word(12696),state[10940],word(12756),
+            word(13188),word(13192),word(12724),word(12716));
         if (trace != last_clear_trace) {
             REXLOG_INFO("MC2 native clear boundary: {}", trace);
+            for (uint32_t i=0;i<std::min(word(12756),uint32_t(8));++i) {
+                const auto offset=12760+i*16;
+                REXLOG_INFO("MC2 native tile {}: [{},{},{},{}]",i,word(offset),word(offset+4),word(offset+8),word(offset+12));
+            }
+            for (uint32_t i=0;i<4;++i) {
+                if (!word(12448+i*4) || !ReadGuest(base,word(12448+i*4),48,descriptor)) continue;
+                REXLOG_INFO("MC2 native color surface {}: info={:#x} color_info={:#x} format={:#x} dimensions={:#x}",
+                    i,LoadBE32(descriptor.data()+24),LoadBE32(descriptor.data()+28),
+                    LoadBE32(descriptor.data()+32),LoadBE32(descriptor.data()+36));
+            }
+            std::vector<uint8_t> color;
+            if (ReadGuest(base,ctx.r6.u32 ? ctx.r6.u32 : 0x82247720,16,color)) {
+                REXLOG_INFO("MC2 native clear color: [{},{},{},{}]",
+                    std::bit_cast<float>(LoadBE32(color.data())),std::bit_cast<float>(LoadBE32(color.data()+4)),
+                    std::bit_cast<float>(LoadBE32(color.data()+8)),std::bit_cast<float>(LoadBE32(color.data()+12)));
+            }
             last_clear_trace = trace; ++clear_trace_count;
         }
     }
@@ -227,7 +261,7 @@ REX_HOOK_RAW(sub_82388AA0) {
 REX_HOOK_RAW(sub_8238AD80) {
     if (NativeBootActive()) {
         Graphics().TraceClear(ctx, base);
-        try { if (Graphics().ClearDepth(ctx,base)) return; }
+        try { if (Graphics().Clear(ctx,base)) return; }
         catch (const std::exception& error) { UnsupportedNativeOperation(error.what(),ctx); }
     }
     __imp__sub_8238AD80(ctx, base);

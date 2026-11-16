@@ -130,9 +130,11 @@ A subsequent [native depth path](native-depth.md), enabled by
 `--mc2_native_boot_depth_shader_dir=<verified depth shader directory>`, replaces
 the first full depth clear and indexed triangle draw with native two-sample
 D3D12 work on the movie renderer's device/queue. It completed that draw and then
-stopped at the following unsupported color clear. The shader directory is
+stopped at the following unsupported color clear. That clear is now implemented
+for the verified tiled HDR surface and first-tile predicate, moving the stop to
+the first color draw. The shader directory is
 optional, so the movie-only checkpoint remains available.
-The live depth checkpoint also passed with the Xenos DLL physically unavailable;
+The live depth and HDR-clear checkpoints also passed with the Xenos DLL physically unavailable;
 the stopped process reported the next unsupported operation rather than a clean
 exit. The default renderer subsequently passed a clean 12-second boot with two
 bounded native movie comparison draws. Native gameplay is still unverified.

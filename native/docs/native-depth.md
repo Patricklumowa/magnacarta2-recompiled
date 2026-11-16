@@ -3,7 +3,8 @@
 The standalone native renderer can execute the first captured indexed scene
 draw through D3D12. An opt-in live path now executes that draw and its preceding
 two-sample depth clear on the same device as the movies, without loading Xenos.
-It stops at the following color clear. Native menu/gameplay, general surface
+The following tiled HDR color clear also runs natively; the first color draw
+still stops explicitly. Native menu/gameplay, general surface
 lifetime and scene composition remain unfinished.
 
 `NativeDevice` owns one device, queue, allocator/list and fence. Movie and depth
@@ -67,8 +68,9 @@ Live native tracing subsequently observed the preceding full-surface clear:
 `sub_8238AD80`, flags `0x30`, depth zero, a 1280 x 720 rectangle, matching viewport,
 no enabled scissor and a two-sample depth surface. With the optional depth shader
 directory configured, native boot replaces this clear and the following indexed
-draw, waits for their real native fences, then stops at the next unsupported
-color clear. Indexed capture runs before the native draw, preserving live inputs.
+draw and the next HDR tile clear, waits for their real native fences, then stops
+at the first unsupported color draw. Indexed capture runs before the native
+draw, preserving live inputs.
 
 These comparisons do not match a full Xenos frame. The native target currently
 uses D32_FLOAT; console 24-bit depth quantization, stencil, other input
@@ -97,12 +99,46 @@ viewport and the same cleared surface allocation. Other states fail explicitly.
 The observed stencil clear is zero, but native stencil storage is not implemented;
 every stencil-tested draw is rejected before submission. No stencil-dependent
 effect is allowed to continue with missing data. The initial surface cannot yet
-be replaced or retired independently. The next observed color clear binds a
-1280 x 512 depth surface while using a 1280 x 720 viewport, exposing the original
-tiled-rendering boundary that the native surface model must replace.
+be replaced or retired independently. The next color pass binds 1280 x 512
+physical surfaces for a 1280 x 720 logical scene. Its initial color clear is now
+handled as described below; depth sharing and subsequent resolves are pending.
 
 `mc2_native_scene_check` reconstructs a captured draw in bounded relocated guest
 memory and checks geometry, endian conversion, unchanged input state, clear/draw
 surface identity and rejection of stencil, color targets, different fetches,
 vertex-base offsets, clipping and declaration changes. It accepts a captured
 draw directory and the local verified depth shader directory as its two arguments.
+
+## Tiled HDR color clear
+
+The engine's begin-frame routine (`0x826DA0B8`) configures two tiles through
+`0x8237BB88`: `[0,0,1280,512]` and `[0,512,1280,720]`. The device retains their
+logical extent at offsets 13188/13192 and their attachment bindings at
+12736..12752. The engine then selects predicate `2`, the first tile, before
+clearing color. End-frame (`0x826DA200`) selects `2 << (tile * 2)` for subsequent
+per-tile resolve calls. These values were checked against captured state and
+the live clear boundary, including the explicit first-tile predicate.
+
+`ReadSceneColorClear` verifies this exact layout, attachment identity, sample
+count, viewport, rectangle and predicate. It maps the first clear to
+`[0,0,1280,512]` on a native 1280 x 720 HDR target. It does not clear the lower
+tile early or infer the scene extent from viewport dimensions alone.
+
+The observed color format is 7e3 RGB with two-bit normalized alpha. Native
+storage uses RGBA16_FLOAT; currently only the observed zero clear is accepted,
+which is exact in both formats. General color quantization, blending, tiled
+draw replay, depth sharing and game resolves remain unfinished. No color draw
+is allowed to proceed using these unimplemented operations.
+
+`ColorTarget` retains its two-sample allocation on the shared native device and
+completes its real fence after the clear. Diagnostic readback is optional and
+rejects undefined pixels in a partially initialized surface. The synthetic
+`mc2_native_color_check` verifies HDR values above one, full and partial clears,
+independent retained targets, one/two/four-sample resolves and fence completion.
+Passing an optional third directory (the captured first color draw) to
+`mc2_native_scene_check` verifies the tile selection and rejected changes to
+the layout, predicate, scissor, clear color and cached attachment state.
+
+A live run with the Xenos DLL physically unavailable completed the first depth
+draw and this HDR tile clear, then stopped at the first color draw. That is a
+bounded runtime checkpoint, not a rendered scene or full-frame parity result.
