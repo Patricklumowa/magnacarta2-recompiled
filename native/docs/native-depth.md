@@ -16,9 +16,15 @@ side effect of drawing. Readback is optional.
 ## Vertex inputs
 
 `ReadVertexInputs` bounds the shader container, metadata and instruction ranges.
-It handles the verified 32-bit float formats, byte order and mini fetches that
-inherit a preceding full fetch's stream and stride. Unsupported formats,
+It handles the verified 32-bit float and unsigned-byte formats, byte order and
+mini fetches that inherit a preceding full fetch's stream and stride. Unsupported formats,
 relative addressing, scaling, selectors and buffer extents fail explicitly.
+
+Input types follow fetch formats rather than semantic names. The first color
+shader stores float3 positions under `TANGENT0`, and integer byte attributes
+under `BINORMAL0`, `NORMAL0` and `COLOR0`. The patched converter's signature and
+native input layout now agree on these types; see
+[shader feasibility](shader-feasibility.md#vertex-storage-versus-semantic-labels).
 
 The first draw has a constant-only full fetch followed by two mini fetches. Its
 DXIL signature still includes the unused `POSITION0` input. D3D12 rejects the
@@ -40,6 +46,7 @@ patches. The optional check consumes local, game-derived inputs:
 ```text
 mc2_native_depth_check <first-depth-VS.container> <translated-VS.dxil>
 mc2_native_depth_check <first-depth-VS.container> <translated-VS.dxil> <draw-capture-directory> <output.f32>
+mc2_native_depth_check <first-depth-VS.container> <translated-VS.dxil> <draw-capture-directory> <output.f32> <first-color-VS.container> <corrected-color-VS.dxil>
 ```
 
 The synthetic checks use the actual translated depth shader with controlled

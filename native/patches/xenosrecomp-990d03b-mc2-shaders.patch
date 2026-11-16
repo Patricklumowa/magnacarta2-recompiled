@@ -18,7 +18,7 @@ index e505a5e..4a6d712 100644
 +    endif()
 +endif()
 diff --git a/XenosRecomp/shader_recompiler.cpp b/XenosRecomp/shader_recompiler.cpp
-index 698a418..dd53995 100644
+index 698a418..3b1efed 100644
 --- a/XenosRecomp/shader_recompiler.cpp
 +++ b/XenosRecomp/shader_recompiler.cpp
 @@ -1,5 +1,6 @@
@@ -43,7 +43,7 @@ index 698a418..dd53995 100644
  void ShaderRecompiler::printDstSwizzle(uint32_t dstSwizzle, bool operand)
  {
      for (size_t i = 0; i < 4; i++)
-@@ -170,48 +179,52 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
+@@ -170,48 +179,56 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
          ++indentation;
      }
  
@@ -72,6 +72,7 @@ index 698a418..dd53995 100644
 -        specConstantsMask |= SPEC_CONSTANT_R11G11B10_NORMAL;
 -        print("tfetchR11G11B10(");
 -        break;
++    #ifdef UNLEASHED_RECOMP
 +        switch (findResult->second.usage)
 +        {
 +        case DeclUsage::Normal:
@@ -89,6 +90,7 @@ index 698a418..dd53995 100644
 +            print("tfetchTexcoord(g_SwappedTexcoords, ");
 +            break;
 +        }
++    #endif
  
 -    print("i{}{}", USAGE_VARIABLES[uint32_t(findResult->second.usage)], uint32_t(findResult->second.usageIndex));
 +        print("i{}{}", USAGE_VARIABLES[uint32_t(findResult->second.usage)], uint32_t(findResult->second.usageIndex));
@@ -100,6 +102,7 @@ index 698a418..dd53995 100644
 -    case DeclUsage::Binormal:
 -        out += ')';
 -        break;
++    #ifdef UNLEASHED_RECOMP
 +        switch (findResult->second.usage)
 +        {
 +        case DeclUsage::Normal:
@@ -116,20 +119,21 @@ index 698a418..dd53995 100644
 +            print(", {})", uint32_t(findResult->second.usageIndex));
 +            break;
 +        }
-+
-+        out += '.';
-+        printDstSwizzle(instr.dstSwizzle, true);
++    #endif
  
 -    out += '.';
 -    printDstSwizzle(instr.dstSwizzle, true);
-+        out += ";\n";
++        out += '.';
++        printDstSwizzle(instr.dstSwizzle, true);
  
 -    out += ";\n";
++        out += ";\n";
++
 +    }
  
      printDstSwizzle01(instr.dstRegister, instr.dstSwizzle);
  
-@@ -255,7 +268,7 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+@@ -255,7 +272,7 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
      auto findResult = samplers.find(instr.constIndex);
      if (findResult != samplers.end())
      {
@@ -138,7 +142,7 @@ index 698a418..dd53995 100644
  
      #ifdef UNLEASHED_RECOMP
          subtractFromOne = hasMtxPrevInvViewProjection && strcmp(constNamePtr, "sampZBuffer") == 0;
-@@ -277,78 +290,82 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+@@ -277,78 +294,82 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
      }
  #endif
  
@@ -178,7 +182,9 @@ index 698a418..dd53995 100644
 +            if (subtractFromOne)
 +                out += "1.0 - ";
 +        #endif
-+
+ 
+-    std::string_view dimension;
+-    uint32_t componentCount = 0;
 +            out += "tfetch";
 +            break;
 +        }
@@ -188,11 +194,6 @@ index 698a418..dd53995 100644
 +            break;
 +        }
 +        }
- 
--    std::string_view dimension;
--    uint32_t componentCount = 0;
-+        std::string_view dimension;
-+        uint32_t componentCount = 0;
  
 -    switch (instr.dimension)
 -    {
@@ -213,6 +214,10 @@ index 698a418..dd53995 100644
 -        componentCount = 3;
 -        break;
 -    }
++        std::string_view dimension;
++        uint32_t componentCount = 0;
+ 
+-    out += dimension;
 +        switch (instr.dimension)
 +        {
 +        case TextureDimension::Texture1D:
@@ -233,22 +238,18 @@ index 698a418..dd53995 100644
 +            break;
 +        }
  
--    out += dimension;
-+        out += dimension;
- 
 -#ifdef UNLEASHED_RECOMP
 -    if (bicubic)
 -        out += "Bicubic";
 -#endif
++        out += dimension;
+ 
+-    print("({0}_Texture{1}DescriptorIndex, {0}_SamplerDescriptorIndex, ", constNamePtr, dimension);
+-    printSrcRegister(componentCount);
 +    #ifdef UNLEASHED_RECOMP
 +        if (bicubic)
 +            out += "Bicubic";
 +    #endif
- 
--    print("({0}_Texture{1}DescriptorIndex, {0}_SamplerDescriptorIndex, ", constNamePtr, dimension);
--    printSrcRegister(componentCount);
-+        print("({0}_Texture{1}DescriptorIndex, {0}_SamplerDescriptorIndex, ", constNamePtr, dimension);
-+        printSrcRegister(componentCount);
  
 -    switch (instr.dimension)
 -    {
@@ -259,6 +260,9 @@ index 698a418..dd53995 100644
 -        out += ", cubeMapData";
 -        break;
 -    }
++        print("({0}_Texture{1}DescriptorIndex, {0}_SamplerDescriptorIndex, ", constNamePtr, dimension);
++        printSrcRegister(componentCount);
++
 +        switch (instr.dimension)
 +        {
 +        case TextureDimension::Texture2D:
@@ -268,21 +272,21 @@ index 698a418..dd53995 100644
 +            out += ", cubeMapData";
 +            break;
 +        }
- 
--    out += ").";
++
 +        out += ").";
  
--    printDstSwizzle(instr.dstSwizzle, true);
+-    out += ").";
 +        printDstSwizzle(instr.dstSwizzle, true);
  
--    out += ";\n";
+-    printDstSwizzle(instr.dstSwizzle, true);
 +        out += ";\n";
-+
+ 
+-    out += ";\n";
 +    }
  
      printDstSwizzle01(instr.dstRegister, instr.dstSwizzle);
  
-@@ -1171,16 +1188,30 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1171,16 +1192,30 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
  
          case RegisterSet::Sampler:
          {
@@ -320,7 +324,7 @@ index 698a418..dd53995 100644
              break;
          }
  
-@@ -1228,16 +1259,19 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1228,16 +1263,19 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
  
          if (constantInfo->registerSet == RegisterSet::Sampler)
          {
@@ -348,6 +352,35 @@ index 698a418..dd53995 100644
          }
      }
  
+@@ -1312,14 +1350,26 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+ 
+             value = vertexShader->vertexElementsAndInterpolators[vertexShader->field18 + i];
+ 
+-            const char* usageType = USAGE_TYPES[uint32_t(vertexElement.usage)];
+-
+         #ifdef UNLEASHED_RECOMP
++            const char* usageType = USAGE_TYPES[uint32_t(vertexElement.usage)];
+             if ((vertexElement.usage == DeclUsage::TexCoord && vertexElement.usageIndex == 2 && isMetaInstancer) ||
+                 (vertexElement.usage == DeclUsage::Position && vertexElement.usageIndex == 1))
+             {
+                 usageType = "uint4";
+             }
++        #else
++            // Semantic labels describe linkage, not storage. MC2, for example,
++            // uses TANGENT for float3 positions and COLOR for unnormalized bytes.
++            const char* usageType = "float4";
++            if (uint64_t(vertexElement.address) * 12 + 12 > shader->size)
++                throw std::runtime_error("Vertex metadata references an invalid fetch address");
++            const auto fetchCode = reinterpret_cast<const be<uint32_t>*>(shaderData +
++                shaderContainer->virtualSize + shader->physicalOffset) + vertexElement.address * 3;
++            const uint32_t fetchWords[] = {fetchCode[0], fetchCode[1], fetchCode[2]};
++            VertexFetchInstruction fetch;
++            std::memcpy(&fetch, fetchWords, sizeof(fetch));
++            if (hasFetchSourceComponents(fetch.dstSwizzle) && fetch.format == 6 && fetch.numFormatAll)
++                usageType = fetch.formatCompAll ? "int4" : "uint4";
+         #endif
+ 
+             out += '\t';
 diff --git a/XenosRecomp/shader_recompiler.h b/XenosRecomp/shader_recompiler.h
 index b2e317d..f939308 100644
 --- a/XenosRecomp/shader_recompiler.h
@@ -363,10 +396,10 @@ index b2e317d..f939308 100644
  
 diff --git a/XenosRecomp/shader_recompiler_check.cpp b/XenosRecomp/shader_recompiler_check.cpp
 new file mode 100644
-index 0000000..d0f3e97
+index 0000000..64470cf
 --- /dev/null
 +++ b/XenosRecomp/shader_recompiler_check.cpp
-@@ -0,0 +1,123 @@
+@@ -0,0 +1,169 @@
 +// Synthetic fixtures only. No game shaders or generated game code.
 +#include "shader_recompiler.h"
 +#include <array>
@@ -410,6 +443,22 @@ index 0000000..d0f3e97
 +    require(mixed.out == "r5.x = iPosition0.y;\nr5.y = 0.0;\nr5.w = 1.0;\n",
 +        "Mixed source, constant, and keep components changed");
 +
++    vertex.format=57; // Float3 position stored under a tangent semantic.
++    vertex.dstSwizzle=swizzle(0,1,2,5);
++    ShaderRecompiler tangent;
++    element.usage=DeclUsage::Tangent;
++    tangent.vertexElements.emplace(9,element);
++    tangent.recompile(vertex,9);
++    require(tangent.out=="r5.xyz = iTangent0.xyz;\nr5.w = 1.0;\n" && tangent.specConstantsMask==0,
++        "Semantic name introduced an unrelated packed-normal conversion");
++    vertex.format=6; vertex.numFormatAll=1;
++    ShaderRecompiler color;
++    element.usage=DeclUsage::Color;
++    color.vertexElements.emplace(9,element);
++    color.recompile(vertex,9);
++    require(color.out=="r5.xyz = iColor0.xyz;\nr5.w = 1.0;\n",
++        "Unnormalized color bytes acquired a semantic conversion");
++
 +    TextureFetchInstruction texture{};
 +    texture.opcode = FetchOpcode::TextureFetch;
 +    texture.dimension = TextureDimension::Texture2D;
@@ -423,6 +472,33 @@ index 0000000..d0f3e97
 +    textureConstants.recompile(texture, false);
 +    require(textureConstants.out == "r5.x = 0.0;\nr5.y = 1.0;\n",
 +        "Texture constant writes changed");
++}
++
++static void checkVertexSignature(DeclUsage usage,uint32_t format,bool integer,const char* expectedType)
++{
++    // One synthetic ExecEnd clause and one vertex fetch, with reflected linkage
++    // deliberately unrelated to its storage format.
++    std::array<uint8_t,280> data{};
++    const auto put32=[&](size_t offset,uint32_t value) {
++        for (size_t i=0;i<4;++i) data[offset+i]=uint8_t(value>>(24-i*8));
++    };
++    put32(0,0x102A1101); put32(4,256); put32(8,24);
++    put32(16,36); put32(24,200); put32(36,60); put32(40,28);
++    put32(204,24); put32(228,1); put32(236,1|(uint32_t(usage)<<12));
++    put32(256,1|(1<<12)|(1<<16)); put32(260,uint32_t(ControlFlowOpcode::ExecEnd)<<12);
++    put32(268,1<<19);
++    put32(272,swizzle(0,1,2,5)|(format<<16)|(uint32_t(integer)<<13));
++    put32(276,4);
++    ShaderRecompiler result;
++    result.recompile(data.data(),"");
++    const auto semantic=usage==DeclUsage::Tangent ? "Tangent" : "Color";
++    require(result.out.find(fmt::format("in {} i{}0 :",expectedType,semantic))!=std::string::npos,
++        "Vertex input signature inferred its type from a semantic name");
++    put32(236,3|(uint32_t(usage)<<12));
++    bool rejected=false;
++    try { ShaderRecompiler invalid; invalid.recompile(data.data(),""); }
++    catch (const std::runtime_error&) { rejected=true; }
++    require(rejected,"Vertex signature accepted an out-of-range instruction");
 +}
 +
 +static void checkSamplers(uint16_t count, uint16_t first = 3)
@@ -475,6 +551,9 @@ index 0000000..d0f3e97
 +int main()
 +{
 +    checkFetches();
++    checkVertexSignature(DeclUsage::Tangent,57,true,"float4");
++    checkVertexSignature(DeclUsage::Color,6,true,"uint4");
++    checkVertexSignature(DeclUsage::Color,6,false,"float4");
 +    checkSamplers(1);
 +    checkSamplers(3);
 +    checkSamplers(1, 15);
@@ -488,5 +567,5 @@ index 0000000..d0f3e97
 +        }
 +        require(rejected, "Unsupported sampler range was not explicitly rejected");
 +    }
-+    puts("PASS: sampler arrays and bounds, masked fetches, constant writes, predication");
++    puts("PASS: sampler arrays and bounds, masked fetches, constant writes, predication, format-based vertex types");
 +}

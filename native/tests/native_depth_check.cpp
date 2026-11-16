@@ -6,6 +6,7 @@
 #include <plume_d3d12.h>
 #include <d3d12sdklayers.h>
 #include <array>
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -35,7 +36,7 @@ void Pixels(const mc2::native::DepthResult& result, float expected, uint64_t seq
 }
 }
 int main(int argc, char** argv) try {
-    Check(argc == 3 || argc == 5, "Usage: mc2_native_depth_check <VS.container> <VS.dxil> [capture-directory output.f32]");
+    Check(argc == 3 || argc == 5 || argc == 7, "Usage: mc2_native_depth_check <VS.container> <VS.dxil> [capture-directory output.f32 [color-VS.container color-VS.dxil]]");
     using namespace mc2::native;
     auto container = Read(argv[1]);
     const auto inputs = ReadVertexInputs(container);
@@ -123,7 +124,7 @@ int main(int argc, char** argv) try {
         Check(std::abs(edge_pixels.pixels[i] - (i/4 + i%4 <= 3 ? .75f : 0)) < 1e-6f,
               "Two-sample diagonal coverage differs");
     std::cout << "PASS: mini-fetch layout, byte order, indexed range, reversed/ordinary depth, retained target, scissor, two-sample coverage, partial clears, rejection and shared native queue; debug_layer=" << gpu->debug_enabled << '\n';
-    if (argc == 5) {
+    if (argc >= 5) {
         const std::filesystem::path capture(argv[3]);
         auto device = Read(capture / "device.bin");
         Check(device.size() == 24064, "Unexpected captured device extent");
@@ -166,6 +167,29 @@ int main(int argc, char** argv) try {
         std::cout << "Captured draw: covered=" << covered << " pixels=" << result.pixels.size()
                   << " samples=" << config.sample_count << " diagnostic_resolve=maximum completed="
                   << result.completed_submission << "; full_pipeline_parity=unverified\n";
+        if (argc==7) {
+            auto mixed=config;
+            mixed.inputs=ReadVertexInputs(Read(argv[5])); mixed.vertex_shader=Read(argv[6]);
+            const std::vector<VertexInput> expected={
+                {0,0,95,40,0,4,true}, {6,0,95,40,0,3},
+                {7,0,95,40,12,4,false,VertexStorage::UInt8},
+                {3,0,95,40,16,4,false,VertexStorage::UInt8},
+                {10,0,95,40,20,4,false,VertexStorage::UInt8}, {5,0,95,40,24,2}
+            };
+            Check(mixed.inputs==expected,"First color shader's mixed vertex layout differs");
+            DepthRenderer color_vertices(mixed,gpu); color_vertices.Clear(0);
+            const auto alternate=color_vertices.Render(draw,true);
+            Check(alternate.pixels.size()==result.pixels.size(),"Mixed-input vertex output extent differs");
+            float maximum_error=0;
+            for (size_t i=0;i<result.pixels.size();++i) {
+                Check(std::isfinite(alternate.pixels[i]) && ((alternate.pixels[i]!=0)==(result.pixels[i]!=0)),
+                      "Mixed-input scene shader changed raster coverage");
+                maximum_error=std::max(maximum_error,std::abs(alternate.pixels[i]-result.pixels[i]));
+            }
+            Check(maximum_error<1e-6f,"Color-pass vertex transformation differs from verified depth geometry");
+            std::cout<<"PASS: color-pass float/byte vertex signature and geometry agree with verified depth pass; max_error="
+                     <<maximum_error<<"; color shading=unverified\n";
+        }
     }
     return 0;
 } catch (const std::exception& error) {

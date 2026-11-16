@@ -119,9 +119,10 @@ specialization are compiled as libraries and linked for flags 0 through 3.
 These are compilation cases, not changes to live game settings.
 
 Of the captured shaders, 45 match earlier disassemblies containing mini fetch.
-All 45 compile, but **mini-fetch behavior and input-semantic mapping remain
-unverified**. The translator maps fetch instruction addresses to declaration
-metadata rather than explicitly modeling inherited fetch state; a successful
+All 45 compile. Mini-fetch behavior and input-semantic mapping are now verified
+for the first depth pass and the geometry of the first color pass, but remain
+unverified across the rest of the corpus. The translator maps fetch instruction
+addresses to declaration metadata rather than explicitly modeling inherited fetch state; a successful
 DXC compile cannot validate that mapping.
 
 Local reports retain both sides of the comparison:
@@ -138,6 +139,32 @@ swizzles, and predication. Keep converter assertions enabled during feasibility
 work; the checked local build uses `/O2 /Ob2` without `NDEBUG`. Boundary checks
 accept register 15/count 1 and reject register 15/count 2, register 16/count 1,
 and an empty sampler range.
+
+### Vertex storage versus semantic labels
+
+The first color-pass shader exposed a separate correctness problem: upstream's
+default input types and packed-normal conversions followed semantic names.
+MC2 uses `TANGENT0` for float3 positions and `COLOR0` for unnormalized unsigned
+bytes in this shader. It therefore compiled successfully while requesting the
+wrong native input types.
+
+The project patch keeps the original `UNLEASHED_RECOMP` specializations behind
+that build flag. The default converter selects unsigned/signed integer input
+types for unnormalized byte fetches and float inputs for normalized bytes and
+the captured float formats. It uses the fetch instruction addressed by the
+container metadata, checks that address, and does not inject Sonic's normal or
+UV conversions based on a semantic name. Native input-layout decoding supports
+the verified float32 and unsigned-byte formats, including mini-fetch offsets.
+
+Synthetic converter checks cover the mismatched names/types, constant-only
+fetches and out-of-range metadata. All 187 captured shaders still compile after
+this correction (`out/native-renderer/shader-proof-gameplay-typed/results.json`).
+The first color pass uses the same vertices, indices and position matrices as
+the preceding depth pass. With the corrected shader and mixed float/byte input
+layout, native GPU depth output matches the verified depth shader at all 921600
+pixels, covering 295680 pixels with a maximum depth difference of zero. This
+verifies that pass's vertex transformation and layout; color shading, other
+packed formats and complete rendering parity are still unverified.
 
 ### Remaining semantic work
 

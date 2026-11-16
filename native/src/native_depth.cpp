@@ -48,11 +48,15 @@ struct DepthRenderer::Impl {
         Require(slot.stride > 0 && slot.stride <= 1020, "Invalid native depth vertex stride");
         std::vector<RenderInputElement> elements;
         for (const auto& input : c.inputs) {
+            const auto element_bytes=input.components*(input.storage==VertexStorage::Float32 ? 4 : 1);
             Require(input.stride == slot.stride && input.fetch_index == c.inputs.front().fetch_index &&
-                    (input.constant_only || uint64_t(input.offset) + input.components * 4 <= slot.stride),
+                    (input.constant_only || uint64_t(input.offset) + element_bytes <= slot.stride),
                     "Native depth pass requires one bounded vertex stream");
+            Require(input.storage==VertexStorage::Float32 || input.components==4,"Invalid native byte vertex input");
+            const auto format=input.storage==VertexStorage::UInt8 ? RenderFormat::R8G8B8A8_UINT :
+                input.storage==VertexStorage::UNorm8 ? RenderFormat::R8G8B8A8_UNORM : FloatFormat(input.components);
             elements.emplace_back(VertexSemantic(input.usage), input.usage_index, uint32_t(elements.size()),
-                                  FloatFormat(input.components), input.constant_only ? 1 : 0, input.offset);
+                                  format, input.constant_only ? 1 : 0, input.offset);
         }
         auto& device = gpu->device;
         const RenderRootDescriptorDesc roots[] = {
