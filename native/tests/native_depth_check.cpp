@@ -103,7 +103,26 @@ int main(int argc, char** argv) try {
     DepthRenderer ordinary(config, gpu); ordinary.Clear(1);
     draw.scissor.right = 4; draw.viewport.minDepth = 0; draw.viewport.maxDepth = 1;
     Pixels(ordinary.Render(draw, true), .125f, 11);
-    std::cout << "PASS: mini-fetch layout, byte order, indexed range, reversed/ordinary depth, retained target, scissor, rejection and shared native queue; debug_layer=" << gpu->debug_enabled << '\n';
+    config.sample_count = 2;
+    DepthRenderer multisampled(config, gpu);
+    const plume::RenderRect left(0,0,2,4);
+    Reject([&] { multisampled.Clear(1, &left); });
+    multisampled.Clear(1);
+    Pixels(multisampled.Render(draw, true), .125f, 13);
+    multisampled.Clear(0, &left);
+    const auto retained = multisampled.Render(draw, true);
+    Check(retained.completed_submission == 15, "Partial clear completion differs");
+    for (size_t i = 0; i < retained.pixels.size(); ++i)
+        Check(std::abs(retained.pixels[i] - (i % 4 < 2 ? 0 : .125f)) < 1e-6f, "MSAA partial clear did not preserve other pixels");
+    config.comparison = plume::RenderComparisonFunction::GREATER_EQUAL;
+    DepthRenderer edge(config, gpu); edge.Clear(0);
+    draw.viewport.minDepth = 1; draw.viewport.maxDepth = 0;
+    draw.indices[5] = 3; draw.index_count = 3; set_depth(.25f);
+    const auto edge_pixels = edge.Render(draw, true);
+    for (size_t i = 0; i < edge_pixels.pixels.size(); ++i)
+        Check(std::abs(edge_pixels.pixels[i] - (i/4 + i%4 <= 3 ? .75f : 0)) < 1e-6f,
+              "Two-sample diagonal coverage differs");
+    std::cout << "PASS: mini-fetch layout, byte order, indexed range, reversed/ordinary depth, retained target, scissor, two-sample coverage, partial clears, rejection and shared native queue; debug_layer=" << gpu->debug_enabled << '\n';
     if (argc == 5) {
         const std::filesystem::path capture(argv[3]);
         auto device = Read(capture / "device.bin");
@@ -114,6 +133,10 @@ int main(int argc, char** argv) try {
               word(12672) == 0x3f800000 && word(12676) == 0, "Capture differs from the verified depth pass");
         auto captured_shader = Read(capture / "vertex-shader.container");
         Check(captured_shader == container, "Captured shader differs from the tested translation");
+        const auto surface = Read(capture / "targets/depth.descriptor.bin");
+        Check(surface.size() == 48 && ((mc2::capture::LoadBE32(surface.data()+24) >> 16) & 3) == 1,
+              "Captured depth surface is not two-sample");
+        config.sample_count = 2;
         draw.vertices = NativeVertexBytes(Read(capture / "vertices/slot-00.data.bin"), 2);
         const auto indices = NativeVertexBytes(Read(capture / "index-buffer.data.bin"), 2);
         Check(indices.size() % 4 == 0, "Unexpected captured index size");
@@ -141,7 +164,8 @@ int main(int argc, char** argv) try {
         output.write(reinterpret_cast<const char*>(result.pixels.data()),result.pixels.size()*4);
         Check(bool(output), "Cannot write local depth readback");
         std::cout << "Captured draw: covered=" << covered << " pixels=" << result.pixels.size()
-                  << " completed=" << result.completed_submission << "; full_pipeline_parity=unverified\n";
+                  << " samples=" << config.sample_count << " diagnostic_resolve=maximum completed="
+                  << result.completed_submission << "; full_pipeline_parity=unverified\n";
     }
     return 0;
 } catch (const std::exception& error) {

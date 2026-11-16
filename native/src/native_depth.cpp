@@ -30,7 +30,7 @@ struct DepthRenderer::Impl {
     std::unique_ptr<RenderShader> shader;
     std::unique_ptr<RenderPipelineLayout> layout;
     std::unique_ptr<RenderPipeline> pipeline;
-    std::unique_ptr<RenderTexture> target;
+    std::unique_ptr<RenderTexture> target, resolved;
     std::unique_ptr<RenderFramebuffer> framebuffer;
     std::unique_ptr<RenderBuffer> vertex_buffer, index_buffer, vertex_constants, shared_constants, readback, dummy_input;
     RenderInputSlot slot;
@@ -41,6 +41,7 @@ struct DepthRenderer::Impl {
     Impl(const DepthConfiguration& c, std::shared_ptr<NativeDevice> context) : config(c), gpu(std::move(context)) {
         Require(gpu && c.width && c.height && c.width <= 8192 && c.height <= 8192,
                 "Invalid native depth target");
+        Require(c.sample_count == 1 || c.sample_count == 2 || c.sample_count == 4, "Unsupported native sample count");
         Require(!c.vertex_shader.empty() && !c.inputs.empty() && c.inputs.size() <= 32,
                 "Missing native depth shader or inputs");
         slot = RenderInputSlot(0, c.inputs.front().stride);
@@ -72,10 +73,12 @@ struct DepthRenderer::Impl {
         desc.inputElements = elements.data(); desc.inputElementsCount = uint32_t(elements.size());
         desc.depthEnabled = true; desc.depthWriteEnabled = c.write; desc.depthClipEnabled = c.clip;
         desc.depthFunction = c.comparison; desc.cullMode = c.cull;
+        desc.multisampling = RenderMultisampling(c.sample_count);
         desc.depthTargetFormat = RenderFormat::D32_FLOAT;
         pipeline = device->createGraphicsPipeline(desc);
         Require(bool(pipeline), "Native depth pipeline creation failed");
-        target = device->createTexture(RenderTextureDesc::DepthTarget(c.width, c.height, RenderFormat::D32_FLOAT));
+        target = device->createTexture(RenderTextureDesc::DepthTarget(c.width, c.height, RenderFormat::D32_FLOAT,
+                                                                     RenderMultisampling(c.sample_count)));
         Require(bool(target), "Native depth allocation failed");
         RenderFramebufferDesc framebuffer_desc;
         framebuffer_desc.depthAttachment = target.get();
@@ -86,13 +89,20 @@ struct DepthRenderer::Impl {
         Require(framebuffer && vertex_constants && shared_constants && dummy_input, "Native depth resource creation failed");
         const float dummy[] = {0,0,0,1}; Upload(dummy_input.get(), dummy, sizeof(dummy));
     }
-    void Clear(float depth) {
+    void Clear(float depth, const RenderRect* rectangle) {
         Require(std::isfinite(depth) && depth >= 0 && depth <= 1, "Invalid native depth clear");
+        const RenderRect full(0,0,config.width,config.height);
+        if (rectangle) {
+            Require(rectangle->left >= 0 && rectangle->top >= 0 && rectangle->right > rectangle->left &&
+                    rectangle->bottom > rectangle->top && uint32_t(rectangle->right) <= config.width &&
+                    uint32_t(rectangle->bottom) <= config.height, "Native depth clear rectangle is out of bounds");
+            Require(initialized || *rectangle == full, "Partial clear cannot initialize a new native depth target");
+        }
         auto& commands = gpu->commands;
         commands->begin();
         commands->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(target.get(), RenderTextureLayout::DEPTH_WRITE));
         commands->setFramebuffer(framebuffer.get());
-        commands->clearDepth(true, depth);
+        commands->clearDepth(true, depth, rectangle, rectangle ? 1 : 0);
         commands->end();
         gpu->queue->executeCommandLists(commands.get(), gpu->fence.get());
         gpu->Complete();
@@ -137,6 +147,9 @@ struct DepthRenderer::Impl {
         if (read_pixels && !readback)
             readback = gpu->device->createBuffer(RenderBufferDesc::ReadbackBuffer(size_t(pitch) * config.height));
         Require(!read_pixels || bool(readback), "Native depth readback allocation failed");
+        if (read_pixels && config.sample_count > 1 && !resolved)
+            resolved = gpu->device->createTexture(RenderTextureDesc::Texture2D(config.width, config.height, 1, RenderFormat::R32_FLOAT));
+        Require(!read_pixels || config.sample_count == 1 || bool(resolved), "Native depth resolve allocation failed");
         auto& commands = gpu->commands;
         commands->begin();
         commands->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(target.get(), RenderTextureLayout::DEPTH_WRITE));
@@ -152,9 +165,16 @@ struct DepthRenderer::Impl {
         commands->setVertexBuffers(1, &dummy_view, 1, &dummy_slot);
         commands->drawIndexedInstanced(draw.index_count, 1, draw.first_index, 0, 0);
         if (read_pixels) {
-            commands->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(target.get(), RenderTextureLayout::COPY_SOURCE));
+            auto* read_target = target.get();
+            if (config.sample_count > 1) {
+                commands->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(target.get(), RenderTextureLayout::RESOLVE_SOURCE));
+                commands->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(resolved.get(), RenderTextureLayout::RESOLVE_DEST));
+                commands->resolveTextureRegion(resolved.get(), 0, 0, target.get(), nullptr, RenderResolveMode::MAX);
+                read_target = resolved.get();
+            }
+            commands->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(read_target, RenderTextureLayout::COPY_SOURCE));
             commands->copyTextureRegion(RenderTextureCopyLocation::PlacedFootprint(readback.get(), RenderFormat::R32_FLOAT,
-                config.width, config.height, 1, pitch / 4), RenderTextureCopyLocation::Subresource(target.get()));
+                config.width, config.height, 1, pitch / 4), RenderTextureCopyLocation::Subresource(read_target));
         }
         commands->end();
         gpu->queue->executeCommandLists(commands.get(), gpu->fence.get());
@@ -174,6 +194,6 @@ struct DepthRenderer::Impl {
 DepthRenderer::DepthRenderer(const DepthConfiguration& configuration, std::shared_ptr<NativeDevice> device)
     : impl_(std::make_unique<Impl>(configuration, std::move(device))) {}
 DepthRenderer::~DepthRenderer() = default;
-void DepthRenderer::Clear(float depth) { impl_->Clear(depth); }
+void DepthRenderer::Clear(float depth, const RenderRect* rectangle) { impl_->Clear(depth, rectangle); }
 DepthResult DepthRenderer::Render(const DepthDraw& draw, bool read_pixels) { return impl_->Render(draw, read_pixels); }
 }

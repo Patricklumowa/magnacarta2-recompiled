@@ -4,11 +4,13 @@
 #include "generated/default/magnacarta2_init.h"
 #include "native_boot.h"
 #include "native_movie.h"
+#include "guest_graphics_read.h"
 #include <rex/cvar.h>
 #include <rex/hook.h>
 #include <atomic>
 #include <mutex>
 #include <optional>
+#include <bit>
 #include <stdexcept>
 
 REXCVAR_DEFINE_BOOL(mc2_native_boot, false, "Development", "Experimental native movie boot; unsupported operations fail");
@@ -30,6 +32,8 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     HWND window = nullptr;
     uint64_t completed = 0;
     uint32_t guest_device = 0;
+    std::string last_clear_trace;
+    uint32_t clear_trace_count = 0;
 
     NativeGraphics() : shaders(LoadMovieShaders(REXCVAR_GET(mc2_native_boot_shader_dir))) {
         NativeGraphics* expected = nullptr;
@@ -56,6 +60,38 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         REXLOG_INFO("MC2 native boot: legacy staging memory retained for CPU setters; no packet execution");
     }
     void EnableReadPointerWriteBack(uint32_t, uint32_t) override {}
+
+    // This boundary is still handled by the legacy CPU setters. Record bounded
+    // state changes while the native surface/clear implementation is validated.
+    // Logging never substitutes a clear or changes the original PPC call.
+    void TraceClear(const PPCContext& ctx, uint8_t* base) {
+        std::lock_guard lock(mutex);
+        if (clear_trace_count >= 64) return;
+        std::vector<uint8_t> state, rect, descriptor;
+        using mc2::capture::ReadGuest;
+        using mc2::capture::LoadBE32;
+        if (!ReadGuest(base, ctx.r3.u32, 24064, state) || !ReadGuest(base, ctx.r5.u32, 16, rect)) return;
+        const auto word = [&](uint32_t offset) { return LoadBE32(state.data() + offset); };
+        const auto number = [&](uint32_t offset) { return std::bit_cast<float>(word(offset)); };
+        const auto depth = word(12464);
+        uint32_t samples = 0, width = 0, height = 0;
+        if (depth && ReadGuest(base, depth, 48, descriptor)) {
+            const auto surface = LoadBE32(descriptor.data() + 24);
+            const auto dimensions = LoadBE32(descriptor.data() + 36);
+            samples = 1u << ((surface >> 16) & 3);
+            width = ((dimensions >> 18) & 16383) + 1;
+            height = ((dimensions >> 3) & 32767) + 1;
+        }
+        const auto trace = fmt::format("flags={:#x} colors=[{:#x},{:#x},{:#x},{:#x}] depth={:#x} {}x{} samples={} z={} rect=[{},{},{},{}] viewport=[{},{},{},{}] scissor_enabled={} scissor=[{},{},{},{}]",
+            ctx.r4.u32, word(12448), word(12452), word(12456), word(12460), depth, width, height, samples,
+            ctx.f1.f64, LoadBE32(rect.data()), LoadBE32(rect.data()+4), LoadBE32(rect.data()+8), LoadBE32(rect.data()+12),
+            number(12656), number(12660), number(12664), number(12668), word(11864),
+            word(12684), word(12688), word(12692), word(12696));
+        if (trace != last_clear_trace) {
+            REXLOG_INFO("MC2 native clear boundary (not yet replaced): {}", trace);
+            last_clear_trace = trace; ++clear_trace_count;
+        }
+    }
 
     void Flush(uint8_t* base, uint32_t device) {
         std::lock_guard lock(mutex);
@@ -134,6 +170,10 @@ REX_HOOK_RAW(sub_82388AA0) {
         REX_STORE_U32(ctx.r3.u32 + 23980, REX_LOAD_U32(ctx.r3.u32 + 23980) | 0x100);
     }
     __imp__sub_82388AA0(ctx, base);
+}
+REX_HOOK_RAW(sub_8238AD80) {
+    if (NativeBootActive()) Graphics().TraceClear(ctx, base);
+    __imp__sub_8238AD80(ctx, base);
 }
 REX_HOOK_RAW(sub_82387370) {
     if (!NativeBootActive()) { __imp__sub_82387370(ctx, base); return; }

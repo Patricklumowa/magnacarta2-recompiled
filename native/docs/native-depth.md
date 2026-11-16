@@ -43,7 +43,8 @@ mc2_native_depth_check <first-depth-VS.container> <translated-VS.dxil> <draw-cap
 The synthetic checks use the actual translated depth shader with controlled
 geometry and identity constants. They verify indexed start/count, malformed
 ranges, missing input signature rejection, normal and reversed depth ranges,
-depth testing, retained depth between draws, explicit clears, scissoring,
+depth testing, retained depth between draws, explicit full and partial clears, scissoring,
+two-sample MSAA coverage and a maximum-depth resolve for diagnostic readback,
 optional readback and two pipelines sharing one completion timeline. Movie
 upload/presentation tests also pass after the shared-device refactor. The D3D12
 debug layer was unavailable during these checks; the tests report that fact.
@@ -56,11 +57,21 @@ independent CPU calculation of transformation, homogeneous clipping, culling,
 raster coverage and depth covers exactly the same pixels. The maximum depth
 difference on covered pixels was 2.37e-7. Game-derived artifacts stay ignored.
 
-This comparison validates the captured geometry and selected native state. It
-does not establish the game's preceding clear value or match a full Xenos frame.
-The native target currently uses D32_FLOAT; console 24-bit depth quantization,
-stencil, MSAA, other input formats/streams, resolves and scene composition are
-not implemented. Reversed viewport depth worked on the tested GPU/driver; older
+This comparison used a single-sample target. The captured surface actually has
+two samples, which the renderer now also supports. The optional captured-input
+check retains that sample count and resolves the greatest depth for inspection;
+this diagnostic resolve does not implement the game's resolve contract.
+
+Live native tracing subsequently observed the preceding full-surface clear:
+`sub_8238AD80`, flags `0x30`, depth zero, a 1280 x 720 rectangle, matching viewport,
+no enabled scissor and a two-sample depth surface. Native boot still passes this
+clear through its original CPU path, and indexed capture now runs before the
+native unsupported-draw stop, preserving the exact live inputs.
+
+These comparisons do not match a full Xenos frame. The native target currently
+uses D32_FLOAT; console 24-bit depth quantization, stencil, other input
+formats/streams, game surface resolves and scene composition are not implemented.
+Reversed viewport depth worked on the tested GPU/driver; older
 D3D12 drivers may need a shader-based depth conversion. Do not remove effects
 or silently pass unsupported draws to advance the boot checkpoint.
 

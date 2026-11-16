@@ -6,6 +6,7 @@
 namespace mc2::native {
 struct DepthConfiguration {
     uint32_t width = 0, height = 0;
+    uint32_t sample_count = 1;
     std::vector<uint8_t> vertex_shader;
     std::vector<VertexInput> inputs;
     plume::RenderComparisonFunction comparison = plume::RenderComparisonFunction::GREATER_EQUAL;
@@ -26,12 +27,14 @@ struct DepthResult {
 };
 // Native, single-stream float-input depth pass. Owns its target and pipeline,
 // shares the actual device/queue with other pipelines. No implicit per-draw
-// clears. Stencil, MSAA and 24-bit console depth quantization are not emulated.
+// clears. Stencil and 24-bit console depth quantization are not emulated.
 class DepthRenderer {
  public:
     DepthRenderer(const DepthConfiguration& configuration, std::shared_ptr<NativeDevice> device);
     ~DepthRenderer();
-    void Clear(float depth);
+    void Clear(float depth, const plume::RenderRect* rectangle = nullptr);
+    // MSAA diagnostic readback resolves the greatest depth value per pixel.
+    // This does not implement the game's surface resolve/copy contract.
     DepthResult Render(const DepthDraw& draw, bool read_pixels = false);
  private:
     struct Impl;
