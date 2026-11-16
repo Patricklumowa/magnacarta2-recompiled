@@ -31,6 +31,26 @@ set_target_properties(magnacarta2 PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${MC2_RUN
 
 rexglue_setup_target(magnacarta2 GPU_PLUGINS xenos)
 
+option(MC2_ENABLE_DRAW_CAPTURE "Build opt-in guest draw/resource capture hooks" OFF)
+option(MC2_BUILD_NATIVE_DRAW_PROBE "Build the offscreen native draw validation tool" OFF)
+if(MC2_ENABLE_DRAW_CAPTURE)
+    add_library(mc2_texture_decode STATIC src/texture_decode.cpp)
+    target_include_directories(mc2_texture_decode PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(mc2_texture_decode PUBLIC rex::runtime)
+    target_sources(magnacarta2 PRIVATE src/draw_capture.cpp)
+    target_link_libraries(magnacarta2 PRIVATE mc2_texture_decode)
+    add_executable(mc2_texture_decode_check EXCLUDE_FROM_ALL tests/texture_decode_check.cpp)
+    target_link_libraries(mc2_texture_decode_check PRIVATE mc2_texture_decode)
+    set_target_properties(mc2_texture_decode_check PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${MC2_RUN_DIR}")
+    add_executable(mc2_draw_capture_check EXCLUDE_FROM_ALL tests/draw_capture_check.cpp src/draw_capture.cpp)
+    target_include_directories(mc2_draw_capture_check PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_link_libraries(mc2_draw_capture_check PRIVATE mc2_texture_decode)
+    set_target_properties(mc2_draw_capture_check PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${MC2_RUN_DIR}")
+endif()
+if(MC2_BUILD_NATIVE_DRAW_PROBE)
+    include(cmake/NativeDrawProbe.cmake)
+endif()
+
 # VMX byte shuffles map directly to SSSE3 PSHUFB. Without this, SIMDe expands
 # each shuffle into scalar byte operations throughout the generated game code.
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|amd64|x86_64")

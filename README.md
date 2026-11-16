@@ -191,7 +191,8 @@ Commit source, build configuration, patches, and documentation only. Do not comm
 - [Xenia](https://github.com/xenia-project/xenia) provides foundational Xbox 360 research and technology incorporated into ReXGlue.
 - [SIMDe](https://github.com/simd-everywhere/simde) provides portable SIMD support used by the toolchain.
 - [Unleashed Recompiled](https://github.com/hedge-dev/UnleashedRecomp) is a reference for the wider Xbox 360 recompilation effort and project documentation.
-- [XenosRecomp](https://github.com/hedge-dev/XenosRecomp) supplies the shader-conversion tool being evaluated for native graphics; MC2 shader compatibility is not yet established.
+- [XenosRecomp](https://github.com/hedge-dev/XenosRecomp) supplies the shader converter used by the native graphics experiment. The captured shader set compiles; complete rendering compatibility remains unverified.
+- [plume](https://github.com/renderbag/plume), by renderbag and contributors, provides D3D12 for the standalone native draw probe.
 - [plume](https://github.com/renderbag/plume) is the cross-platform rendering library evaluated for the planned native bridge.
 
 Third-party source and patch context retain their upstream terms; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). A project-wide license for original contributions has not yet been selected.

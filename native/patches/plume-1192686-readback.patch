@@ -1,0 +1,17 @@
+diff --git a/plume_d3d12.cpp b/plume_d3d12.cpp
+index e3241c1..491f548 100644
+--- a/plume_d3d12.cpp
++++ b/plume_d3d12.cpp
+@@ -2279,7 +2279,11 @@ namespace plume {
+ 
+         const D3D12_TEXTURE_COPY_LOCATION copyDstLocation = toD3D12(dstLocation);
+         const D3D12_TEXTURE_COPY_LOCATION copySrcLocation = toD3D12(srcLocation);
+-        setSamplePositions(dstLocation.texture);
++        // Texture-to-buffer readback has no destination texture.
++        const RenderTexture *sampleTexture = dstLocation.texture != nullptr ? dstLocation.texture : srcLocation.texture;
++        if (sampleTexture != nullptr) {
++            setSamplePositions(sampleTexture);
++        }
+         d3d->CopyTextureRegion(&copyDstLocation, dstX, dstY, dstZ, &copySrcLocation, (srcBox != nullptr) ? &copyBox : nullptr);
+         resetSamplePositions();
+     }

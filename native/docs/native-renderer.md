@@ -21,10 +21,14 @@ Xenos backend remains the reference. Shadows and other effects are required.
 - A pinned XenosRecomp patch fixes sampler-array declarations and masked fetch
   output. All 187 captured boot/gameplay shaders now compile to DXIL, versus
   172 with upstream. This is compilation coverage of the captured set only;
-  native input mapping, mini-fetch behavior, and rendered results remain unverified.
+  most native input mappings, mini-fetch cases, and rendered results remain unverified.
 
-There is **no native rendering backend yet**. Captures are not a speedup, and
-shader compilation alone does not prove rendered correctness.
+An optional [standalone D3D12 probe](native-draw-probe.md) now renders a captured
+movie draw using its translated shaders, three video planes, vertices, and pixel
+constants. Its 1280×720 output agrees with an independent CPU calculation to
+within one UNORM channel step. This is an offline single-draw check; there is
+**no in-game native rendering backend yet**. Captures are not a speedup, and
+complete-frame rendering compatibility remains unverified.
 
 ## Capture workflow
 
