@@ -1,9 +1,10 @@
 # Native indexed depth checkpoint
 
 The standalone native renderer can execute the first captured indexed scene
-draw through D3D12. This is an offscreen depth-pass checkpoint, not native menu
-or gameplay support. Live native boot still stops at indexed draws while the
-game's clear, surface lifetime and composition boundaries are being connected.
+draw through D3D12. An opt-in live path now executes that draw and its preceding
+two-sample depth clear on the same device as the movies, without loading Xenos.
+It stops at the following color clear. Native menu/gameplay, general surface
+lifetime and scene composition remain unfinished.
 
 `NativeDevice` owns one device, queue, allocator/list and fence. Movie and depth
 pipelines can share it. Submission completion checks the real fence and device
@@ -64,9 +65,10 @@ this diagnostic resolve does not implement the game's resolve contract.
 
 Live native tracing subsequently observed the preceding full-surface clear:
 `sub_8238AD80`, flags `0x30`, depth zero, a 1280 x 720 rectangle, matching viewport,
-no enabled scissor and a two-sample depth surface. Native boot still passes this
-clear through its original CPU path, and indexed capture now runs before the
-native unsupported-draw stop, preserving the exact live inputs.
+no enabled scissor and a two-sample depth surface. With the optional depth shader
+directory configured, native boot replaces this clear and the following indexed
+draw, waits for their real native fences, then stops at the next unsupported
+color clear. Indexed capture runs before the native draw, preserving live inputs.
 
 These comparisons do not match a full Xenos frame. The native target currently
 uses D32_FLOAT; console 24-bit depth quantization, stencil, other input
@@ -77,3 +79,30 @@ or silently pass unsupported draws to advance the boot checkpoint.
 
 Microsoft documents inverted viewport support in its
 [D3D12 specification](https://microsoft.github.io/DirectX-Specs/d3d/VulkanOn12.html#inverted-viewports).
+
+## Live depth path
+
+In addition to the [native movie boot flags](native-bootstrap.md), set:
+
+```text
+--mc2_native_boot_depth_shader_dir=<local verified depth shader directory>
+```
+
+The directory must contain the captured `vertex-shader.container` and translated
+`vertex.dxil` verified by the checks above. The runtime requires an exact shader
+container match, the known input layout, matching cached fetch/resource bytes,
+32-bit indices, zero vertex-base offset, the verified raster/depth state, full
+viewport and the same cleared surface allocation. Other states fail explicitly.
+
+The observed stencil clear is zero, but native stencil storage is not implemented;
+every stencil-tested draw is rejected before submission. No stencil-dependent
+effect is allowed to continue with missing data. The initial surface cannot yet
+be replaced or retired independently. The next observed color clear binds a
+1280 x 512 depth surface while using a 1280 x 720 viewport, exposing the original
+tiled-rendering boundary that the native surface model must replace.
+
+`mc2_native_scene_check` reconstructs a captured draw in bounded relocated guest
+memory and checks geometry, endian conversion, unchanged input state, clear/draw
+surface identity and rejection of stencil, color targets, different fetches,
+vertex-base offsets, clipping and declaration changes. It accepts a captured
+draw directory and the local verified depth shader directory as its two arguments.

@@ -62,8 +62,12 @@ if(MC2_ENABLE_NATIVE_VIDEO_CHECK)
     target_link_libraries(magnacarta2 PRIVATE mc2_native_quad)
 endif()
 if(MC2_ENABLE_NATIVE_BOOT)
-    target_sources(magnacarta2 PRIVATE src/native_boot.cpp)
+    target_sources(magnacarta2 PRIVATE src/native_boot.cpp src/native_scene.cpp)
     target_compile_definitions(magnacarta2 PRIVATE MC2_ENABLE_NATIVE_BOOT)
+    add_executable(mc2_native_scene_check EXCLUDE_FROM_ALL tests/native_scene_check.cpp src/native_scene.cpp src/native_movie.cpp)
+    target_include_directories(mc2_native_scene_check PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_link_libraries(mc2_native_scene_check PRIVATE mc2_native_quad mc2_texture_decode)
+    set_target_properties(mc2_native_scene_check PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${MC2_RUN_DIR}")
 endif()
 
 # VMX byte shuffles map directly to SSSE3 PSHUFB. Without this, SIMDe expands

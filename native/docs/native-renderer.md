@@ -30,13 +30,14 @@ within one UNORM channel step. The probe can also present that draw through a
 native resizable D3D12 swapchain without per-frame CPU readback. This remains
 validation of one draw family. An opt-in experimental backend now also plays
 live startup movies with the Xenos plugin unavailable. It stops at the first
-unsupported indexed scene draw; native menu/gameplay rendering is not implemented.
+unsupported scene operation; native menu/gameplay rendering is not implemented.
 Captures are not a speedup, and full scene compatibility remains unverified.
 
-The first indexed scene draw also has an [offscreen native depth proof](native-depth.md),
+The first indexed scene draw also has a [native depth path](native-depth.md),
 including bounded mini-fetch layouts and a shared native device/queue. Its
 captured geometry matches independent CPU coverage and depth calculations.
-It is not connected to live scene composition yet.
+An optional live path now completes its two-sample clear and indexed draw before
+stopping at the next color clear. Full live scene composition is not implemented.
 
 The optional bounded live movie comparison uses the same native drawing code
 on live guest inputs. Two movie draws passed the CPU comparison during a clean

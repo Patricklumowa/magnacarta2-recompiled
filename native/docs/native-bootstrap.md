@@ -126,8 +126,19 @@ draw (guest return address `0x826D9688`) around 20 seconds after startup. This i
 proof of live movie rendering without Xenos, not a native title menu or gameplay.
 No performance improvement is claimed from this test.
 
-Indexed and nonindexed scene draws, direct begin-UP draws and raw/indirect GPU
-submission paths currently fail explicitly. Scene composition, clears/resolves,
+A subsequent [native depth path](native-depth.md), enabled by
+`--mc2_native_boot_depth_shader_dir=<verified depth shader directory>`, replaces
+the first full depth clear and indexed triangle draw with native two-sample
+D3D12 work on the movie renderer's device/queue. It completed that draw and then
+stopped at the following unsupported color clear. The shader directory is
+optional, so the movie-only checkpoint remains available.
+The live depth checkpoint also passed with the Xenos DLL physically unavailable;
+the stopped process reported the next unsupported operation rather than a clean
+exit. The default renderer subsequently passed a clean 12-second boot with two
+bounded native movie comparison draws. Native gameplay is still unverified.
+
+Other indexed and nonindexed scene draws, direct begin-UP draws and raw/indirect GPU
+submission paths currently fail explicitly. Scene composition, remaining clears/resolves,
 queries, shader/input coverage, asynchronous resource retirement and native
 platform services remain unfinished. Full effects and shadows are required.
 The original backend remains the default and the reference for those changes.

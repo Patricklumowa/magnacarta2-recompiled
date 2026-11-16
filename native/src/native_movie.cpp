@@ -1,5 +1,6 @@
 #include "generated/default/magnacarta2_init.h"
 #include "native_movie.h"
+#include "native_shader_input.h"
 #include "guest_graphics_read.h"
 #include "draw_capture.h"
 #include "texture_decode.h"
@@ -16,9 +17,10 @@ using mc2::capture::ReadGuest;
 void Require(bool value, const char* error) {
     if (!value) throw std::runtime_error(error);
 }
-std::vector<uint8_t> ReadFile(const fs::path& path) {
+}
+std::vector<uint8_t> ReadNativeFile(const fs::path& path) {
   std::ifstream file(path, std::ios::binary | std::ios::ate);
-  Require(bool(file), "Missing native movie shader input");
+  Require(bool(file), "Missing native shader input");
   const auto size = file.tellg();
   Require(size > 0 && uint64_t(size) <= mc2::capture::kMaxContainerBytes, "Invalid native movie shader input size");
   std::vector<uint8_t> bytes(static_cast<size_t>(size));
@@ -27,7 +29,7 @@ std::vector<uint8_t> ReadFile(const fs::path& path) {
   Require(bool(file), "Short native movie shader read");
   return bytes;
 }
-std::vector<uint8_t> Shader(uint8_t* base, uint32_t resource, bool vertex) {
+std::vector<uint8_t> ReadBoundShader(uint8_t* base, uint32_t resource, bool vertex) {
   const uint32_t offset = vertex ? 872 : 40;
   std::vector<uint8_t> descriptor, header, body, physical;
   mc2::capture::ContainerSize size{};
@@ -43,6 +45,7 @@ std::vector<uint8_t> Shader(uint8_t* base, uint32_t resource, bool vertex) {
   body.insert(body.end(), physical.begin(), physical.end());
   return body;
 }
+namespace {
 void ToLittleEndian(std::vector<uint8_t>& bytes) {
   Require(bytes.size() % 4 == 0, "Unaligned float upload");
   for (size_t i = 0; i < bytes.size(); i += 4)
@@ -52,12 +55,12 @@ void ToLittleEndian(std::vector<uint8_t>& bytes) {
 
 MovieShaders LoadMovieShaders(const std::filesystem::path& directory) {
     MovieShaders result;
-    result.vs_reference = ReadFile(directory / "vertex-shader.container");
-    result.ps_reference = ReadFile(directory / "pixel-shader.container");
-    result.declaration_reference = ReadFile(directory / "vertex-declaration.bin");
+    result.vs_reference = ReadNativeFile(directory / "vertex-shader.container");
+    result.ps_reference = ReadNativeFile(directory / "pixel-shader.container");
+    result.declaration_reference = ReadNativeFile(directory / "vertex-declaration.bin");
     Require(result.declaration_reference.size() == 80, "Expected the verified two-element movie declaration");
-    result.vs_dxil = ReadFile(directory / "vertex.dxil");
-    result.ps_dxil = ReadFile(directory / "pixel.dxil");
+    result.vs_dxil = ReadNativeFile(directory / "vertex.dxil");
+    result.ps_dxil = ReadNativeFile(directory / "pixel.dxil");
     return result;
 }
 
@@ -71,8 +74,8 @@ MovieSnapshot ReadMovieDraw(const PPCContext& ctx, uint8_t* base, const MovieSha
     Require((word(10548) & 7) == 0 && (word(10556) & 8) == 0 &&
             (word(10568) & 3) == 0 && word(10572) == 0x400,
             "Movie depth, alpha, culling or viewport state differs from the verified draw");
-    Require(Shader(base, word(12704), true) == shaders.vs_reference &&
-            Shader(base, word(12700), false) == shaders.ps_reference,
+    Require(ReadBoundShader(base, word(12704), true) == shaders.vs_reference &&
+            ReadBoundShader(base, word(12700), false) == shaders.ps_reference,
             "Live movie shader differs from the locally verified DXIL source");
     std::vector<uint8_t> declaration;
     Require(ReadGuest(base, word(11824), 80, declaration) &&

@@ -4,6 +4,7 @@
 #include "generated/default/magnacarta2_init.h"
 #include "native_boot.h"
 #include "native_movie.h"
+#include "native_scene.h"
 #include "guest_graphics_read.h"
 #include <rex/cvar.h>
 #include <rex/hook.h>
@@ -15,6 +16,7 @@
 
 REXCVAR_DEFINE_BOOL(mc2_native_boot, false, "Development", "Experimental native movie boot; unsupported operations fail");
 REXCVAR_DEFINE_STRING(mc2_native_boot_shader_dir, "", "Development", "Verified first-draw movie shader inputs for native boot");
+REXCVAR_DEFINE_STRING(mc2_native_boot_depth_shader_dir, "", "Development", "Optional verified indexed depth shader inputs for native boot");
 
 namespace mc2::native {
 namespace {
@@ -27,7 +29,12 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
  public:
     MovieShaders shaders;
     std::mutex mutex;
+    std::shared_ptr<NativeDevice> gpu;
     std::unique_ptr<QuadRenderer> renderer;
+    std::optional<DepthShaders> depth_shaders;
+    std::optional<DepthSurface> depth_surface;
+    std::unique_ptr<DepthRenderer> depth_renderer;
+    uint64_t depth_draws = 0;
     std::optional<QuadDraw> pending;
     HWND window = nullptr;
     uint64_t completed = 0;
@@ -36,6 +43,8 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     uint32_t clear_trace_count = 0;
 
     NativeGraphics() : shaders(LoadMovieShaders(REXCVAR_GET(mc2_native_boot_shader_dir))) {
+        const auto depth_directory = REXCVAR_GET(mc2_native_boot_depth_shader_dir);
+        if (!depth_directory.empty()) depth_shaders=LoadDepthShaders(depth_directory);
         NativeGraphics* expected = nullptr;
         Require(active.compare_exchange_strong(expected, this), "Only one native graphics system is supported");
     }
@@ -50,7 +59,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     bool has_presentation() const override { return true; }
     void Shutdown() override {
         std::lock_guard lock(mutex);
-        pending.reset(); renderer.reset();
+        pending.reset(); renderer.reset(); depth_renderer.reset(); gpu.reset();
     }
     void SetInterruptCallback(uint32_t callback, uint32_t user_data) override {
         Require(callback == 0x8236D4E0 && user_data != 0, "Unexpected legacy graphics interrupt callback");
@@ -61,9 +70,48 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     }
     void EnableReadPointerWriteBack(uint32_t, uint32_t) override {}
 
-    // This boundary is still handled by the legacy CPU setters. Record bounded
-    // state changes while the native surface/clear implementation is validated.
-    // Logging never substitutes a clear or changes the original PPC call.
+    bool ClearDepth(const PPCContext& ctx, uint8_t* base) {
+        if (!depth_shaders) return false;
+        if (!(ctx.r4.u32 & 0x30)) {
+            std::lock_guard lock(mutex);
+            Require(!depth_renderer, "Color clear after native scene depth is not implemented");
+            return false;
+        }
+        const auto clear=ReadDepthClear(ctx,base);
+        Flush(base,ctx.r3.u32);
+        std::lock_guard lock(mutex);
+        if (!gpu) gpu=std::make_shared<NativeDevice>();
+        if (!depth_renderer) {
+            depth_renderer=std::make_unique<DepthRenderer>(ConfigureDepth(clear.surface,*depth_shaders),gpu);
+            depth_surface=clear.surface;
+        }
+        Require(*depth_surface == clear.surface, "Native depth surface allocation changed");
+        // The verified pass clears stencil to zero but never reads it. Until
+        // native stencil storage exists, ReadSceneDepthDraw rejects every
+        // stencil-tested draw, so an unsupported effect cannot silently vanish.
+        depth_renderer->Clear(clear.value);
+        completed=gpu->completed;
+        REXLOG_INFO("MC2 native scene: cleared {}x{} depth, samples={}, completed={}",
+                    clear.surface.width,clear.surface.height,clear.surface.samples,completed);
+        return true;
+    }
+    void DrawDepth(const PPCContext& ctx, uint8_t* base) {
+        Require(bool(depth_shaders), "Indexed depth shader directory is not configured");
+        auto snapshot=ReadSceneDepthDraw(ctx,base,*depth_shaders);
+        Flush(base,ctx.r3.u32);
+        std::lock_guard lock(mutex);
+        Require(depth_renderer && depth_surface && *depth_surface == snapshot.surface,
+                "Native scene draw has no matching cleared depth surface");
+        const auto result=depth_renderer->Render(snapshot.draw);
+        completed=result.completed_submission;
+        ++depth_draws;
+        if (depth_draws <= 16 || depth_draws%120 == 0)
+            REXLOG_INFO("MC2 native scene: indexed depth draw {}, indices={}, samples={}, completed={}",
+                        depth_draws,snapshot.draw.index_count,snapshot.surface.samples,completed);
+    }
+
+    // Record bounded changes at the clear boundary while surface support grows.
+    // Logging itself never substitutes a clear or changes the PPC call.
     void TraceClear(const PPCContext& ctx, uint8_t* base) {
         std::lock_guard lock(mutex);
         if (clear_trace_count >= 64) return;
@@ -88,7 +136,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             number(12656), number(12660), number(12664), number(12668), word(11864),
             word(12684), word(12688), word(12692), word(12696));
         if (trace != last_clear_trace) {
-            REXLOG_INFO("MC2 native clear boundary (not yet replaced): {}", trace);
+            REXLOG_INFO("MC2 native clear boundary: {}", trace);
             last_clear_trace = trace; ++clear_trace_count;
         }
     }
@@ -99,7 +147,8 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         if (pending) {
             Require(window && IsWindow(window), "Native game window is unavailable");
             if (!renderer) {
-                renderer = std::make_unique<QuadRenderer>(*pending);
+                if (!gpu) gpu=std::make_shared<NativeDevice>();
+                renderer = std::make_unique<QuadRenderer>(*pending,gpu);
                 renderer->SetWindow(window);
             }
             const auto result = renderer->Present(*pending, REXCVAR_QUERY(std::string, mc2_framerate) != "unlocked");
@@ -154,6 +203,10 @@ void QueueNativeMovie(const PPCContext& ctx, uint8_t* base) {
         UnsupportedNativeOperation(error.what(), ctx);
     }
 }
+void DrawNativeSceneDepth(const PPCContext& ctx, uint8_t* base) {
+    try { Graphics().DrawDepth(ctx,base); }
+    catch (const std::exception& error) { UnsupportedNativeOperation(error.what(),ctx); }
+}
 [[noreturn]] void UnsupportedNativeOperation(const char* operation, const PPCContext& ctx) {
     const auto message = fmt::format("MC2 native boot: unsupported {} at guest caller {:#x}", operation, ctx.lr);
     REXLOG_ERROR("{}", message);
@@ -172,7 +225,11 @@ REX_HOOK_RAW(sub_82388AA0) {
     __imp__sub_82388AA0(ctx, base);
 }
 REX_HOOK_RAW(sub_8238AD80) {
-    if (NativeBootActive()) Graphics().TraceClear(ctx, base);
+    if (NativeBootActive()) {
+        Graphics().TraceClear(ctx, base);
+        try { if (Graphics().ClearDepth(ctx,base)) return; }
+        catch (const std::exception& error) { UnsupportedNativeOperation(error.what(),ctx); }
+    }
     __imp__sub_8238AD80(ctx, base);
 }
 REX_HOOK_RAW(sub_82387370) {
