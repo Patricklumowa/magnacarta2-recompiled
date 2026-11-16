@@ -37,7 +37,7 @@ The UP wrapper copies `r5 * r7` source bytes. Its multiplication, pointer range,
 and artifact limit are checked before reading. The separate indexed-UP entry
 point is not intercepted by this capture.
 
-## Schema version 2
+## Schema version 3
 
 Each `session-<timestamp>-<suffix>/draw-<ordinal>/metadata.json` contains the hook
 name/address, matching-call ordinal, device address, link register, and numeric
@@ -56,7 +56,9 @@ Successful files are:
 | `vertex-declaration.bin` | Resource header and declared elements: `56 + 12 * count`, with type and count checks |
 | `up-vertices.bin` | UP source bytes, without endian conversion |
 | `vertices/slot-NN.descriptor.bin` | First 32 bytes of each bound vertex buffer descriptor |
+| `vertices/slot-NN.data.bin` | Bounded vertex-buffer payload for indexed/nonindexed draws, retaining original byte order |
 | `index-buffer.descriptor.bin` | First 32 bytes of the bound index buffer descriptor |
+| `index-buffer.data.bin` | Bounded full index-buffer payload for an indexed draw whose start/count fit the descriptor |
 | `textures/slot-NN.fetch.bin` | First 26 slots' six raw big-endian fetch words from device `+1152+24*slot`, including slots without a resource pointer; this limit is not a claim of complete texture-state coverage |
 | `textures/slot-NN.descriptor.bin` | First 52 bytes of each bound texture resource |
 | `textures/slot-NN.base.bin` | Supported slots 0–2's exact base-level physical spans, including any intervening row/tile padding |
@@ -75,6 +77,15 @@ Vertex declarations are bounded using their observed initializer: resource type
 5, count at `+24`, 12-byte elements at `+52`. The initializer counts an input
 array terminated by stream 255. Capture reads the resource's allocation extent
 and imposes a conservative 256-element cap.
+
+Vertex resources have type 1 and an embedded fetch at `+24`: its low two address
+bits are type 3, and the next word's bits 2-25 give the size in dwords. The address
+still uses a guest virtual alias. Index resources have type 2, a data pointer at
+`+24`, and byte size at `+28`; word0 bit31 selects 32-bit rather than 16-bit indices.
+The capture validates these types, extents, the selected index range and the
+16 MiB artifact cap before reading. It captures complete bounded buffers so
+consumers can apply fetch offsets and endian rules explicitly. UP captures do not
+copy stale ordinary buffer payloads.
 
 Texture decoding currently supports non-array 2D format 2 (`8`) and format 6
 (`8_8_8_8`) unsigned/gamma fetches. Format 2 replicates its single component
@@ -97,8 +108,8 @@ consumers must check artifact statuses.
 ## Deliberate limits
 
 Every manifest reports `replayable: false` and lists `missing_for_replay`.
-Ordinary buffer payload extents have not been established; only their
-descriptors are captured. Only slots 0–2's supported base levels are captured;
+Ordinary buffer payloads are captured when their descriptors pass the bounded
+checks above. Only slots 0–2's supported base levels are captured;
 other textures and mip levels need more work. Color/depth attachment contents,
 prior draw dependencies, full native pipeline interpretation, and shader
 constant/resource binding semantics still require validation. Device state is
@@ -119,5 +130,9 @@ the full incoming PPC context and guest bytes, modify sentinel return state,
 and check that all three wrappers preserve those changes. Its texture fixture
 reserves the real A-range virtual alias while committing only fixture pages,
 and verifies both captured physical bytes and decoded row data, including the
-three separate movie texture slots. See [native-draw-probe.md](native-draw-probe.md)
+three separate movie texture slots. Buffer fixtures verify raw vertex/index bytes,
+zero/truncated/oversized descriptors and rejection of an overflowing indexed range.
+An actual first indexed draw captured 960 vertex bytes (24 records at stride 40)
+and 144 index bytes (36 big-endian 32-bit indices); it selected indices 6–23 and
+had no bound pixel shader or vertex declaration. See [native-draw-probe.md](native-draw-probe.md)
 for the standalone D3D12 draw experiment.

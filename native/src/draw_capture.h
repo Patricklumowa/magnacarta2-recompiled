@@ -36,4 +36,20 @@ inline bool TexturePhysicalAlias(uint32_t physical, uint64_t length, uint32_t& g
   guest = 0xA0000000u + physical;
   return true;
 }
+
+inline bool BufferBytes(const uint8_t* descriptor, size_t available, bool vertex,
+                        uint32_t& address, uint32_t& bytes) {
+  if (!descriptor || available < 32 ||
+      (mc2::capture::LoadBE32(descriptor) & 15) != (vertex ? 1u : 2u)) return false;
+  address = mc2::capture::LoadBE32(descriptor + 24);
+  bytes = mc2::capture::LoadBE32(descriptor + 28);
+  if (vertex) {
+    // The vertex resource embeds a fetch: byte address/type, then endian and
+    // a 24-bit size in dwords. Its address is still a guest virtual alias.
+    if ((address & 3) != 3) return false;
+    address &= ~3u;
+    bytes = ((bytes >> 2) & 0xFFFFFFu) * 4;
+  }
+  return bytes <= kArtifactLimit && mc2::capture::GuestRange(address, bytes);
+}
 }  // namespace mc2::draw_capture

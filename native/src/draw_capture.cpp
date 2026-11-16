@@ -196,11 +196,39 @@ void Capture(PPCContext& ctx, uint8_t* base, const char* hook, uint32_t guest_ho
         snapshot.artifacts.push_back({"vertex-declaration.bin", "unbound_or_invalid_header", "guest_bytes", declaration});
         snapshot.missing.push_back("vertex_declaration");
       }
-      for (uint32_t slot = 0; slot < 16; ++slot) {
+        const bool buffer_draw = std::string_view(hook) != "up";
+        for (uint32_t slot = 0; slot < 16; ++slot) {
         const auto address = pointer(12468 + slot * 4);
-        if (address) snapshot.Copy(fmt::format("vertices/slot-{:02}.descriptor.bin", slot), address, 32);
+          if (!address) continue;
+          std::vector<uint8_t> descriptor;
+          if (ReadGuest(base, address, 32, descriptor)) {
+            snapshot.Save(fmt::format("vertices/slot-{:02}.descriptor.bin", slot), address, descriptor);
+            uint32_t data = 0, bytes = 0;
+            if (buffer_draw && (!mc2::draw_capture::BufferBytes(descriptor.data(), descriptor.size(), true, data, bytes) ||
+                !snapshot.Copy(fmt::format("vertices/slot-{:02}.data.bin", slot), data, bytes)))
+              snapshot.missing.push_back(fmt::format("vertex_buffer_payload_slot_{}", slot));
+          } else {
+            snapshot.missing.push_back(fmt::format("vertex_buffer_descriptor_slot_{}", slot));
+          }
+        }
+        if (pointer(12444)) {
+          std::vector<uint8_t> descriptor;
+          if (ReadGuest(base, pointer(12444), 32, descriptor)) {
+            snapshot.Save("index-buffer.descriptor.bin", pointer(12444), descriptor);
+            uint32_t data = 0, bytes = 0;
+            if (std::string_view(hook) == "indexed") {
+              const uint32_t index_bytes = (mc2::capture::LoadBE32(descriptor.data()) >> 31) ? 4 : 2;
+              if (!mc2::draw_capture::BufferBytes(descriptor.data(), descriptor.size(), false, data, bytes) ||
+                  (uint64_t(ctx.r5.u32) + ctx.r6.u32) * index_bytes > bytes ||
+                  !snapshot.Copy("index-buffer.data.bin", data, bytes))
+                snapshot.missing.push_back("index_buffer_payload");
+            }
+          } else {
+            snapshot.missing.push_back("index_buffer_descriptor");
+          }
+        } else if (std::string_view(hook) == "indexed") {
+          snapshot.missing.push_back("unbound_index_buffer");
       }
-      if (pointer(12444)) snapshot.Copy("index-buffer.descriptor.bin", pointer(12444), 32);
       for (uint32_t slot = 0; slot < 26; ++slot) {
         const auto address = pointer(12552 + slot * 4);
         // Preserve every fetch, including inline descriptors without a resource.
@@ -228,14 +256,11 @@ void Capture(PPCContext& ctx, uint8_t* base, const char* hook, uint32_t guest_ho
       uint32_t vertex_bytes = 0;
       if (!mc2::draw_capture::UpVertexBytes(ctx.r6.u32, ctx.r5.u32, ctx.r7.u32, vertex_bytes) ||
           !snapshot.Copy("up-vertices.bin", ctx.r6.u32, vertex_bytes)) snapshot.missing.push_back("up_vertices");
-    } else {
-      snapshot.missing.push_back("vertex_buffer_payloads");
-      if (std::string_view(hook) == "indexed") snapshot.missing.push_back("index_buffer_payload");
     }
     snapshot.missing.push_back("attachment_contents_and_prior_draw_dependencies");
     snapshot.missing.push_back("native_pipeline_state_validation");
     std::ostringstream json;
-    json << "{\n  \"schema_version\": 2,\n  \"hook\": \"" << hook
+      json << "{\n  \"schema_version\": 3,\n  \"hook\": \"" << hook
          << "\",\n  \"guest_hook\": " << guest_hook << ",\n  \"matching_draw_ordinal\": " << ordinal
          << ",\n  \"device_address\": " << device_address << ",\n  \"lr\": " << ctx.lr
          << ",\n  \"args\": {\"r3\":" << ctx.r3.u64 << ",\"r4\":" << ctx.r4.u64

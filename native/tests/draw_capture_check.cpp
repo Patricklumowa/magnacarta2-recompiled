@@ -51,6 +51,10 @@ void Invoke(PPCFunc* function, uint8_t* memory, bool bad_up = false) {
   expected_context.r5.u64 = bad_up ? UINT32_MAX : 4;
   expected_context.r6.u64 = 0x9000;
   expected_context.r7.u64 = 16;
+  if (function == sub_82865690) {
+    expected_context.r5.u64 = bad_up ? UINT32_MAX : 2;
+    expected_context.r6.u64 = 6;
+  }
   expected_context.r9.u64 = 0x9876543210ABCDEF;
   expected_context.lr = 0x8248CB34;
   std::memset(expected_context.v59.u8, 0xA5, sizeof(PPCVRegister));
@@ -98,6 +102,21 @@ int main() {
   Check(!TexturePhysicalAlias(0x20000000, 1, extent));
   Check(!TexturePhysicalAlias(0x100000, UINT64_MAX, extent));
   Check(!TexturePhysicalAlias(0x100000, 0, extent));
+  std::array<uint8_t, 32> buffer{};
+  buffer[3] = 1; buffer[26] = 0x90; buffer[27] = 3; buffer[31] = 0x42;
+  uint32_t address = 0;
+  Check(BufferBytes(buffer.data(), buffer.size(), true, address, extent) && address == 0x9000 && extent == 64);
+  Check(!BufferBytes(buffer.data(), 31, true, address, extent));
+  buffer[28] = 1; buffer[31] = 4;  // 16 MiB + four bytes.
+  Check(!BufferBytes(buffer.data(), buffer.size(), true, address, extent));
+  buffer[28] = 0; buffer[31] = 0x42; buffer[27] = 2;
+  Check(!BufferBytes(buffer.data(), buffer.size(), true, address, extent));
+  buffer[0] = 0x80; buffer[3] = 2; buffer[27] = 0; buffer[31] = 64;
+  Check(BufferBytes(buffer.data(), buffer.size(), false, address, extent) && address == 0x9000 && extent == 64);
+  buffer[31] = 0;
+  Check(!BufferBytes(buffer.data(), buffer.size(), false, address, extent));
+  buffer[31] = 64; buffer[24] = 0xDF; buffer[25] = buffer[26] = 0xFF; buffer[27] = 0xFC;
+  Check(!BufferBytes(buffer.data(), buffer.size(), false, address, extent));
 #ifndef _WIN32
   std::printf("Draw capture pure checks: %u failures; live mapping tests need Windows\n", failures);
   return failures ? 1 : 77;
@@ -119,6 +138,10 @@ int main() {
   StoreBE32(kDevice + 12464, 0xA200);
   StoreBE32(kDevice + 12468, 0xA300);
   StoreBE32(kDevice + 12444, 0xA400);
+  StoreBE32(0xA300, 1); StoreBE32(0xA300 + 24, 0xB003); StoreBE32(0xA300 + 28, 0x42);
+  StoreBE32(0xA400, 0x80000002); StoreBE32(0xA400 + 24, 0xB100); StoreBE32(0xA400 + 28, 64);
+  for (uint32_t i = 0; i < 64; ++i) expected_memory[0xB000 + i] = uint8_t(i * 7 + 3);
+  for (uint32_t i = 0; i < 16; ++i) StoreBE32(0xB100 + i * 4, i);
   StoreBE32(kDevice + 12552, 0xA500);
   StoreBE32(kDevice + 10896, 0xA600);
   StoreBE32(kDevice + 10900, 0xA700);
@@ -161,7 +184,10 @@ int main() {
   Invoke(sub_82865690, memory);
   rex::cvar::SetFlagByName("mc2_draw_capture_hook", "nonindexed");
   Invoke(sub_828652A0, memory);
+  rex::cvar::SetFlagByName("mc2_draw_capture_hook", "indexed");
+  Invoke(sub_82865690, memory, true);  // Reject the overflowing indexed range.
   unsigned manifests = 0, up_data = 0, devices = 0, containers = 0, raw_textures = 0, rgba_textures = 0, video_textures = 0, progress_blocks = 0;
+  unsigned vertex_buffers = 0, index_buffers = 0;
   for (const auto& item : std::filesystem::recursive_directory_iterator(directory)) {
     if (item.path().filename() == "metadata.json") {
       ++manifests;
@@ -173,6 +199,10 @@ int main() {
       Check(json.find("texture_payload_slot_0") == std::string::npos);
       Check(json.find("texture_payload_slot_1") == std::string::npos);
       Check(json.find("texture_payload_slot_2") == std::string::npos);
+      Check(json.find("vertex_buffer_payload_slot_0") == std::string::npos);
+      const bool bad_index = json.find("\"hook\": \"indexed\"") != std::string::npos &&
+          json.find("\"r5\":4294967295") != std::string::npos;
+      Check((json.find("index_buffer_payload") != std::string::npos) == bad_index);
     } else if (item.path().filename() == "up-vertices.bin") {
       ++up_data; Check(std::filesystem::file_size(item.path()) == 64);
       std::array<uint8_t, 64> actual{};
@@ -186,6 +216,12 @@ int main() {
       std::ifstream stream(item.path(), std::ios::binary);
       const std::vector<uint8_t> actual((std::istreambuf_iterator<char>(stream)), {});
       Check(actual.size() == 96 && !std::memcmp(actual.data(), expected_memory.data() + 0xA600, 96));
+    } else if (item.path().filename() == "slot-00.data.bin" || item.path().filename() == "index-buffer.data.bin") {
+      const bool vertex = item.path().filename() == "slot-00.data.bin";
+      if (vertex) ++vertex_buffers; else ++index_buffers;
+      std::ifstream stream(item.path(), std::ios::binary);
+      const std::vector<uint8_t> actual((std::istreambuf_iterator<char>(stream)), {});
+      Check(actual.size() == 64 && !std::memcmp(actual.data(), expected_memory.data() + (vertex ? 0xB000 : 0xB100), 64));
     } else if (item.path().extension() == ".container") {
       ++containers; Check(std::filesystem::file_size(item.path()) == 48);
     } else if (item.path().filename() == "slot-00.base.bin") {
@@ -211,8 +247,9 @@ int main() {
             !std::memcmp(actual.data() + 8, expected_texture.data() + 256, 8));
     }
   }
-  Check(original_calls == 10 && manifests == 4 && devices == 4 && containers == 8 && up_data == 1 &&
-        raw_textures == 4 && rgba_textures == 4 && video_textures == 8 && progress_blocks == 4);
+  Check(original_calls == 11 && manifests == 5 && devices == 5 && containers == 10 && up_data == 1 &&
+        raw_textures == 5 && rgba_textures == 5 && video_textures == 10 && progress_blocks == 5 &&
+        vertex_buffers == 3 && index_buffers == 1);
   VirtualFree(memory, 0, MEM_RELEASE);
   std::printf("Draw capture checks: %u failures, %u original calls, %u manifests\nFixtures: %s\n",
               failures, original_calls, manifests, directory.string().c_str());
