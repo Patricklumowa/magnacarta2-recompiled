@@ -2,6 +2,7 @@
 
 #include <plume_render_interface.h>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 namespace mc2::native {
@@ -23,9 +24,25 @@ struct QuadDraw {
 struct QuadResult {
     std::vector<uint8_t> pixels;
     bool debug_layer = false;
+    uint64_t completed_submission = 0;
 };
 
-// Offscreen validation draw, not a streaming or game presentation backend.
+// Reuses one pipeline and its GPU resources. Calls must be serialized.
+// Each Render waits for actual GPU completion before uploads can be reused.
+// Pipeline/texture extents are immutable; per-draw bytes and constants may change.
+class QuadRenderer {
+ public:
+    explicit QuadRenderer(const QuadDraw& configuration, bool enable_debug = false);
+    ~QuadRenderer();
+    QuadRenderer(const QuadRenderer&) = delete;
+    QuadRenderer& operator=(const QuadRenderer&) = delete;
+    QuadResult Render(const QuadDraw& draw);
+ private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
+// Convenience for one offscreen validation draw, not a presentation backend.
 // All input state is a value-owned snapshot; a real GPU fence precedes readback.
 // Never enable the debug layer after another D3D12 device has been created.
 QuadResult RenderQuad(const QuadDraw& draw, bool enable_debug = false);

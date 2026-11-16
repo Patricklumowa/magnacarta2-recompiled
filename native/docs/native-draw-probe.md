@@ -101,9 +101,23 @@ bound as the offline result. A deliberately mismatched shader was rejected witho
 closing the game. The capture-wrapper context/memory checks still pass after
 sharing its bounded guest reader with this hook.
 
-This path is deliberately limited to verification: it creates temporary native
-resources and synchronously reads pixels back. Leave it disabled for gameplay
+This path remains a verification tool that synchronously reads pixels back.
+`QuadRenderer` retains its D3D12
+device, queue, pipeline, descriptors, uploads, textures and readback buffer for
+one fixed layout. It waits for actual GPU completion before reusing them on the
+next draw; changed pipeline or texture extents require a new renderer. A returned
+`completed_submission` counts successful fenced draws and is also recorded in
+the live check manifest. It does not write the original game's progress fields.
+Leave the comparison path disabled for gameplay
 and performance measurements. It never enables the D3D12 debug layer after the
 game's device has been created. The eventual streaming renderer needs persistent
-resources, complete state handling, native presentation, and retirement tied to
-the real GPU queue.
+resources for other draw families, complete state handling, native presentation,
+and retirement tied to the real GPU queue.
+
+`mc2_native_quad_check` takes the verified local movie VS DXIL and flags-zero PS
+DXIL as its two arguments. Its synthetic inputs exercise four submissions on one
+renderer: texture and pixel-constant updates, a vertex update moving the quad
+offscreen, then a valid draw after rejected descriptor/truncated-upload inputs.
+All 16 pixels of each frame and the completion sequence are checked. This catches
+stale uploads, missing command-state rebinding and premature resource reuse;
+the shaders and test binaries remain local.

@@ -72,6 +72,7 @@ struct State {
   bool failed = false;
   fs::path directory;
   std::vector<uint8_t> vs_reference, ps_reference, declaration_reference, vs_dxil, ps_dxil;
+  std::unique_ptr<QuadRenderer> renderer;
 
   void Open(const fs::path& parent, const fs::path& shaders) {
     vs_reference = ReadFile(shaders / "vertex-shader.container");
@@ -155,7 +156,9 @@ void CheckLiveMovie(const PPCContext& ctx, uint8_t* base) noexcept {
       Require(mc2::texture::DecodeBaseRGBA8(description, bytes, texture.bytes, error), error.c_str());
       draw.textures.push_back(std::move(texture));
     }
-    const auto result = RenderQuad(draw);  // Do not enable the debug layer on a running game.
+    // Do not enable the debug layer after the game's device has been created.
+    if (!state.renderer) state.renderer = std::make_unique<QuadRenderer>(draw);
+    const auto result = state.renderer->Render(draw);
     const auto frame = state.directory / ("draw-" + std::to_string(state.ordinal - 1));
     Require(fs::create_directory(frame), "Native movie frame output already exists");
     WriteFile(frame / "output.rgba", result.pixels);
@@ -168,10 +171,10 @@ void CheckLiveMovie(const PPCContext& ctx, uint8_t* base) noexcept {
     // Written last: a directory without this marker is an incomplete check.
     const auto metadata = fmt::format(
         "{{\n  \"schema_version\":1,\n  \"kind\":\"live_native_movie_check\",\n"
-        "  \"width\":1280,\"height\":720,\"movie_draw_ordinal\":{},\n"
+        "  \"width\":1280,\"height\":720,\"movie_draw_ordinal\":{},\"completed_native_submission\":{},\n"
         "  \"original_draw_remains_enabled\":true,\"full_pipeline_parity\":false,\n"
         "  \"vertex_dxil_fnv1a64\":\"{:016x}\",\"pixel_dxil_fnv1a64\":\"{:016x}\",\n"
-        "  \"output_fnv1a64\":\"{:016x}\"\n}}\n", state.ordinal - 1,
+        "  \"output_fnv1a64\":\"{:016x}\"\n}}\n", state.ordinal - 1, result.completed_submission,
         mc2::capture::ContentHash(draw.vertex_shader.data(), draw.vertex_shader.size()),
         mc2::capture::ContentHash(draw.pixel_shader.data(), draw.pixel_shader.size()),
         mc2::capture::ContentHash(result.pixels.data(), result.pixels.size()));
