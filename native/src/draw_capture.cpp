@@ -2,6 +2,9 @@
 #include "draw_capture.h"
 #include "texture_decode.h"
 #include "guest_graphics_read.h"
+#ifdef MC2_ENABLE_NATIVE_BOOT
+#include "native_boot.h"
+#endif
 #ifdef MC2_ENABLE_NATIVE_VIDEO_CHECK
 #include "native_video_check.h"
 #endif
@@ -288,14 +291,23 @@ void Capture(PPCContext& ctx, uint8_t* base, const char* hook, uint32_t guest_ho
 }  // namespace
 
 REX_HOOK_RAW(sub_828652A0) {
+#ifdef MC2_ENABLE_NATIVE_BOOT
+  if (mc2::native::NativeBootActive()) mc2::native::UnsupportedNativeOperation("nonindexed draw", ctx);
+#endif
   Capture(ctx, base, "nonindexed", 0x828652A0);
   __imp__sub_828652A0(ctx, base);
 }
 REX_HOOK_RAW(sub_82865690) {
+#ifdef MC2_ENABLE_NATIVE_BOOT
+  if (mc2::native::NativeBootActive()) mc2::native::UnsupportedNativeOperation("indexed draw", ctx);
+#endif
   Capture(ctx, base, "indexed", 0x82865690);
   __imp__sub_82865690(ctx, base);
 }
 REX_HOOK_RAW(sub_82864D40) {
+#ifdef MC2_ENABLE_NATIVE_BOOT
+  if (mc2::native::NativeBootActive()) { mc2::native::QueueNativeMovie(ctx, base); return; }
+#endif
 #ifdef MC2_ENABLE_NATIVE_VIDEO_CHECK
   mc2::native::CheckLiveMovie(ctx, base);
 #endif

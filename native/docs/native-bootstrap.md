@@ -2,8 +2,8 @@
 
 These findings apply to the executable identified in [graphics-map.md](graphics-map.md).
 They come from its decoded instructions and generated functions. They identify
-the next replacement boundary; a native device bootstrap is not implemented yet.
-The existing native draw checks leave the working graphics system in charge.
+the replacement boundary. The experimental movie-only backend described below
+now crosses it without loading the Xenos plugin; full scene rendering is pending.
 
 ## Host integration
 
@@ -88,13 +88,46 @@ the device snapshot. These are observations, not an atomic CPU/GPU snapshot or
 permission to write the original renderer's progress fields from the native
 comparison path.
 
-## Implementation boundary
+## Experimental native movie boot
 
-The quad renderer now has a persistent host device/queue, resource ownership,
-resizable native presentation and real completion fences for the verified movie
-draw family. Connecting this to the game and replacing the bootstrap must
-also replace the command submission, marker publication and resource retirement
-paths. Unsupported draws, copies, resolves or queries must remain explicit
-failures during validation. The bounded native movie check currently proves
-only that one draw family can consume live inputs correctly; it does not satisfy
-this complete device contract.
+`MC2_ENABLE_NATIVE_BOOT=ON` builds a default-off development backend. Launch it with:
+
+```text
+--mc2_native_boot=true
+--mc2_native_boot_shader_dir=<verified first-draw movie shader directory>
+```
+
+The directory has the same five files as the bounded movie check described in
+[native-draw-probe.md](native-draw-probe.md), but its vertex container/DXIL must
+match the **first** movie draw. The original draw routine patches vertex fetches
+in place; this backend skips that routine and therefore retains the original
+unpatched shader. Translating that first variant and supplying the verified
+POSITION float3 / TEXCOORD float2 declaration produced byte-identical movie pixels
+in the native probe. These game-derived inputs are never distributed.
+
+The app injects its own `IGraphicsSystem` before plugin loading, attaches the
+actual game window and skips Xenos-only settings. Startup asserts that no Xenos
+DLL has been loaded. The original CPU device allocation and state setters are
+retained for now. Their command bytes remain in allocated staging memory and
+are never decoded or submitted to an emulated GPU. The legacy submission workers
+and EDRAM retraining are disabled; command-buffer refill resets that staging area.
+
+The verified UP movie draw takes value-owned copies of its inputs. A flush draws
+and presents the pending movie through the native D3D12 queue. Only after that
+queue's real fence completes is the legacy retirement marker published. Empty
+flushes have no GPU work to retire. Waits retain unsigned wraparound comparison;
+resource refcounts and backing allocations are not cleared to bypass retirement.
+There is one pending opaque movie draw, not a general scene command buffer.
+
+A 12-second native boot displayed the Bandai Namco and Softmax logos and closed
+cleanly. A second run with the staged Xenos DLL physically unavailable completed
+over 480 native movie submissions, then stopped at the first unsupported indexed
+draw (guest return address `0x826D9688`) around 20 seconds after startup. This is
+proof of live movie rendering without Xenos, not a native title menu or gameplay.
+No performance improvement is claimed from this test.
+
+Indexed and nonindexed scene draws, direct begin-UP draws and raw/indirect GPU
+submission paths currently fail explicitly. Scene composition, clears/resolves,
+queries, shader/input coverage, asynchronous resource retirement and native
+platform services remain unfinished. Full effects and shadows are required.
+The original backend remains the default and the reference for those changes.

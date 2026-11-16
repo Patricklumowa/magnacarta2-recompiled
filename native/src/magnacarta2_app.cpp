@@ -14,6 +14,10 @@
 
 #include <algorithm>
 #include <stdexcept>
+#ifdef MC2_ENABLE_NATIVE_BOOT
+#include "native_boot.h"
+#include <rex/ui/window.h>
+#endif
 
 namespace {
 class PCSettingsDialog final : public rex::ui::ImGuiDialog {
@@ -77,7 +81,13 @@ REXCVAR_DEFINE_INT32(mc2_render_scale, 2, "Game",
                      "Internal render scale: 1 = 720p, 2 = 1440p, 3 = 4K (requires restart)")
     .range(1, 3);
 
-void MagnaCarta2App::OnPreSetup(rex::RuntimeConfig&) {
+void MagnaCarta2App::OnPreSetup(rex::RuntimeConfig& config) {
+#ifdef MC2_ENABLE_NATIVE_BOOT
+  if (mc2::native::NativeBootRequested()) {
+    config.graphics = mc2::native::CreateNativeBootGraphics();
+    config.gpu_plugin.clear();
+  }
+#endif
   // Guest vblank timing is independent of the PC monitor's refresh rate.
   REXCVAR_SET(video_mode_refresh_rate, 60.0);
   // Keep the game's display/layout coordinates consistent, and scale actual
@@ -89,6 +99,9 @@ void MagnaCarta2App::OnPreSetup(rex::RuntimeConfig&) {
 
 std::optional<rex::PathConfig> MagnaCarta2App::OnFinalizePaths(
     const rex::PathConfig& defaults, std::function<void(rex::PathConfig)>) {
+#ifdef MC2_ENABLE_NATIVE_BOOT
+  if (mc2::native::NativeBootActive()) return defaults;
+#endif
   // The GPU plugin and its settings now exist; draw resources are allocated
   // later during Runtime::Setup(), so apply the scale before that step.
   const auto scale = std::to_string(REXCVAR_GET(mc2_render_scale));
@@ -104,6 +117,10 @@ std::optional<rex::PathConfig> MagnaCarta2App::OnFinalizePaths(
 }
 
 void MagnaCarta2App::OnPostSetup() {
+#ifdef MC2_ENABLE_NATIVE_BOOT
+  if (mc2::native::NativeBootActive())
+    mc2::native::SetNativeBootWindow(window()->GetNativeWindowHandle());
+#endif
   REXLOG_INFO("MC2: requested game frame-rate mode {}", REXCVAR_GET(mc2_framerate));
   if (REXCVAR_GET(mc2_profile)) rex::perf::Profiler::Startup();
 }

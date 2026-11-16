@@ -28,15 +28,17 @@ movie draw using its translated shaders, three video planes, vertices, and pixel
 constants. Its 1280×720 output agrees with an independent CPU calculation to
 within one UNORM channel step. The probe can also present that draw through a
 native resizable D3D12 swapchain without per-frame CPU readback. This remains
-validation of one draw family; there is
-**no in-game native rendering backend yet**. Captures are not a speedup, and
-complete-frame rendering compatibility remains unverified.
+validation of one draw family. An opt-in experimental backend now also plays
+live startup movies with the Xenos plugin unavailable. It stops at the first
+unsupported indexed scene draw; native menu/gameplay rendering is not implemented.
+Captures are not a speedup, and full scene compatibility remains unverified.
 
 The optional bounded live movie comparison uses the same native drawing code
 on live guest inputs. Two movie draws passed the CPU comparison during a clean
 boot; the original renderer remains enabled and still owns game presentation.
 The [bootstrap and completion map](native-bootstrap.md) records the device
-initialization, marker and resource-retirement dependencies for the next boundary.
+initialization, marker and resource-retirement hooks, native boot instructions,
+and the remaining boundaries.
 
 ## Capture workflow
 

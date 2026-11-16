@@ -82,8 +82,10 @@ DXGI submissions, not distinct simulation updates or measured monitor scanouts.
 
 A captured 1280x720 movie draw was submitted 120 times through this path; its
 first backbuffer was byte-identical to the verified offscreen image. This is
-native presentation of a captured draw, not a live game backend. The working game
-still uses Xenos presentation until its startup and synchronization are replaced.
+native presentation of a captured draw. The separate experimental
+[native movie boot](native-bootstrap.md#experimental-native-movie-boot) connects
+the same renderer to live startup without Xenos; ordinary launches retain the
+working Xenos backend.
 
 ## Bounded live comparison
 

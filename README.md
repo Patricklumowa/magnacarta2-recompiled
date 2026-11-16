@@ -19,6 +19,7 @@ Magna Carta 2 Recompiled (MC2Recomp) uses [ReXGlue](https://github.com/rexglue/r
 | PC settings | F4 menu with 720p, 1440p, and 4K rendering presets |
 | Frame rate | 30 FPS, 60 FPS, and experimental unlocked modes; targets are not performance guarantees |
 | Graphics | D3D12 compatibility renderer; original shadow/tiling behavior retained |
+| Native graphics migration | Experimental startup movies render without Xenos; native menu/gameplay rendering is pending. See [native bootstrap](native/docs/native-bootstrap.md). |
 | Performance | Substantial overhead and stutter remain; optimization is in progress |
 | Audio | Not working in current gameplay tests; enabling output does not resolve missing audio support |
 | Saves and progression | Full save/load, combat, and chapter coverage remain unverified |
