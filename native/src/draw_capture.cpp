@@ -1,6 +1,10 @@
 #include "generated/default/magnacarta2_init.h"
 #include "draw_capture.h"
 #include "texture_decode.h"
+#include "guest_graphics_read.h"
+#ifdef MC2_ENABLE_NATIVE_VIDEO_CHECK
+#include "native_video_check.h"
+#endif
 #include <rex/cvar.h>
 #include <rex/hook.h>
 #include <chrono>
@@ -21,38 +25,7 @@ REXCVAR_DEFINE_UINT32(mc2_draw_capture_count, 1, "Development", "Draw snapshots 
 REXCVAR_DEFINE_UINT32(mc2_draw_capture_skip, 0, "Development", "Matching draw calls to skip before capture");
 
 namespace {
-bool Readable(const uint8_t* pointer, size_t length) {
-#ifdef _WIN32
-  auto cursor = reinterpret_cast<uintptr_t>(pointer);
-  if (length > UINTPTR_MAX - cursor) return false;
-  const auto end = cursor + length;
-  while (cursor < end) {
-    MEMORY_BASIC_INFORMATION region{};
-    if (!VirtualQuery(reinterpret_cast<const void*>(cursor), &region, sizeof(region)) ||
-        region.State != MEM_COMMIT || (region.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return false;
-    constexpr auto read_flags = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
-        PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
-    if (!(region.Protect & read_flags)) return false;
-    const auto start = reinterpret_cast<uintptr_t>(region.BaseAddress);
-    if (region.RegionSize > UINTPTR_MAX - start || start + region.RegionSize <= cursor) return false;
-    cursor = start + region.RegionSize;
-  }
-  return true;
-#else
-  (void)pointer;
-  (void)length;
-  return false;
-#endif
-}
-
-bool Read(uint8_t* base, uint32_t address, uint64_t length, std::vector<uint8_t>& bytes) {
-  if (length > mc2::draw_capture::kArtifactLimit || !mc2::capture::GuestRange(address, length)) return false;
-  const auto* source = rex::memory::GuestPtr(base, address);
-  if (!Readable(source, static_cast<size_t>(length))) return false;
-  bytes.resize(static_cast<size_t>(length));
-  std::memcpy(bytes.data(), source, bytes.size());
-  return true;
-}
+using mc2::capture::ReadGuest;
 
 struct Artifact {
   std::string name;
@@ -119,7 +92,7 @@ struct Snapshot {
 
   bool Copy(const std::string& name, uint32_t address, uint64_t length) {
     std::vector<uint8_t> content;
-    if (!Read(base, address, length, content)) {
+    if (!ReadGuest(base, address, length, content)) {
       artifacts.push_back({name, address ? "unreadable_or_invalid_extent" : "unbound", "guest_bytes", address});
       return false;
     }
@@ -131,18 +104,18 @@ struct Snapshot {
     const uint32_t offset = vertex ? 872 : 40;
     std::vector<uint8_t> descriptor, header, virtual_bytes, physical_bytes;
     mc2::capture::ContainerSize size{};
-    if (!Read(base, resource, 36, descriptor) ||
+    if (!ReadGuest(base, resource, 36, descriptor) ||
         (mc2::capture::LoadBE32(descriptor.data()) & 15) != (vertex ? 6u : 7u) ||
         !mc2::capture::GuestRange(resource, offset + 12) ||
-        !Read(base, resource + offset, 12, header) ||
+        !ReadGuest(base, resource + offset, 12, header) ||
         !mc2::capture::ReadContainerSize(header.data(), header.size(), resource + offset, size, false)) {
       artifacts.push_back({name, "unbound_or_invalid_resource", "binding_reconstructed", resource});
       missing.push_back(name);
       return;
     }
     const auto physical = mc2::capture::LoadBE32(descriptor.data() + (vertex ? 32 : 24));
-    if (!Read(base, resource + offset, size.virtual_bytes, virtual_bytes) ||
-        !Read(base, physical, size.physical_bytes, physical_bytes)) {
+    if (!ReadGuest(base, resource + offset, size.virtual_bytes, virtual_bytes) ||
+        !ReadGuest(base, physical, size.physical_bytes, physical_bytes)) {
       artifacts.push_back({name, "unreadable_segments", "binding_reconstructed", resource, physical});
       missing.push_back(name);
       return;
@@ -165,7 +138,7 @@ struct Snapshot {
       return false;
     }
     std::vector<uint8_t> payload;
-    if (!Read(base, alias, texture.source_bytes, payload)) {
+    if (!ReadGuest(base, alias, texture.source_bytes, payload)) {
       artifacts.push_back({raw_name, "unreadable_physical_span",
                            "guest_physical_bytes", alias, texture.physical_address});
       return false;
@@ -202,7 +175,7 @@ void Capture(PPCContext& ctx, uint8_t* base, const char* hook, uint32_t guest_ho
     Snapshot snapshot{session, base, session.root / fmt::format("draw-{:08}", ordinal)};
     const auto device_address = ctx.r3.u32;
     std::vector<uint8_t> device;
-    if (Read(base, device_address, mc2::draw_capture::kDeviceBytes, device)) {
+    if (ReadGuest(base, device_address, mc2::draw_capture::kDeviceBytes, device)) {
       snapshot.Save("device.bin", device_address, device);
       const auto pointer = [&](size_t offset) { return mc2::capture::LoadBE32(device.data() + offset); };
       snapshot.Shader("vertex-shader.container", pointer(12704), true);
@@ -210,7 +183,7 @@ void Capture(PPCContext& ctx, uint8_t* base, const char* hook, uint32_t guest_ho
       const auto declaration = pointer(11824);
       std::vector<uint8_t> declaration_header;
       uint32_t declaration_bytes = 0;
-      if (Read(base, declaration, 28, declaration_header) &&
+      if (ReadGuest(base, declaration, 28, declaration_header) &&
           mc2::draw_capture::DeclarationBytes(declaration_header.data(), declaration_header.size(), declaration_bytes)) {
         if (!snapshot.Copy("vertex-declaration.bin", declaration, declaration_bytes))
           snapshot.missing.push_back("vertex_declaration");
@@ -321,6 +294,9 @@ REX_HOOK_RAW(sub_82865690) {
   __imp__sub_82865690(ctx, base);
 }
 REX_HOOK_RAW(sub_82864D40) {
+#ifdef MC2_ENABLE_NATIVE_VIDEO_CHECK
+  mc2::native::CheckLiveMovie(ctx, base);
+#endif
   Capture(ctx, base, "up", 0x82864D40);
   __imp__sub_82864D40(ctx, base);
 }

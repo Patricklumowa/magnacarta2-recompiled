@@ -1,7 +1,6 @@
 // Offline, single-draw D3D12 experiment. Inputs are local capture artifacts.
 // This executable is not a game backend and makes no visual-equivalence claim.
-#include <plume_d3d12.h>
-#include <d3d12sdklayers.h>
+#include "native_quad.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -39,23 +38,7 @@ RenderTextureAddressMode Address(const std::string& value) {
     if (value == "wrap") return RenderTextureAddressMode::WRAP;
     throw std::runtime_error("Unsupported texture address mode: " + value);
 }
-bool CheckGpuErrors(ID3D12Device* device) {
-    ID3D12InfoQueue* messages = nullptr;
-    if (FAILED(device->QueryInterface(IID_PPV_ARGS(&messages)))) return false;
-    bool errors = false;
-    for (UINT64 i = 0; i < messages->GetNumStoredMessages(); i++) {
-        SIZE_T size = 0;
-        if (FAILED(messages->GetMessage(i, nullptr, &size))) continue;
-        std::vector<uint8_t> storage(size);
-        auto message = reinterpret_cast<D3D12_MESSAGE*>(storage.data());
-        if (FAILED(messages->GetMessage(i, message, &size))) continue;
-        if (message->Severity <= D3D12_MESSAGE_SEVERITY_WARNING)
-            std::cerr << "D3D12: " << message->pDescription << '\n';
-        errors |= message->Severity <= D3D12_MESSAGE_SEVERITY_ERROR;
-    }
-    messages->Release();
-    return errors;
-}
+
 }
 
 int main(int argc, char** argv) try {
@@ -140,8 +123,6 @@ int main(int argc, char** argv) try {
     struct TextureInput {
         uint32_t width, height, pitch;
         std::vector<uint8_t> bytes;
-        std::unique_ptr<RenderTexture> texture;
-        std::unique_ptr<RenderBuffer> upload;
     };
     std::vector<TextureInput> textures(textureCount);
     for (uint32_t i = 0; i < textureCount; ++i) {
@@ -180,150 +161,20 @@ int main(int argc, char** argv) try {
     const auto output = std::filesystem::u8path(get("--output"));
     Require(args.empty(), "Unknown argument: " + (args.empty() ? std::string() : args.begin()->first));
 
-    std::cerr << "Creating D3D12 device\n";
-    ID3D12Debug* debug = nullptr;
-    bool debugEnabled = SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)));
-    if (debugEnabled) {
-        debug->EnableDebugLayer();
-        debug->Release();
-    }
-    auto renderInterface = std::make_unique<D3D12Interface>();
-    auto device = renderInterface->createDevice("");
-    Require(bool(device), "D3D12 device creation failed");
-    auto queue = device->createCommandQueue(RenderCommandListType::DIRECT);
-    auto commands = queue->createCommandList();
-    auto fence = device->createCommandFence();
-    std::cerr << "Creating shaders and buffers\n";
-    auto vs = device->createShader(vsBytes.data(), vsBytes.size(), "main", RenderShaderFormat::DXIL);
-    auto ps = device->createShader(psBytes.data(), psBytes.size(), "main", RenderShaderFormat::DXIL);
-    Require(bool(vs) && bool(ps), "DXIL shader creation failed");
-    auto vertexBuffer = device->createBuffer(RenderBufferDesc::VertexBuffer(vertices.size(), RenderHeapType::UPLOAD));
-    std::memcpy(vertexBuffer->map(), vertices.data(), vertices.size());
-    vertexBuffer->unmap();
-    const uint16_t indices[] = {0, 1, 2, 0, 2, 3};
-    auto indexBuffer = device->createBuffer(RenderBufferDesc::IndexBuffer(sizeof(indices), RenderHeapType::UPLOAD));
-    std::memcpy(indexBuffer->map(), indices, sizeof(indices));
-    indexBuffer->unmap();
-    auto sharedBuffer = device->createBuffer(RenderBufferDesc::UploadBuffer(512));
-    std::memcpy(sharedBuffer->map(), sharedBytes.data(), 512);
-    sharedBuffer->unmap();
-    auto psBuffer = device->createBuffer(RenderBufferDesc::UploadBuffer(psConstants.size()));
-    std::memcpy(psBuffer->map(), psConstants.data(), psConstants.size());
-    psBuffer->unmap();
-    std::cerr << "Creating texture and readback resources\n";
-    auto target = device->createTexture(RenderTextureDesc::ColorTarget(width, height, targetFormat));
-    Require(bool(target), "Render target creation failed");
-    for (auto& t : textures) {
-        t.texture = device->createTexture(RenderTextureDesc::Texture2D(t.width, t.height, 1, textureFormat));
-        t.upload = device->createBuffer(RenderBufferDesc::UploadBuffer(size_t(t.pitch) * t.height));
-        Require(bool(t.texture) && bool(t.upload), "Texture creation failed");
-        auto pixels = static_cast<uint8_t*>(t.upload->map());
-        for (uint32_t y = 0; y < t.height; ++y)
-            std::memcpy(pixels + size_t(y) * t.pitch, t.bytes.data() + size_t(y) * t.width * 4, t.width * 4);
-        t.upload->unmap();
-    }
-    const uint32_t readPitch = (width * 4 + 255) & ~255u;
-    auto readback = device->createBuffer(RenderBufferDesc::ReadbackBuffer(size_t(readPitch) * height));
-    RenderSamplerDesc samplerDesc;
-    samplerDesc.minFilter = samplerDesc.magFilter = filter == "point" ? RenderFilter::NEAREST : RenderFilter::LINEAR;
-    samplerDesc.mipmapMode = RenderMipmapMode::NEAREST;
-    samplerDesc.addressU = addressU;
-    samplerDesc.addressV = addressV;
-    samplerDesc.addressW = RenderTextureAddressMode::CLAMP;
-    samplerDesc.maxLOD = 0;
-    auto sampler = device->createSampler(samplerDesc);
-    std::cerr << "Creating descriptors\n";
-    RenderDescriptorRange textureRange(RenderDescriptorRangeType::TEXTURE, 0, textureCount);
-    RenderDescriptorRange samplerRange(RenderDescriptorRangeType::SAMPLER, 0, 1);
-    std::array<RenderDescriptorSetDesc, 4> sets{};
-    sets[0] = RenderDescriptorSetDesc(&textureRange, 1, true, textureCount);
-    sets[3] = RenderDescriptorSetDesc(&samplerRange, 1, true, 1);
-    auto textureSet = device->createDescriptorSet(sets[0]);
-    auto samplerSet = device->createDescriptorSet(sets[3]);
-    for (uint32_t i = 0; i < textureCount; ++i)
-        textureSet->setTexture(i, textures[i].texture.get(), RenderTextureLayout::SHADER_READ);
-    samplerSet->setSampler(0, sampler.get());
-    const RenderRootDescriptorDesc roots[] = {
-        {2, 4, RenderRootDescriptorType::CONSTANT_BUFFER},
-        {1, 4, RenderRootDescriptorType::CONSTANT_BUFFER}
-    };
-    RenderPipelineLayoutDesc layoutDesc;
-    layoutDesc.descriptorSetDescs = sets.data();
-    layoutDesc.descriptorSetDescsCount = sets.size();
-    layoutDesc.rootDescriptorDescs = roots;
-    layoutDesc.rootDescriptorDescsCount = std::size(roots);
-    layoutDesc.allowInputLayout = true;
-    std::cerr << "Creating pipeline layout\n";
-    auto layout = device->createPipelineLayout(layoutDesc);
-    Require(bool(layout), "Pipeline layout creation failed");
-    RenderInputSlot inputSlot(0, stride);
-    const RenderInputElement elements[] = {
-        {"POSITION", 0, 0, stride == 16 ? RenderFormat::R32G32_FLOAT : RenderFormat::R32G32B32_FLOAT, 0, 0},
-        {"TEXCOORD", 0, 4, RenderFormat::R32G32_FLOAT, 0, stride - 8}
-    };
-    RenderGraphicsPipelineDesc pipelineDesc;
-    pipelineDesc.pipelineLayout = layout.get();
-    pipelineDesc.vertexShader = vs.get();
-    pipelineDesc.pixelShader = ps.get();
-    pipelineDesc.inputSlots = &inputSlot;
-    pipelineDesc.inputSlotsCount = 1;
-    pipelineDesc.inputElements = elements;
-    pipelineDesc.inputElementsCount = 2;
-    pipelineDesc.renderTargetFormat[0] = targetFormat;
-    pipelineDesc.renderTargetBlend[0] = RenderBlendDesc::Copy();
-    pipelineDesc.renderTargetCount = 1;
-    pipelineDesc.primitiveTopology = topology == "quad-list" ? RenderPrimitiveTopology::TRIANGLE_LIST : RenderPrimitiveTopology::TRIANGLE_STRIP;
-    std::cerr << "Creating graphics pipeline\n";
-    auto pipeline = device->createGraphicsPipeline(pipelineDesc);
-    Require(bool(pipeline), "Graphics pipeline creation failed");
-    const RenderTexture* attachment = target.get();
-    RenderFramebufferDesc framebufferDesc;
-    framebufferDesc.colorAttachments = &attachment;
-    framebufferDesc.colorAttachmentsCount = 1;
-    auto framebuffer = device->createFramebuffer(framebufferDesc);
-    std::cerr << "Recording native draw\n";
-    commands->begin();
-    for (auto& t : textures) {
-        commands->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(t.texture.get(), RenderTextureLayout::COPY_DEST));
-        commands->copyTextureRegion(RenderTextureCopyLocation::Subresource(t.texture.get()),
-            RenderTextureCopyLocation::PlacedFootprint(t.upload.get(), textureFormat, t.width, t.height, 1, t.pitch / 4));
-        commands->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(t.texture.get(), RenderTextureLayout::SHADER_READ));
-    }
-    std::cerr << "Texture upload recorded\n";
-    commands->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(target.get(), RenderTextureLayout::COLOR_WRITE));
-    commands->setFramebuffer(framebuffer.get());
-    commands->setViewports(RenderViewport(0, 0, float(width), float(height)));
-    commands->setScissors(RenderRect(0, 0, width, height));
-    commands->clearColor(0, RenderColor(1, 0, 1, 1));
-    std::cerr << "Target clear recorded\n";
-    commands->setGraphicsPipelineLayout(layout.get());
-    commands->setPipeline(pipeline.get());
-    std::cerr << "Pipeline bound\n";
-    commands->setGraphicsDescriptorSet(textureSet.get(), 0);
-    commands->setGraphicsDescriptorSet(samplerSet.get(), 3);
-    commands->setGraphicsRootDescriptor(sharedBuffer.get(), 0);
-    commands->setGraphicsRootDescriptor(psBuffer.get(), 1);
-    std::cerr << "Descriptors bound\n";
-    RenderVertexBufferView vertexView(vertexBuffer.get(), vertices.size());
-    commands->setVertexBuffers(0, &vertexView, 1, &inputSlot);
-    if (topology == "quad-list") {
-        RenderIndexBufferView indexView(indexBuffer.get(), sizeof(indices), RenderFormat::R16_UINT);
-        commands->setIndexBuffer(&indexView);
-        commands->drawIndexedInstanced(6, 1, 0, 0, 0);
-    } else {
-        commands->drawInstanced(4, 1, 0, 0);
-    }
-    commands->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(target.get(), RenderTextureLayout::COPY_SOURCE));
-    std::cerr << "Draw recorded\n";
-    commands->copyTextureRegion(RenderTextureCopyLocation::PlacedFootprint(readback.get(), targetFormat, width, height, 1, readPitch / 4),
-        RenderTextureCopyLocation::Subresource(target.get()));
-    commands->end();
-    std::cerr << "Submitting native draw\n";
-    queue->executeCommandLists(commands.get(), fence.get());
-    queue->waitForCommandFence(fence.get());
-    Require(!CheckGpuErrors(static_cast<D3D12Device*>(device.get())->d3d), "D3D12 validation reported an error");
-    std::cerr << "Reading rendered pixels\n";
-    const auto result = static_cast<const uint8_t*>(readback->map());
+    mc2::native::QuadDraw draw;
+    draw.width = width; draw.height = height; draw.stride = stride;
+    draw.quad_list = topology == "quad-list";
+    draw.texture_format = textureFormat; draw.target_format = targetFormat;
+    draw.filter = filter == "point" ? RenderFilter::NEAREST : RenderFilter::LINEAR;
+    draw.address_u = addressU; draw.address_v = addressV;
+    draw.vertex_shader = vsBytes; draw.pixel_shader = psBytes;
+    draw.vertices = std::move(vertices); draw.shared_constants = sharedBytes;
+    draw.pixel_constants = std::move(psConstants);
+    for (auto& t : textures) draw.textures.push_back({t.width, t.height, std::move(t.bytes)});
+    auto rendered = mc2::native::RenderQuad(draw, true);
+    const auto* result = rendered.pixels.data();
+    const uint32_t readPitch = width * 4;
+    const bool debugEnabled = rendered.debug_layer;
     if (!output.parent_path().empty()) std::filesystem::create_directories(output.parent_path());
     std::ofstream file(output, std::ios::binary);
     Require(bool(file), "Cannot create output file");
@@ -334,7 +185,6 @@ int main(int argc, char** argv) try {
         for (uint32_t x = 0; x < width; x++)
             changed += row[x * 4] != 255 || row[x * 4 + 1] != 0 || row[x * 4 + 2] != 255 || row[x * 4 + 3] != 255;
     }
-    readback->unmap();
     Require(bool(file), "Failed writing readback");
     Require(changed > 0, "No pixels differ from the magenta clear; draw proof failed");
     std::cout << "label=" << label << " width=" << width << " height=" << height << " format=" << targetFormatText

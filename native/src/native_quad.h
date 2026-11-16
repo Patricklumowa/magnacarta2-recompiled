@@ -1,0 +1,32 @@
+#pragma once
+
+#include <plume_render_interface.h>
+#include <cstdint>
+#include <vector>
+
+namespace mc2::native {
+struct QuadTexture {
+    uint32_t width = 0, height = 0;
+    std::vector<uint8_t> bytes;
+};
+struct QuadDraw {
+    uint32_t width = 0, height = 0, stride = 0;
+    bool quad_list = false;
+    plume::RenderFormat texture_format = plume::RenderFormat::R8G8B8A8_UNORM;
+    plume::RenderFormat target_format = plume::RenderFormat::R8G8B8A8_UNORM;
+    plume::RenderFilter filter = plume::RenderFilter::LINEAR;
+    plume::RenderTextureAddressMode address_u = plume::RenderTextureAddressMode::CLAMP;
+    plume::RenderTextureAddressMode address_v = plume::RenderTextureAddressMode::CLAMP;
+    std::vector<uint8_t> vertex_shader, pixel_shader, vertices, shared_constants, pixel_constants;
+    std::vector<QuadTexture> textures;
+};
+struct QuadResult {
+    std::vector<uint8_t> pixels;
+    bool debug_layer = false;
+};
+
+// Offscreen validation draw, not a streaming or game presentation backend.
+// All input state is a value-owned snapshot; a real GPU fence precedes readback.
+// Never enable the debug layer after another D3D12 device has been created.
+QuadResult RenderQuad(const QuadDraw& draw, bool enable_debug = false);
+}  // namespace mc2::native

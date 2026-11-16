@@ -30,6 +30,10 @@ within one UNORM channel step. This is an offline single-draw check; there is
 **no in-game native rendering backend yet**. Captures are not a speedup, and
 complete-frame rendering compatibility remains unverified.
 
+The optional bounded live movie comparison uses the same native drawing code
+on live guest inputs. Two movie draws passed the CPU comparison during a clean
+boot; the original renderer remains enabled and still owns game presentation.
+
 ## Capture workflow
 
 Build the game with `src/shader_capture.cpp`, and apply the frame-capture SDK

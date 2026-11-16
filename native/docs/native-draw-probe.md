@@ -64,3 +64,46 @@ The D3D12 debug layer was unavailable on the test machine; the probe reports tha
 fact and enables validation when the layer is installed. No speed claim follows
 from this offline draw. Remaining work is native presentation, live resource
 lifetime and upload handling, full pipeline-state decoding, and gameplay coverage.
+
+## Bounded live comparison
+
+`MC2_ENABLE_NATIVE_VIDEO_CHECK` builds an optional comparison hook using the same
+`native_quad` renderer. It defaults off at build time and at runtime. The hook
+copies live movie inputs before the original UP draw, performs a native offscreen
+draw, waits for its GPU fence, and records the result. The original guest draw
+still executes. This does not replace the in-game renderer or its command ring.
+
+Prepare a local shader directory containing the validated movie
+`vertex-shader.container`, `pixel-shader.container`, `vertex-declaration.bin`,
+and their translated `vertex.dxil` / `pixel.dxil`. The pixel binary must have
+specialization flags zero. No such files are distributed by this project.
+Set these cvars using absolute paths:
+
+```text
+--mc2_native_video_check_dir=<new output directory>
+--mc2_native_video_shader_dir=<verified local shader directory>
+--mc2_native_video_check_skip=180
+--mc2_native_video_check_count=2
+```
+
+The check requires the observed caller and ABI, exact bound shader container
+bytes, the verified declaration elements, and the three-plane texture/sampler
+layout. A mismatch or read/I/O failure disables further native checks and logs
+the reason while the original renderer continues. An empty output setting does
+nothing. Count is clamped to 1–4, and each process creates a fresh session.
+Successful frames include raw input/output files and a `metadata.json` marker
+written last; ignore a frame directory without that marker. Inputs are copied,
+but guest-memory reads across multiple resources are not an atomic snapshot.
+
+The first live run rendered movie draws 180 and 181 and exited cleanly. Both
+native images passed the independent CPU comparison with the same one-channel-step
+bound as the offline result. A deliberately mismatched shader was rejected without
+closing the game. The capture-wrapper context/memory checks still pass after
+sharing its bounded guest reader with this hook.
+
+This path is deliberately limited to verification: it creates temporary native
+resources and synchronously reads pixels back. Leave it disabled for gameplay
+and performance measurements. It never enables the D3D12 debug layer after the
+game's device has been created. The eventual streaming renderer needs persistent
+resources, complete state handling, native presentation, and retirement tied to
+the real GPU queue.
