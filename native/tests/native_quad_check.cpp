@@ -33,6 +33,38 @@ void Pixels(const mc2::native::QuadResult& result, uint64_t sequence, std::array
     for (size_t i = 0; i < result.pixels.size(); ++i)
         Check(result.pixels[i] == expected[i % 4], "Persistent upload/constant/vertex/readback mismatch");
 }
+struct TestWindow {
+    HWND handle = nullptr;
+    TestWindow() {
+        WNDCLASSW windowClass{};
+        windowClass.lpfnWndProc = DefWindowProcW;
+        windowClass.hInstance = GetModuleHandleW(nullptr);
+        windowClass.lpszClassName = L"MC2NativeQuadCheck";
+        Check(RegisterClassW(&windowClass) != 0, "Cannot register test window");
+        // Hidden HWND: exercise DXGI without interrupting the user's desktop.
+        handle = CreateWindowW(windowClass.lpszClassName, L"Native presentation check",
+            WS_POPUP, 0, 0, 16, 8, nullptr, nullptr, windowClass.hInstance, nullptr);
+        Check(handle != nullptr, "Cannot create test window");
+    }
+    ~TestWindow() { if (IsWindow(handle)) DestroyWindow(handle); }
+    void Resize(int width, int height) {
+        Check(SetWindowPos(handle, nullptr, 0, 0, width, height, SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOZORDER),
+              "Cannot resize test window");
+    }
+};
+void Presented(const mc2::native::QuadResult& result, uint64_t sequence, uint32_t width, uint32_t height) {
+    Check(result.present_submitted && result.completed_submission == sequence, "Native present was not completed");
+    Check(result.width == width && result.height == height && result.pixels.size() == size_t(width) * height * 4,
+          "Presentation did not follow the window size");
+    const uint32_t extent = std::min(width, height), x0 = (width - extent) / 2, y0 = (height - extent) / 2;
+    const std::array<uint8_t, 4> color{155,129,203,64}, black{0,0,0,255};
+    for (uint32_t y = 0; y < height; ++y)
+        for (uint32_t x = 0; x < width; ++x) {
+            const auto& expected = x >= x0 && x < x0 + extent && y >= y0 && y < y0 + extent ? color : black;
+            Check(std::memcmp(result.pixels.data() + (size_t(y) * width + x) * 4, expected.data(), 4) == 0,
+                  "Presentation resized or letterboxed pixels incorrectly");
+        }
+}
 }
 
 int main(int argc, char** argv) try {
@@ -81,7 +113,26 @@ int main(int argc, char** argv) try {
     draw.textures[0].bytes.push_back(255);
     std::memcpy(draw.vertices.data(), vertices, sizeof(vertices));
     Pixels(renderer.Render(draw), 4, {155,129,203,64});
-    std::cout << "PASS: four fenced draws reuse the device, pipeline and resources; texture, constant and vertex updates render correctly; rejected inputs do not consume a submission\n";
+    TestWindow window;
+    renderer.SetWindow(window.handle);
+    Presented(renderer.Present(draw, false, true), 5, 16, 8);
+    window.Resize(8, 16);
+    Presented(renderer.Present(draw, true, true), 6, 8, 16);
+    window.Resize(0, 0);
+    auto skipped = renderer.Present(draw, false);
+    Check(!skipped.present_submitted && skipped.pixels.empty() && skipped.completed_submission == 6,
+          "Zero-size window consumed a submission");
+    window.Resize(13, 9);
+    Presented(renderer.Present(draw, false, true), 7, 13, 9);
+    const auto noReadback = renderer.Present(draw, false);
+    Check(noReadback.present_submitted && noReadback.pixels.empty() && noReadback.completed_submission == 8,
+          "Normal presentation copied pixels to the CPU");
+    renderer.SetWindow(nullptr);
+    Pixels(renderer.Render(draw), 9, {155,129,203,64});
+    renderer.SetWindow(window.handle);
+    Presented(renderer.Present(draw, false, true), 10, 13, 9);
+    renderer.SetWindow(nullptr);
+    std::cout << "PASS: persistent uploads, rejection, ten fenced draws, swapchain resize, letterboxing, zero-size suspension, presentation without readback, and detach/reattach\n";
     return 0;
 } catch (const std::exception& error) {
     std::cerr << "Native quad check: " << error.what() << '\n';

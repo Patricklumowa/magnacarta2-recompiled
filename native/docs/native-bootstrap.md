@@ -90,8 +90,9 @@ comparison path.
 
 ## Implementation boundary
 
-The next live backend needs a persistent host device/queue, resource ownership,
-native presentation and real completion fences. Replacing the bootstrap must
+The quad renderer now has a persistent host device/queue, resource ownership,
+resizable native presentation and real completion fences for the verified movie
+draw family. Connecting this to the game and replacing the bootstrap must
 also replace the command submission, marker publication and resource retirement
 paths. Unsupported draws, copies, resolves or queries must remain explicit
 failures during validation. The bounded native movie check currently proves

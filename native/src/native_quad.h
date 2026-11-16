@@ -23,7 +23,9 @@ struct QuadDraw {
 };
 struct QuadResult {
     std::vector<uint8_t> pixels;
+    uint32_t width = 0, height = 0;
     bool debug_layer = false;
+    bool present_submitted = false;
     uint64_t completed_submission = 0;
 };
 
@@ -37,6 +39,11 @@ class QuadRenderer {
     QuadRenderer(const QuadRenderer&) = delete;
     QuadRenderer& operator=(const QuadRenderer&) = delete;
     QuadResult Render(const QuadDraw& draw);
+    // The caller owns the HWND and its message loop. Null detaches it.
+    void SetWindow(plume::RenderWindow window);
+    // Draw directly at the window's current resolution, preserving aspect.
+    // Minimized windows submit no work. Readback is optional diagnostics only.
+    QuadResult Present(const QuadDraw& draw, bool vsync = true, bool read_pixels = false);
  private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

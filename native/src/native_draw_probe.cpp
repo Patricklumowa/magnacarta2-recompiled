@@ -38,7 +38,31 @@ RenderTextureAddressMode Address(const std::string& value) {
     if (value == "wrap") return RenderTextureAddressMode::WRAP;
     throw std::runtime_error("Unsupported texture address mode: " + value);
 }
-
+struct ProbeWindow {
+    HWND handle = nullptr;
+    ~ProbeWindow() { if (IsWindow(handle)) DestroyWindow(handle); }
+    void Open(uint32_t width, uint32_t height) {
+        WNDCLASSW windowClass{};
+        windowClass.lpfnWndProc = DefWindowProcW;
+        windowClass.hInstance = GetModuleHandleW(nullptr);
+        windowClass.lpszClassName = L"MC2NativeDrawProbe";
+        Require(RegisterClassW(&windowClass) != 0, "Cannot register presentation window");
+        RECT bounds{0, 0, LONG(width), LONG(height)};
+        Require(AdjustWindowRect(&bounds, WS_OVERLAPPEDWINDOW, FALSE), "Cannot calculate window bounds");
+        handle = CreateWindowW(windowClass.lpszClassName, L"Magna Carta 2 - native draw validation",
+            WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, bounds.right - bounds.left,
+            bounds.bottom - bounds.top, nullptr, nullptr, windowClass.hInstance, nullptr);
+        Require(handle != nullptr, "Cannot create presentation window");
+        ShowWindow(handle, SW_SHOWNOACTIVATE);
+    }
+    bool Pump() const {
+        MSG message;
+        while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&message); DispatchMessageW(&message);
+        }
+        return IsWindow(handle);
+    }
+};
 }
 
 int main(int argc, char** argv) try {
@@ -58,6 +82,7 @@ int main(int argc, char** argv) try {
             "  --topology quad-list|triangle-strip --output file.bin\n"
             "  --depth off --blend copy --cull none --alpha-test off\n"
             "  --samples 1 --viewport full --scissor full\n"
+            "Optional: --present-frames N --window-width N --window-height N\n"
             "Vertices: four packed float position/uv records. Pixel space requires a verified passthrough VS.\n"
             "Shared constants: 512 host-endian bytes. Optional PS constants: 4096 host-endian bytes.\n"
             "Texture must already be decoded; gamma/half-pixel state must be established by capture analysis.\n"
@@ -159,6 +184,9 @@ int main(int argc, char** argv) try {
             get("--alpha-test") == "off" && get("--samples") == "1" && get("--viewport") == "full" &&
             get("--scissor") == "full", "Probe supports only verified opaque, depth-disabled, unculled, single-sample full-viewport draws");
     const auto output = std::filesystem::u8path(get("--output"));
+    const auto presentFrames = args.count("--present-frames") ? number("--present-frames") : 0;
+    const auto windowWidth = args.count("--window-width") ? number("--window-width") : width;
+    const auto windowHeight = args.count("--window-height") ? number("--window-height") : height;
     Require(args.empty(), "Unknown argument: " + (args.empty() ? std::string() : args.begin()->first));
 
     mc2::native::QuadDraw draw;
@@ -171,24 +199,46 @@ int main(int argc, char** argv) try {
     draw.vertices = std::move(vertices); draw.shared_constants = sharedBytes;
     draw.pixel_constants = std::move(psConstants);
     for (auto& t : textures) draw.textures.push_back({t.width, t.height, std::move(t.bytes)});
-    auto rendered = mc2::native::RenderQuad(draw, true);
+    ProbeWindow window;
+    mc2::native::QuadRenderer renderer(draw, true);
+    mc2::native::QuadResult rendered;
+    uint32_t presents = 0;
+    if (presentFrames) {
+        window.Open(windowWidth, windowHeight);
+        renderer.SetWindow(window.handle);
+        for (uint32_t frame = 0; frame < presentFrames && window.Pump(); ++frame) {
+            auto result = renderer.Present(draw, true, presents == 0);
+            if (result.present_submitted) {
+                if (presents++ == 0) rendered = std::move(result);
+            } else {
+                // A minimized probe must still pump messages and terminate.
+                Sleep(16);
+            }
+        }
+        renderer.SetWindow(nullptr);
+        Require(presents != 0, "No native frame was presented");
+    } else {
+        rendered = renderer.Render(draw);
+    }
     const auto* result = rendered.pixels.data();
-    const uint32_t readPitch = width * 4;
+    const uint32_t outputWidth = rendered.width, outputHeight = rendered.height;
+    const uint32_t readPitch = outputWidth * 4;
     const bool debugEnabled = rendered.debug_layer;
     if (!output.parent_path().empty()) std::filesystem::create_directories(output.parent_path());
     std::ofstream file(output, std::ios::binary);
     Require(bool(file), "Cannot create output file");
     size_t changed = 0;
-    for (uint32_t y = 0; y < height; y++) {
+    for (uint32_t y = 0; y < outputHeight; y++) {
         const auto row = result + size_t(y) * readPitch;
-        file.write(reinterpret_cast<const char*>(row), width * 4);
-        for (uint32_t x = 0; x < width; x++)
+        file.write(reinterpret_cast<const char*>(row), outputWidth * 4);
+        for (uint32_t x = 0; x < outputWidth; x++)
             changed += row[x * 4] != 255 || row[x * 4 + 1] != 0 || row[x * 4 + 2] != 255 || row[x * 4 + 3] != 255;
     }
     Require(bool(file), "Failed writing readback");
     Require(changed > 0, "No pixels differ from the magenta clear; draw proof failed");
-    std::cout << "label=" << label << " width=" << width << " height=" << height << " format=" << targetFormatText
+    std::cout << "label=" << label << " width=" << outputWidth << " height=" << outputHeight << " format=" << targetFormatText
               << " changed_pixels=" << changed << " debug_layer=" << (debugEnabled ? "enabled" : "unavailable")
+              << " presents_submitted=" << presents
               << " visual_equivalence=unverified\n";
     return 0;
 } catch (const std::exception& error) {

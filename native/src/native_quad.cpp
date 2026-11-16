@@ -2,6 +2,8 @@
 #include <plume_d3d12.h>
 #include <d3d12sdklayers.h>
 #include <array>
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
@@ -26,6 +28,7 @@ bool CheckGpuErrors(ID3D12Device* device) {
             std::cerr << "D3D12: " << message->pDescription << '\n';
         errors |= message->Severity <= D3D12_MESSAGE_SEVERITY_ERROR;
     }
+    messages->ClearStoredMessages();
     messages->Release();
     return errors;
 }
@@ -76,6 +79,11 @@ struct QuadRenderer::Impl {
     std::unique_ptr<RenderPipelineLayout> layout;
     std::unique_ptr<RenderPipeline> pipeline;
     std::unique_ptr<RenderFramebuffer> framebuffer;
+    RenderWindow window = {};
+    std::unique_ptr<RenderSwapChain> swapChain;
+    std::vector<std::unique_ptr<RenderFramebuffer>> swapFramebuffers;
+    std::unique_ptr<RenderBuffer> presentReadback;
+    uint32_t presentReadWidth = 0, presentReadHeight = 0;
     RenderInputSlot inputSlot{0, 0};
     uint32_t readPitch = 0;
     uint64_t completed = 0;
@@ -186,7 +194,7 @@ struct QuadRenderer::Impl {
         framebuffer = device->createFramebuffer(framebufferDesc);
     }
 
-    QuadResult Render(const QuadDraw& draw) {
+    void ValidateConfiguration(const QuadDraw& draw) const {
         ValidateDraw(draw);
         const auto& c = configuration;
         Require(draw.width == c.width && draw.height == c.height && draw.stride == c.stride &&
@@ -198,6 +206,70 @@ struct QuadRenderer::Impl {
         for (size_t i = 0; i < textures.size(); ++i)
             Require(draw.textures[i].width == textures[i].width && draw.textures[i].height == textures[i].height,
                     "Texture extent changed; create a renderer for the new layout");
+    }
+
+    void SetWindow(RenderWindow handle) {
+        Require(!handle || IsWindow(handle), "Invalid native presentation window");
+        if (handle == window) return;
+        // Both rendering entry points return only after their GPU fence.
+        swapFramebuffers.clear();
+        swapChain.reset();
+        presentReadback.reset();
+        presentReadWidth = presentReadHeight = 0;
+        window = handle;
+    }
+
+    QuadResult Present(const QuadDraw& draw, bool vsync, bool read_pixels) {
+        ValidateConfiguration(draw);
+        Require(window && IsWindow(window), "Native presentation window is not available");
+        RECT client{};
+        Require(GetClientRect(window, &client), "Cannot query native window size");
+        if (IsIconic(window) || client.right <= 0 || client.bottom <= 0) {
+            QuadResult skipped;
+            skipped.completed_submission = completed;
+            skipped.debug_layer = debugEnabled;
+            return skipped;
+        }
+        Require(client.right <= 8192 && client.bottom <= 8192, "Native window exceeds supported dimensions");
+        if (!swapChain) {
+            swapChain = queue->createSwapChain(window, 2, configuration.target_format, 1);
+            Require(swapChain && !swapChain->isEmpty(), "Native swapchain creation failed");
+        } else if (swapChain->needsResize()) {
+            swapFramebuffers.clear();
+            Require(swapChain->resize(), "Native swapchain resize failed");
+        }
+        if (swapFramebuffers.empty()) {
+            for (uint32_t i = 0; i < swapChain->getTextureCount(); ++i) {
+                const RenderTexture* attachment = swapChain->getTexture(i);
+                RenderFramebufferDesc desc;
+                desc.colorAttachments = &attachment;
+                desc.colorAttachmentsCount = 1;
+                swapFramebuffers.push_back(device->createFramebuffer(desc));
+                Require(bool(swapFramebuffers.back()), "Swapchain framebuffer creation failed");
+            }
+        }
+        const auto width = swapChain->getWidth(), height = swapChain->getHeight();
+        if (read_pixels && (!presentReadback || presentReadWidth != width || presentReadHeight != height)) {
+            presentReadWidth = width; presentReadHeight = height;
+            presentReadback = device->createBuffer(RenderBufferDesc::ReadbackBuffer(
+                size_t((width * 4 + 255) & ~255u) * height));
+            Require(bool(presentReadback), "Presentation readback allocation failed");
+        }
+        uint32_t index = 0;
+        Require(swapChain->acquireTexture(nullptr, &index) && index < swapFramebuffers.size(),
+                "Native backbuffer acquisition failed");
+        swapChain->setVsyncEnabled(vsync);
+        return Draw(draw, swapChain->getTexture(index), swapFramebuffers[index].get(),
+                    read_pixels ? presentReadback.get() : nullptr, true, index);
+    }
+
+    QuadResult Render(const QuadDraw& draw) {
+        ValidateConfiguration(draw);
+        return Draw(draw, target.get(), framebuffer.get(), readback.get(), false, 0);
+    }
+
+    QuadResult Draw(const QuadDraw& draw, RenderTexture* outputTarget, RenderFramebuffer* outputFramebuffer,
+                    RenderBuffer* outputReadback, bool present, uint32_t backbufferIndex) {
         // The prior Render returned only after its real GPU fence. These
         // persistent uploads and command allocator are now safe to reuse.
         std::memcpy(vertexBuffer->map(), draw.vertices.data(), draw.vertices.size());
@@ -213,7 +285,8 @@ struct QuadRenderer::Impl {
                 std::memcpy(pixels + size_t(y) * t.pitch, draw.textures[i].bytes.data() + size_t(y) * t.width * 4, t.width * 4);
             t.upload->unmap();
         }
-        const auto width = draw.width, height = draw.height;
+        const auto width = outputFramebuffer->getWidth(), height = outputFramebuffer->getHeight();
+        const auto outputPitch = (width * 4 + 255) & ~255u;
         const auto& vertices = draw.vertices;
         const auto textureFormat = draw.texture_format, targetFormat = draw.target_format;
         commands->begin();
@@ -223,11 +296,15 @@ struct QuadRenderer::Impl {
                 RenderTextureCopyLocation::PlacedFootprint(t.upload.get(), textureFormat, t.width, t.height, 1, t.pitch / 4));
             commands->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(t.texture.get(), RenderTextureLayout::SHADER_READ));
         }
-        commands->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(target.get(), RenderTextureLayout::COLOR_WRITE));
-        commands->setFramebuffer(framebuffer.get());
-        commands->setViewports(RenderViewport(0, 0, float(width), float(height)));
+        commands->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(outputTarget, RenderTextureLayout::COLOR_WRITE));
+        commands->setFramebuffer(outputFramebuffer);
         commands->setScissors(RenderRect(0, 0, width, height));
-        commands->clearColor(0, RenderColor(1, 0, 1, 1));
+        commands->clearColor(0, present ? RenderColor(0, 0, 0, 1) : RenderColor(1, 0, 1, 1));
+        const double scale = std::min(double(width) / draw.width, double(height) / draw.height);
+        const auto viewWidth = std::min(width, uint32_t(std::lround(draw.width * scale)));
+        const auto viewHeight = std::min(height, uint32_t(std::lround(draw.height * scale)));
+        commands->setViewports(RenderViewport(float((width - viewWidth) / 2), float((height - viewHeight) / 2),
+                                             float(viewWidth), float(viewHeight)));
         commands->setGraphicsPipelineLayout(layout.get());
         commands->setPipeline(pipeline.get());
         commands->setGraphicsDescriptorSet(textureSet.get(), 0);
@@ -243,21 +320,32 @@ struct QuadRenderer::Impl {
         } else {
             commands->drawInstanced(4, 1, 0, 0);
         }
-        commands->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(target.get(), RenderTextureLayout::COPY_SOURCE));
-        commands->copyTextureRegion(RenderTextureCopyLocation::PlacedFootprint(readback.get(), targetFormat, width, height, 1, readPitch / 4),
-            RenderTextureCopyLocation::Subresource(target.get()));
+        if (outputReadback) {
+            commands->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(outputTarget, RenderTextureLayout::COPY_SOURCE));
+            commands->copyTextureRegion(RenderTextureCopyLocation::PlacedFootprint(outputReadback, targetFormat, width, height, 1, outputPitch / 4),
+                RenderTextureCopyLocation::Subresource(outputTarget));
+        }
+        if (present)
+            commands->barriers(RenderBarrierStage::NONE, RenderTextureBarrier(outputTarget, RenderTextureLayout::PRESENT));
         commands->end();
         queue->executeCommandLists(commands.get(), fence.get());
+        // Wait even if DXGI presentation fails, so callers can safely unwind.
+        const bool presented = present && swapChain->present(backbufferIndex, nullptr, 0);
         queue->waitForCommandFence(fence.get());
         Require(!CheckGpuErrors(static_cast<D3D12Device*>(device.get())->d3d), "D3D12 validation reported an error");
-        const auto result = static_cast<const uint8_t*>(readback->map());
+        Require(!present || presented, "Native presentation failed");
         QuadResult output;
+        output.width = width; output.height = height;
+        output.present_submitted = presented;
         output.debug_layer = debugEnabled;
         output.completed_submission = ++completed;
-        output.pixels.resize(size_t(width) * height * 4);
-        for (uint32_t y = 0; y < height; ++y)
-            std::memcpy(output.pixels.data() + size_t(y) * width * 4, result + size_t(y) * readPitch, width * 4);
-        readback->unmap();
+        if (outputReadback) {
+            const auto result = static_cast<const uint8_t*>(outputReadback->map());
+            output.pixels.resize(size_t(width) * height * 4);
+            for (uint32_t y = 0; y < height; ++y)
+                std::memcpy(output.pixels.data() + size_t(y) * width * 4, result + size_t(y) * outputPitch, width * 4);
+            outputReadback->unmap();
+        }
         return output;
     }
 };
@@ -266,6 +354,10 @@ QuadRenderer::QuadRenderer(const QuadDraw& configuration, bool enable_debug)
     : impl_(std::make_unique<Impl>(configuration, enable_debug)) {}
 QuadRenderer::~QuadRenderer() = default;
 QuadResult QuadRenderer::Render(const QuadDraw& draw) { return impl_->Render(draw); }
+void QuadRenderer::SetWindow(RenderWindow window) { impl_->SetWindow(window); }
+QuadResult QuadRenderer::Present(const QuadDraw& draw, bool vsync, bool read_pixels) {
+    return impl_->Present(draw, vsync, read_pixels);
+}
 
 QuadResult RenderQuad(const QuadDraw& draw, bool enable_debug) {
     return QuadRenderer(draw, enable_debug).Render(draw);

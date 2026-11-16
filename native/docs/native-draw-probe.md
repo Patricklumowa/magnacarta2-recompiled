@@ -57,13 +57,33 @@ sampling and color-conversion calculation using the captured planes/constants
 compared all 921600 pixels: 920198 matched exactly, and no channel differed by
 more than one of 255 UNORM steps. This checks resource binding, vertex fetch,
 constant upload and the shader arithmetic for this draw. It does **not** establish
-matched Xenos framebuffer parity, final presentation, or correctness of other
+matched Xenos framebuffer parity or correctness of other
 shaders, scene rendering, effects, resolves or synchronization.
 
 The D3D12 debug layer was unavailable on the test machine; the probe reports that
 fact and enables validation when the layer is installed. No speed claim follows
-from this offline draw. Remaining work is native presentation, live resource
+from this offline draw. Remaining work is in-game native presentation, live resource
 lifetime and upload handling, full pipeline-state decoding, and gameplay coverage.
+
+## Native window presentation
+
+`QuadRenderer::SetWindow` attaches a caller-owned Windows HWND. `Present` draws
+directly into a two-buffer D3D12 swapchain at the current client size, preserving
+the source aspect ratio with black bars. Resizing retains the device and pipeline;
+zero-size and minimized windows submit no work. Each submission waits for its
+actual GPU fence before uploads or framebuffers can be reused. Normal presentation
+does not copy pixels back to the CPU. The optional readback argument is for checks.
+
+Add `--present-frames N` to a probe invocation to open a native window and submit
+that many frames. `--window-width N --window-height N` override the initial client
+size. The usual output file records the first submitted backbuffer, at that
+window size. Closing the window ends the run. These counts describe successful
+DXGI submissions, not distinct simulation updates or measured monitor scanouts.
+
+A captured 1280x720 movie draw was submitted 120 times through this path; its
+first backbuffer was byte-identical to the verified offscreen image. This is
+native presentation of a captured draw, not a live game backend. The working game
+still uses Xenos presentation until its startup and synchronization are replaced.
 
 ## Bounded live comparison
 
@@ -111,13 +131,15 @@ the live check manifest. It does not write the original game's progress fields.
 Leave the comparison path disabled for gameplay
 and performance measurements. It never enables the D3D12 debug layer after the
 game's device has been created. The eventual streaming renderer needs persistent
-resources for other draw families, complete state handling, native presentation,
+resources for other draw families, complete state handling, game presentation,
 and retirement tied to the real GPU queue.
 
 `mc2_native_quad_check` takes the verified local movie VS DXIL and flags-zero PS
-DXIL as its two arguments. Its synthetic inputs exercise four submissions on one
+DXIL as its two arguments. Its synthetic inputs first exercise four submissions on one
 renderer: texture and pixel-constant updates, a vertex update moving the quad
 offscreen, then a valid draw after rejected descriptor/truncated-upload inputs.
-All 16 pixels of each frame and the completion sequence are checked. This catches
-stale uploads, missing command-state rebinding and premature resource reuse;
-the shaders and test binaries remain local.
+It then uses a hidden HWND to check every backbuffer pixel during resize,
+letterboxing, zero-size suspension, detach/reattach, and presentation without
+readback. Ten completed submissions are checked, including an offscreen draw
+between window presentations. This catches stale uploads, missing command-state
+rebinding and premature resource reuse; the shaders and test binaries remain local.

@@ -26,7 +26,9 @@ Xenos backend remains the reference. Shadows and other effects are required.
 An optional [standalone D3D12 probe](native-draw-probe.md) now renders a captured
 movie draw using its translated shaders, three video planes, vertices, and pixel
 constants. Its 1280×720 output agrees with an independent CPU calculation to
-within one UNORM channel step. This is an offline single-draw check; there is
+within one UNORM channel step. The probe can also present that draw through a
+native resizable D3D12 swapchain without per-frame CPU readback. This remains
+validation of one draw family; there is
 **no in-game native rendering backend yet**. Captures are not a speedup, and
 complete-frame rendering compatibility remains unverified.
 
