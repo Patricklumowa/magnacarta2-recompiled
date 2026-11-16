@@ -37,7 +37,7 @@ The UP wrapper copies `r5 * r7` source bytes. Its multiplication, pointer range,
 and artifact limit are checked before reading. The separate indexed-UP entry
 point is not intercepted by this capture.
 
-## Schema version 3
+## Schema version 4
 
 Each `session-<timestamp>-<suffix>/draw-<ordinal>/metadata.json` contains the hook
 name/address, matching-call ordinal, device address, link register, and numeric
@@ -63,6 +63,8 @@ Successful files are:
 | `textures/slot-NN.descriptor.bin` | First 52 bytes of each bound texture resource |
 | `textures/slot-NN.base.bin` | Supported slots 0–2's exact base-level physical spans, including any intervening row/tile padding |
 | `textures/slot-NN.rgba8.bin` | Slots 0–2 decoded to tightly packed RGBA8 rows, endian conversion and fetch swizzle applied |
+| `textures/slot-NN.mip-MM.raw.bin` | BC1/BC3 mip's bounded physical span, including its tile/row padding |
+| `textures/slot-NN.mip-MM.blocks.bin` | Tightly packed native BC blocks for that mip, with tiling and byte order converted; compressed color data is retained |
 | `targets/color-N.descriptor.bin`, `targets/depth.descriptor.bin` | First 48 bytes of bound surface descriptors |
 
 Device pointers and words retain guest big-endian representation. Shader
@@ -93,7 +95,8 @@ before the fetch swizzle, including the movie's `RRR1` selection. The SDK textur
 functions determine its physical span. Its 29-bit physical address is mapped
 through guest alias `0xA0000000 + physical_address`; the entire span must remain
 inside physical memory and below the artifact cap. Other formats are recorded
-as unsupported rather than interpreted as RGBA8.
+as unsupported rather than interpreted as RGBA8, except for the compressed path
+described below.
 
 The top-level `textures` array has three entries, indexed by slot. Each contains `slot`, `format`, `width`, `height`,
 `physical_address`, `source_bytes`, `row_pitch_bytes`, `tiled`, `offset_x`,
@@ -105,12 +108,27 @@ the RGBA8 output**; a replay must interpret those fields explicitly. A valid
 description alone does not establish that either payload file was captured:
 consumers must check artifact statuses.
 
+Schema 4 also captures BC1 (format 18) and BC3 (format 20) textures in slots 0–2.
+Compressed entries contain `compressed: true`, `block_bytes`, the fetch words,
+tiling/byte-order/swizzle/gamma/exponent/mip-range fields, and a `mips` array.
+Each mip records its `level`, `width`, `height`, `physical_address`, `source_bytes`,
+`row_pitch_bytes`, `offset_x` and `offset_y`. Base storage and mip storage are
+distinct, including textures whose base level is itself packed. The last levels
+may share a physical mip tail; their block offsets remain separate.
+
+`texture_blocks` computes the exact accessed block extent and converts every
+available level into linear BC data. It does not decompress or apply gamma,
+swizzle, filtering or exponent adjustment. Those sampling semantics still need
+explicit native handling. The decoder validates canonical fetch words again
+before reading a supplied payload and preserves output on failure.
+
 ## Deliberate limits
 
 Every manifest reports `replayable: false` and lists `missing_for_replay`.
 Ordinary buffer payloads are captured when their descriptors pass the bounded
-checks above. Only slots 0–2's supported base levels are captured;
-other textures and mip levels need more work. Color/depth attachment contents,
+checks above. Only slots 0–2's supported formats are captured: base levels for
+uncompressed textures, and all available mips for BC1/BC3. Other formats and
+uncompressed mip chains need more work. Color/depth attachment contents,
 prior draw dependencies, full native pipeline interpretation, and shader
 constant/resource binding semantics still require validation. Device state is
 a pre-call snapshot and may contain dirty words that the original draw flushes.
@@ -136,3 +154,10 @@ An actual first indexed draw captured 960 vertex bytes (24 records at stride 40)
 and 144 index bytes (36 big-endian 32-bit indices); it selected indices 6–23 and
 had no bound pixel shader or vertex declaration. See [native-draw-probe.md](native-draw-probe.md)
 for the standalone D3D12 draw experiment.
+
+`mc2_texture_blocks_check` verifies both compressed formats, all byte-order modes,
+partial blocks, explicit micro/macro-tile addresses, packed mip offsets, separate
+base/tail storage, gamma metadata and truncated/invalid input rejection. A live
+native capture recovered all seven levels of each 64 x 64 texture used by the
+first color draw, with no missing texture artifacts. This establishes bounded
+input extraction, not native color rendering or full-frame parity.

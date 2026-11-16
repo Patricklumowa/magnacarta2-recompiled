@@ -1,6 +1,7 @@
 #include "generated/default/magnacarta2_init.h"
 #include "draw_capture.h"
 #include "texture_decode.h"
+#include "texture_blocks.h"
 #include "guest_graphics_read.h"
 #ifdef MC2_ENABLE_NATIVE_BOOT
 #include "native_boot.h"
@@ -85,6 +86,8 @@ struct Snapshot {
   std::array<mc2::texture::BaseRGBA8, 3> textures;
   std::array<bool, 3> texture_described{};
   std::array<bool, 3> texture_decoded{};
+  std::array<mc2::texture::BlockTexture,3> block_textures;
+  std::array<bool,3> block_described{};
 
   void Save(const std::string& name, uint32_t address, const std::vector<uint8_t>& content,
             const char* origin = "guest_bytes", uint32_t physical = 0) {
@@ -133,6 +136,30 @@ struct Snapshot {
     const auto raw_name = fmt::format("textures/slot-{:02}.base.bin", slot);
     const auto rgba_name = fmt::format("textures/slot-{:02}.rgba8.bin", slot);
     texture_described[slot] = mc2::texture::DescribeBaseRGBA8(fetch, texture, error);
+    if (!texture_described[slot] && mc2::texture::DescribeBlockTexture(fetch,block_textures.at(slot),error)) {
+      block_described[slot]=true;
+      const auto& compressed=block_textures[slot];
+      bool complete=true;
+      for (uint32_t level=0;level<compressed.mips.size();++level) {
+        const auto& mip=compressed.mips[level];
+        const auto name=fmt::format("textures/slot-{:02}.mip-{:02}",slot,level);
+        uint32_t alias=0;
+        std::vector<uint8_t> source,linear;
+        if (!mc2::draw_capture::TexturePhysicalAlias(mip.physical_address,mip.source_bytes,alias) ||
+            !ReadGuest(base,alias,mip.source_bytes,source)) {
+          artifacts.push_back({name+".raw.bin","unreadable_or_over_limit","guest_physical_bytes",alias,mip.physical_address});
+          complete=false; continue;
+        }
+        Save(name+".raw.bin",alias,source,"guest_physical_bytes",mip.physical_address);
+        if (!mc2::texture::LinearizeBlockMip(compressed,level,source,linear,error) ||
+            linear.size()>mc2::draw_capture::kArtifactLimit) {
+          artifacts.push_back({name+".blocks.bin","unsupported_or_over_limit","linear_compressed_blocks",alias,mip.physical_address});
+          complete=false; continue;
+        }
+        Save(name+".blocks.bin",alias,linear,"linear_compressed_blocks",mip.physical_address);
+      }
+      return complete;
+    }
     uint32_t alias = 0;
     if (!texture_described[slot] ||
         !mc2::draw_capture::TexturePhysicalAlias(texture.physical_address, texture.source_bytes, alias)) {
@@ -260,7 +287,7 @@ void Capture(PPCContext& ctx, uint8_t* base, const char* hook, uint32_t guest_ho
     snapshot.missing.push_back("attachment_contents_and_prior_draw_dependencies");
     snapshot.missing.push_back("native_pipeline_state_validation");
     std::ostringstream json;
-      json << "{\n  \"schema_version\": 3,\n  \"hook\": \"" << hook
+      json << "{\n  \"schema_version\": 4,\n  \"hook\": \"" << hook
          << "\",\n  \"guest_hook\": " << guest_hook << ",\n  \"matching_draw_ordinal\": " << ordinal
          << ",\n  \"device_address\": " << device_address << ",\n  \"lr\": " << ctx.lr
          << ",\n  \"args\": {\"r3\":" << ctx.r3.u64 << ",\"r4\":" << ctx.r4.u64
@@ -281,6 +308,24 @@ void Capture(PPCContext& ctx, uint8_t* base, const char* hook, uint32_t guest_ho
              << ",\"mip_min_level\":" << texture.mip_min_level << ",\"mip_max_level\":" << texture.mip_max_level
              << ",\"rgba8_decoded\":" << (snapshot.texture_decoded[slot] ? "true" : "false") << ",\"fetch_words\":[";
         for (size_t i = 0; i < texture.fetch_words.size(); ++i) json << (i ? "," : "") << texture.fetch_words[i];
+        json << "]}";
+      } else if (snapshot.block_described[slot]) {
+        const auto& texture=snapshot.block_textures[slot];
+        json << "{\"slot\":" << slot << ",\"format\":" << texture.format << ",\"compressed\":true"
+             << ",\"block_bytes\":" << texture.block_bytes << ",\"tiled\":" << (texture.tiled ? "true" : "false")
+             << ",\"endianness\":" << texture.endianness << ",\"swizzle\":" << texture.swizzle
+             << ",\"gamma_mask\":" << texture.gamma_mask << ",\"exp_adjust\":" << texture.exp_adjust
+             << ",\"mip_min_level\":" << texture.mip_min_level << ",\"mip_max_level\":" << texture.mip_max_level
+             << ",\"fetch_words\":[";
+        for (size_t i=0;i<texture.fetch_words.size();++i) json << (i ? "," : "") << texture.fetch_words[i];
+        json << "],\"mips\":[";
+        for (size_t level=0;level<texture.mips.size();++level) {
+          const auto& mip=texture.mips[level];
+          json << (level ? "," : "") << "{\"level\":" << level << ",\"width\":" << mip.width << ",\"height\":" << mip.height
+               << ",\"physical_address\":" << mip.physical_address << ",\"source_bytes\":" << mip.source_bytes
+               << ",\"row_pitch_bytes\":" << mip.row_pitch_bytes << ",\"offset_x\":" << mip.offset_x
+               << ",\"offset_y\":" << mip.offset_y << '}';
+        }
         json << "]}";
       } else {
         json << "null";
