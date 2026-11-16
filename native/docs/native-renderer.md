@@ -33,6 +33,8 @@ complete-frame rendering compatibility remains unverified.
 The optional bounded live movie comparison uses the same native drawing code
 on live guest inputs. Two movie draws passed the CPU comparison during a clean
 boot; the original renderer remains enabled and still owns game presentation.
+The [bootstrap and completion map](native-bootstrap.md) records the device
+initialization, marker and resource-retirement dependencies for the next boundary.
 
 ## Capture workflow
 

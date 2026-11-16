@@ -178,6 +178,8 @@ void Capture(PPCContext& ctx, uint8_t* base, const char* hook, uint32_t guest_ho
     if (ReadGuest(base, device_address, mc2::draw_capture::kDeviceBytes, device)) {
       snapshot.Save("device.bin", device_address, device);
       const auto pointer = [&](size_t offset) { return mc2::capture::LoadBE32(device.data() + offset); };
+      if (pointer(10896)) snapshot.Copy("gpu-progress.bin", pointer(10896), 96);
+      if (pointer(10900)) snapshot.Copy("gpu-auxiliary.bin", pointer(10900), 32);
       snapshot.Shader("vertex-shader.container", pointer(12704), true);
       snapshot.Shader("pixel-shader.container", pointer(12700), false);
       const auto declaration = pointer(11824);

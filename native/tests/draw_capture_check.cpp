@@ -120,6 +120,11 @@ int main() {
   StoreBE32(kDevice + 12468, 0xA300);
   StoreBE32(kDevice + 12444, 0xA400);
   StoreBE32(kDevice + 12552, 0xA500);
+  StoreBE32(kDevice + 10896, 0xA600);
+  StoreBE32(kDevice + 10900, 0xA700);
+  StoreBE32(kDevice + 10908, 1);
+  StoreBE32(0xA600, 0xFFFFFFFE);
+  StoreBE32(0xA600 + 60, 0x1234);
   const uint32_t fetch[] = {2 | (2u << 22), 0x00100006, 1 | (1u << 13), 0x688 << 1, 0, 1u << 9};
   for (size_t i = 0; i < 6; ++i) StoreBE32(kDevice + 1152 + uint32_t(i) * 4, fetch[i]);
   const uint32_t video_fetch[] = {2 | (8u << 22), 0x00100002, 2 | (1u << 13), 0xa00 << 1, 0, 1u << 9};
@@ -156,7 +161,7 @@ int main() {
   Invoke(sub_82865690, memory);
   rex::cvar::SetFlagByName("mc2_draw_capture_hook", "nonindexed");
   Invoke(sub_828652A0, memory);
-  unsigned manifests = 0, up_data = 0, devices = 0, containers = 0, raw_textures = 0, rgba_textures = 0, video_textures = 0;
+  unsigned manifests = 0, up_data = 0, devices = 0, containers = 0, raw_textures = 0, rgba_textures = 0, video_textures = 0, progress_blocks = 0;
   for (const auto& item : std::filesystem::recursive_directory_iterator(directory)) {
     if (item.path().filename() == "metadata.json") {
       ++manifests;
@@ -176,6 +181,11 @@ int main() {
       Check(!std::memcmp(actual.data(), expected_memory.data() + 0x9000, actual.size()));
     } else if (item.path().filename() == "device.bin") {
       ++devices; Check(std::filesystem::file_size(item.path()) == kDeviceBytes);
+    } else if (item.path().filename() == "gpu-progress.bin") {
+      ++progress_blocks;
+      std::ifstream stream(item.path(), std::ios::binary);
+      const std::vector<uint8_t> actual((std::istreambuf_iterator<char>(stream)), {});
+      Check(actual.size() == 96 && !std::memcmp(actual.data(), expected_memory.data() + 0xA600, 96));
     } else if (item.path().extension() == ".container") {
       ++containers; Check(std::filesystem::file_size(item.path()) == 48);
     } else if (item.path().filename() == "slot-00.base.bin") {
@@ -202,7 +212,7 @@ int main() {
     }
   }
   Check(original_calls == 10 && manifests == 4 && devices == 4 && containers == 8 && up_data == 1 &&
-        raw_textures == 4 && rgba_textures == 4 && video_textures == 8);
+        raw_textures == 4 && rgba_textures == 4 && video_textures == 8 && progress_blocks == 4);
   VirtualFree(memory, 0, MEM_RELEASE);
   std::printf("Draw capture checks: %u failures, %u original calls, %u manifests\nFixtures: %s\n",
               failures, original_calls, manifests, directory.string().c_str());

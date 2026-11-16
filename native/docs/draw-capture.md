@@ -50,6 +50,8 @@ Successful files are:
 | File | Contents |
 | --- | --- |
 | `device.bin` | 24064 bytes of pre-call device state, including float constants, viewport/state words and fetch constants |
+| `gpu-progress.bin` | 96 bytes at device `+10896`, including the completed marker at block `+0` and ring read-pointer writeback at block `+60` |
+| `gpu-auxiliary.bin` | 32 bytes at device `+10900`; recorded without assuming all fields' meanings |
 | `vertex-shader.container`, `pixel-shader.container` | Bound shader virtual header/body plus its separate physical payload, reconstructed into a contiguous container |
 | `vertex-declaration.bin` | Resource header and declared elements: `56 + 12 * count`, with type and count checks |
 | `up-vertices.bin` | UP source bytes, without endian conversion |
