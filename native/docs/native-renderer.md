@@ -33,6 +33,11 @@ live startup movies with the Xenos plugin unavailable. It stops at the first
 unsupported indexed scene draw; native menu/gameplay rendering is not implemented.
 Captures are not a speedup, and full scene compatibility remains unverified.
 
+The first indexed scene draw also has an [offscreen native depth proof](native-depth.md),
+including bounded mini-fetch layouts and a shared native device/queue. Its
+captured geometry matches independent CPU coverage and depth calculations.
+It is not connected to live scene composition yet.
+
 The optional bounded live movie comparison uses the same native drawing code
 on live guest inputs. Two movie draws passed the CPU comparison during a clean
 boot; the original renderer remains enabled and still owns game presentation.

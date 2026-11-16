@@ -1,0 +1,16 @@
+diff --git a/plume_d3d12.cpp b/plume_d3d12.cpp
+--- a/plume_d3d12.cpp
++++ b/plume_d3d12.cpp
+@@ -3867,7 +3867,11 @@
+     }
+ 
+     std::unique_ptr<RenderPipeline> D3D12Device::createGraphicsPipeline(const RenderGraphicsPipelineDesc &desc) {
+-        return std::make_unique<D3D12GraphicsPipeline>(this, desc);
++        auto pipeline = std::make_unique<D3D12GraphicsPipeline>(this, desc);
++        if (pipeline->d3d == nullptr) {
++            return nullptr;
++        }
++        return pipeline;
+     }
+ 
+     std::unique_ptr<RenderPipeline> D3D12Device::createRaytracingPipeline(const RenderRaytracingPipelineDesc &desc, const RenderPipeline *previousPipeline) {

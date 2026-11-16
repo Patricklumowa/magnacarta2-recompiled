@@ -1,6 +1,5 @@
 #include "native_quad.h"
-#include <plume_d3d12.h>
-#include <d3d12sdklayers.h>
+#include "native_device.h"
 #include <array>
 #include <algorithm>
 #include <cmath>
@@ -13,24 +12,6 @@ namespace mc2::native {
 namespace {
 void Require(bool value, const std::string& message) {
     if (!value) throw std::runtime_error(message);
-}
-bool CheckGpuErrors(ID3D12Device* device) {
-    ID3D12InfoQueue* messages = nullptr;
-    if (FAILED(device->QueryInterface(IID_PPV_ARGS(&messages)))) return false;
-    bool errors = false;
-    for (UINT64 i = 0; i < messages->GetNumStoredMessages(); i++) {
-        SIZE_T size = 0;
-        if (FAILED(messages->GetMessage(i, nullptr, &size))) continue;
-        std::vector<uint8_t> storage(size);
-        auto message = reinterpret_cast<D3D12_MESSAGE*>(storage.data());
-        if (FAILED(messages->GetMessage(i, message, &size))) continue;
-        if (message->Severity <= D3D12_MESSAGE_SEVERITY_WARNING)
-            std::cerr << "D3D12: " << message->pDescription << '\n';
-        errors |= message->Severity <= D3D12_MESSAGE_SEVERITY_ERROR;
-    }
-    messages->ClearStoredMessages();
-    messages->Release();
-    return errors;
 }
 }  // namespace
 
@@ -60,11 +41,11 @@ static void ValidateDraw(const QuadDraw& draw) {
 
 struct QuadRenderer::Impl {
     QuadDraw configuration;
-    std::unique_ptr<D3D12Interface> renderInterface;
-    std::unique_ptr<RenderDevice> device;
-    std::unique_ptr<RenderCommandQueue> queue;
-    std::unique_ptr<RenderCommandList> commands;
-    std::unique_ptr<RenderCommandFence> fence;
+    std::shared_ptr<NativeDevice> gpu;
+    const std::unique_ptr<RenderDevice>& device;
+    const std::unique_ptr<RenderCommandQueue>& queue;
+    const std::unique_ptr<RenderCommandList>& commands;
+    const std::unique_ptr<RenderCommandFence>& fence;
     std::unique_ptr<RenderShader> vs, ps;
     std::unique_ptr<RenderBuffer> vertexBuffer, indexBuffer, sharedBuffer, psBuffer, readback;
     struct TextureUpload {
@@ -86,11 +67,14 @@ struct QuadRenderer::Impl {
     uint32_t presentReadWidth = 0, presentReadHeight = 0;
     RenderInputSlot inputSlot{0, 0};
     uint32_t readPitch = 0;
-    uint64_t completed = 0;
-    bool debugEnabled = false;
+    const uint64_t& completed;
+    const bool& debugEnabled;
     static constexpr uint16_t indices[] = {0, 1, 2, 0, 2, 3};
 
-    Impl(const QuadDraw& draw, bool enable_debug) : configuration(draw) {
+    Impl(const QuadDraw& draw, std::shared_ptr<NativeDevice> context) : configuration(draw),
+        gpu(context ? std::move(context) : throw std::runtime_error("Missing native device")),
+        device(gpu->device), queue(gpu->queue), commands(gpu->commands), fence(gpu->fence),
+        completed(gpu->completed), debugEnabled(gpu->debug_enabled) {
         ValidateDraw(draw);
         // Retain only the immutable pipeline/extent description between draws.
         configuration.vertices = std::vector<uint8_t>{};
@@ -108,18 +92,6 @@ struct QuadRenderer::Impl {
         textures.reserve(textureCount);
         for (const auto& t : draw.textures)
             textures.push_back({t.width, t.height, (t.width * 4 + 255) & ~255u, {}, {}});
-        ID3D12Debug* debug = nullptr;
-        debugEnabled = enable_debug && SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)));
-        if (debugEnabled) {
-            debug->EnableDebugLayer();
-            debug->Release();
-        }
-        renderInterface = std::make_unique<D3D12Interface>();
-        device = renderInterface->createDevice("");
-        Require(bool(device), "D3D12 device creation failed");
-        queue = device->createCommandQueue(RenderCommandListType::DIRECT);
-        commands = queue->createCommandList();
-        fence = device->createCommandFence();
         vs = device->createShader(vsBytes.data(), vsBytes.size(), "main", RenderShaderFormat::DXIL);
         ps = device->createShader(psBytes.data(), psBytes.size(), "main", RenderShaderFormat::DXIL);
         Require(bool(vs) && bool(ps), "DXIL shader creation failed");
@@ -331,14 +303,13 @@ struct QuadRenderer::Impl {
         queue->executeCommandLists(commands.get(), fence.get());
         // Wait even if DXGI presentation fails, so callers can safely unwind.
         const bool presented = present && swapChain->present(backbufferIndex, nullptr, 0);
-        queue->waitForCommandFence(fence.get());
-        Require(!CheckGpuErrors(static_cast<D3D12Device*>(device.get())->d3d), "D3D12 validation reported an error");
+        gpu->Complete();
         Require(!present || presented, "Native presentation failed");
         QuadResult output;
         output.width = width; output.height = height;
         output.present_submitted = presented;
         output.debug_layer = debugEnabled;
-        output.completed_submission = ++completed;
+        output.completed_submission = completed;
         if (outputReadback) {
             const auto result = static_cast<const uint8_t*>(outputReadback->map());
             output.pixels.resize(size_t(width) * height * 4);
@@ -351,7 +322,9 @@ struct QuadRenderer::Impl {
 };
 
 QuadRenderer::QuadRenderer(const QuadDraw& configuration, bool enable_debug)
-    : impl_(std::make_unique<Impl>(configuration, enable_debug)) {}
+    : QuadRenderer(configuration, std::make_shared<NativeDevice>(enable_debug)) {}
+QuadRenderer::QuadRenderer(const QuadDraw& configuration, std::shared_ptr<NativeDevice> device)
+    : impl_(std::make_unique<Impl>(configuration, std::move(device))) {}
 QuadRenderer::~QuadRenderer() = default;
 QuadResult QuadRenderer::Render(const QuadDraw& draw) { return impl_->Render(draw); }
 void QuadRenderer::SetWindow(RenderWindow window) { impl_->SetWindow(window); }

@@ -6,6 +6,7 @@
 #include <vector>
 
 namespace mc2::native {
+class NativeDevice;
 struct QuadTexture {
     uint32_t width = 0, height = 0;
     std::vector<uint8_t> bytes;
@@ -35,6 +36,7 @@ struct QuadResult {
 class QuadRenderer {
  public:
     explicit QuadRenderer(const QuadDraw& configuration, bool enable_debug = false);
+    QuadRenderer(const QuadDraw& configuration, std::shared_ptr<NativeDevice> device);
     ~QuadRenderer();
     QuadRenderer(const QuadRenderer&) = delete;
     QuadRenderer& operator=(const QuadRenderer&) = delete;

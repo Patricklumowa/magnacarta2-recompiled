@@ -13,11 +13,16 @@ at `11926860e878e68626ea99ec88562ce2b8badc4f`, with its dependencies initialized
 Apply `native/patches/plume-1192686-readback.patch` there first. It fixes the
 texture-to-buffer copy path's null destination-texture access, preserving
 sample-location handling for either texture copy direction. CMake checks the
-revision and patch. No Vulkan dependency or in-game backend is added by this option.
+revision and patch. Also apply `native/patches/plume-1192686-pipeline-validation.patch`;
+it reports failed native pipeline creation instead of returning an unusable
+wrapper. No Vulkan dependency or in-game backend is added by this option.
 
 Build target `mc2_native_draw_probe`, then run it with `--help` for the explicit
 input arguments. All captures, converted shader blobs, constants and output
 images remain local. Never commit game-derived inputs.
+
+The separate `mc2_native_depth_check` target exercises the first indexed depth
+draw. See [native-depth.md](native-depth.md) for its inputs and limitations.
 
 ## Supported inputs
 
