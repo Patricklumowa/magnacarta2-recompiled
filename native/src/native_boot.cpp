@@ -51,6 +51,18 @@ std::unique_ptr<SampledTexture> UploadSceneTexture(uint8_t* base, const mc2::tex
     return std::make_unique<SampledTexture>(format, top.width, top.height, levels, gpu);
 }
 
+std::unique_ptr<SampledTexture> UploadSceneTexture(uint8_t* base, const mc2::texture::BaseRGBA8& description,
+                                                  const std::shared_ptr<NativeDevice>& gpu) {
+    uint32_t alias;
+    std::vector<uint8_t> source, pixels;
+    Require(mc2::draw_capture::TexturePhysicalAlias(description.physical_address, description.source_bytes, alias) &&
+            mc2::capture::ReadGuest(base, alias, description.source_bytes, source), "Unreadable native overlay texture");
+    std::string error;
+    if (!mc2::texture::DecodeBaseRGBA8(description, source, pixels, error)) throw std::runtime_error(error);
+    return std::make_unique<SampledTexture>(plume::RenderFormat::R8G8B8A8_UNORM, description.width,
+        description.height, std::span(&pixels, 1), gpu);
+}
+
 void RequireFirstTileDepth(const SceneSurface& prepass, const SceneSurface& tile) {
     const auto& full_depth = prepass.description;
     const auto& tile_depth = tile.description;
@@ -78,11 +90,12 @@ struct PendingDepthRestore {
     SceneDepthRestore scene;
     uint32_t vertices, endpoint;
 };
-enum class SceneQuadPass { HdrCopy, Bloom, Composition, BackBuffer };
+enum class SceneQuadPass { HdrCopy, Bloom, Composition, BackBuffer, Overlay };
 struct PendingUpDraw {
     SceneFullscreenDraw scene;
     uint32_t vertices, indices, endpoint;
     SceneQuadPass pass;
+    std::optional<SceneOverlayBinding> overlay;
 };
 
 class NativeGraphics final : public rex::system::IGraphicsSystem {
@@ -96,6 +109,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     std::optional<ScenePassShaders> depth_restore_shaders;
     std::optional<ScenePassShaders> fullscreen_shaders, color_grade_shaders;
     std::optional<ScenePassShaders> bloom_shaders, filter_shaders, composition_shaders, back_buffer_shaders;
+    std::optional<ScenePassShaders> overlay_shaders;
     std::vector<uint8_t> fullscreen_resolve_shader, bloom_resolve_shader;
     std::optional<SceneSurface> depth_surface,color_surface;
     std::unique_ptr<DepthRenderer> depth_renderer;
@@ -116,6 +130,9 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     std::optional<SceneResolveTexture> bloom_texture;
     uint32_t bloom_draws = 0, bloom_copies = 0;
     std::unique_ptr<ColorTarget> back_buffer;
+    std::optional<SceneSurface> back_buffer_surface;
+    std::unique_ptr<ColorRenderer> overlay_renderer;
+    uint32_t overlay_draws = 0;
     plume::RenderRect cleared_tile;
     std::optional<DepthDraw> prepass_draw;
     std::optional<TiledSceneDraw> scene_draw;
@@ -148,6 +165,8 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             if (std::filesystem::is_directory(composition_directory)) composition_shaders = LoadQuadShaders(composition_directory, "pixel-7e3.dxil");
             const auto back_buffer_directory = fullscreen_directory / "back-buffer";
             if (std::filesystem::is_directory(back_buffer_directory)) back_buffer_shaders = LoadQuadShaders(back_buffer_directory, "pixel.dxil");
+            const auto overlay_directory = fullscreen_directory / "overlay";
+            if (std::filesystem::is_directory(overlay_directory)) overlay_shaders = LoadFullscreenColorShaders(overlay_directory, false, "pixel.dxil");
             const auto grade_directory = std::filesystem::path(color_directory) / "color-grade";
             if (std::filesystem::is_directory(grade_directory)) color_grade_shaders = LoadFullscreenColorShaders(grade_directory, true);
             const auto bloom_directory = std::filesystem::path(color_directory) / "bloom";
@@ -459,6 +478,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     void BeginIndexedUp(PPCContext& ctx, uint8_t* base) {
         const uint32_t device = ctx.r3.u32;
         SceneFullscreenDraw scene;
+        std::optional<SceneOverlayBinding> overlay;
         SceneQuadPass pass;
         {
             std::lock_guard lock(mutex);
@@ -485,10 +505,15 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
                         "Fullscreen composition requires the three ready scene textures and translated shaders");
                 scene = ReadCompositionDraw(ctx, base, *composition_shaders, scene_textures[1], scene_textures[0], *bloom_texture);
                 Require(*fullscreen_surface == scene.surface, "Composition destination differs from the fullscreen HDR target");
-            } else {
+            } else if (!back_buffer) {
                 pass = SceneQuadPass::BackBuffer;
-                Require(back_buffer_shaders && !back_buffer, "Back-buffer copy requires the final translated shaders");
+                Require(bool(back_buffer_shaders), "Back-buffer copy requires the final translated shaders");
                 scene = ReadBackBufferDraw(ctx, base, *back_buffer_shaders, scene_textures[0]);
+            } else {
+                pass = SceneQuadPass::Overlay;
+                Require(bool(overlay_shaders), "Back-buffer overlay requires the translated shaders");
+                scene = ReadBackBufferOverlay(ctx, base, *overlay_shaders, overlay.emplace());
+                Require(*back_buffer_surface == scene.surface, "Overlay destination differs from the live back buffer");
             }
         }
         const auto vertex_out = REX_LOAD_U32(ctx.r1.u32 + 84), index_out = ctx.r10.u32;
@@ -499,7 +524,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         Require(vertices && indices && endpoint && !(vertices & 15) && !(indices & 3) && !(endpoint & 3),
                 "Invalid native indexed user-memory addresses");
         std::lock_guard lock(mutex);
-        pending_up = PendingUpDraw{std::move(scene), vertices, indices, endpoint, pass};
+        pending_up = PendingUpDraw{std::move(scene), vertices, indices, endpoint, pass, std::move(overlay)};
     }
 
     void CompleteIndexedUp(uint8_t* base) {
@@ -509,7 +534,9 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         Require(REX_LOAD_U32(guest_device + 48) == up.endpoint, "Guest did not commit its indexed user-memory geometry");
         const auto& surface = up.scene.surface;
         const auto sampler = FullscreenColorSampler();
-        if (up.pass != SceneQuadPass::HdrCopy)
+        if (up.pass == SceneQuadPass::Overlay)
+            ReadOverlayUpVertices(up.scene.draw, base, up.vertices, up.indices, *up.overlay);
+        else if (up.pass != SceneQuadPass::HdrCopy)
             ReadQuadUpVertices(up.scene.draw, base, up.vertices, up.indices);
         if (up.pass == SceneQuadPass::Bloom) {
             const auto& shaders = bloom_draws == 0 ? *bloom_shaders : *filter_shaders;
@@ -544,7 +571,21 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             configuration.cull = RenderCullMode::NONE;
             ColorRenderer renderer(configuration, back_buffer_shaders->pixel_dxil, std::span(&sampler,1), *back_buffer);
             completed = renderer.RenderResolved(up.scene.draw, up.scene.pixel_constants, *color_target);
+            back_buffer_surface = surface;
             REXLOG_INFO("MC2 native scene: drew gamma and overlay into RGBA8 back buffer {:#x}, completed={}", surface.address, completed);
+        } else if (up.pass == SceneQuadPass::Overlay) {
+            if (!overlay_renderer) {
+                auto configuration = ConfigureDepth(surface, overlay_shaders->vertex);
+                configuration.cull = plume::RenderCullMode::NONE;
+                const auto overlay_sampler = OverlaySampler();
+                overlay_renderer = std::make_unique<ColorRenderer>(configuration, overlay_shaders->pixel_dxil,
+                    std::span(&overlay_sampler,1), *back_buffer, OverlayBlend());
+            }
+            auto texture = std::visit([&](const auto& source) { return UploadSceneTexture(base, source, gpu); }, up.overlay->texture);
+            const auto* sampled = texture.get();
+            completed = overlay_renderer->Render(up.scene.draw, up.scene.pixel_constants, std::span(&sampled,1));
+            REXLOG_INFO("MC2 native scene: blended overlay draw {} ({} indices), completed={}",
+                        ++overlay_draws, up.scene.draw.index_count, completed);
         } else {
             ReadFullscreenUpVertices(up.scene.draw, base, up.vertices, up.indices);
             fullscreen_target = std::make_unique<ColorTarget>(surface.width, surface.height, surface.samples, gpu);
@@ -567,8 +608,10 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         Require(fullscreen_target && fullscreen_surface && *fullscreen_surface == scene.surface && !color_graded,
                 "Color grading requires the first fullscreen HDR target");
         const auto sampler = FullscreenColorSampler();
+        auto blend = plume::RenderBlendDesc::Copy();
+        blend.renderTargetWriteMask = 7;
         ColorRenderer renderer(ConfigureDepth(scene.surface, color_grade_shaders->vertex), color_grade_shaders->pixel_dxil,
-            std::span(&sampler, 1), *fullscreen_target, 7);
+            std::span(&sampler, 1), *fullscreen_target, blend);
         completed = renderer.RenderResolved(scene.draw, scene.pixel_constants, *color_target);
         color_graded = true;
         REXLOG_INFO("MC2 native scene: fullscreen RGB color grading, completed={}", completed);

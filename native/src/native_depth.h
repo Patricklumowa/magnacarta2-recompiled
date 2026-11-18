@@ -60,7 +60,8 @@ class ColorRenderer {
     ColorRenderer(const DepthConfiguration& configuration, std::span<const uint8_t> pixel_shader,
                   std::span<const plume::RenderSamplerDesc> samplers, DepthRenderer& depth, ColorTarget& color);
     ColorRenderer(const DepthConfiguration& configuration, std::span<const uint8_t> pixel_shader,
-                  std::span<const plume::RenderSamplerDesc> samplers, ColorTarget& color, uint8_t write_mask = 0xf);
+                  std::span<const plume::RenderSamplerDesc> samplers, ColorTarget& color,
+                  plume::RenderBlendDesc blend = plume::RenderBlendDesc::Copy());
     ~ColorRenderer();
     uint64_t Render(const DepthDraw& draw, std::span<const uint8_t> pixel_constants,
                     std::span<const SampledTexture* const> textures);

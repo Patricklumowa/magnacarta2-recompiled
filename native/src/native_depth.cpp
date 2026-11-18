@@ -42,7 +42,7 @@ struct IndexedPipeline {
 
     IndexedPipeline(const DepthConfiguration& c, NativeDevice* device_context, std::span<const uint8_t> ps = {},
                     std::span<const RenderSamplerDesc> sampler_descs = {}, RenderFormat color_format = RenderFormat::UNKNOWN,
-                    RenderFormat depth_format = RenderFormat::D32_FLOAT, uint8_t color_write_mask = 0xf)
+                    RenderFormat depth_format = RenderFormat::D32_FLOAT, RenderBlendDesc blend = RenderBlendDesc::Copy())
         : gpu(device_context), width(c.width), height(c.height) {
         Require(gpu && c.width && c.height && c.width <= 8192 && c.height <= 8192,
                 "Invalid native indexed target");
@@ -108,8 +108,7 @@ struct IndexedPipeline {
         if (color_format != RenderFormat::UNKNOWN) {
             desc.renderTargetCount = 1;
             desc.renderTargetFormat[0] = color_format;
-            desc.renderTargetBlend[0] = RenderBlendDesc::Copy();
-            desc.renderTargetBlend[0].renderTargetWriteMask = color_write_mask;
+            desc.renderTargetBlend[0] = blend;
         }
         const RenderInputSlot slots[] = {slot, dummy_slot};
         desc.inputSlots = slots; desc.inputSlotsCount = 2;
@@ -382,11 +381,11 @@ struct ColorRenderer::Impl {
     std::unique_ptr<RenderFramebuffer> framebuffer;
 
     Impl(const DepthConfiguration& configuration, std::span<const uint8_t> pixel_shader,
-         std::span<const RenderSamplerDesc> samplers, DepthRenderer* depth_renderer, ColorTarget& color_target, uint8_t write_mask)
+         std::span<const RenderSamplerDesc> samplers, DepthRenderer* depth_renderer, ColorTarget& color_target, RenderBlendDesc blend)
         : depth(depth_renderer ? depth_renderer->impl_.get() : nullptr), color(color_target), gpu(color.Device()),
           attachment(color.Attachment(gpu, configuration.width, configuration.height, configuration.sample_count)),
           pipeline(configuration, &gpu, pixel_shader, samplers, color.Format(),
-                   depth ? RenderFormat::D32_FLOAT : RenderFormat::UNKNOWN, write_mask) {
+                   depth ? RenderFormat::D32_FLOAT : RenderFormat::UNKNOWN, blend) {
         Require(!depth || (configuration.width == depth->width && configuration.height == depth->height &&
                 configuration.sample_count == depth->samples && depth->gpu.get() == &gpu),
                 "Native color pipeline differs from its depth attachment");
@@ -420,10 +419,10 @@ struct ColorRenderer::Impl {
 };
 ColorRenderer::ColorRenderer(const DepthConfiguration& c, std::span<const uint8_t> ps,
                              std::span<const RenderSamplerDesc> samplers, DepthRenderer& depth, ColorTarget& color)
-    : impl_(std::make_unique<Impl>(c, ps, samplers, &depth, color, 0xf)) {}
+    : impl_(std::make_unique<Impl>(c, ps, samplers, &depth, color, RenderBlendDesc::Copy())) {}
 ColorRenderer::ColorRenderer(const DepthConfiguration& c, std::span<const uint8_t> ps,
-                             std::span<const RenderSamplerDesc> samplers, ColorTarget& color, uint8_t write_mask)
-    : impl_(std::make_unique<Impl>(c, ps, samplers, nullptr, color, write_mask)) {}
+                             std::span<const RenderSamplerDesc> samplers, ColorTarget& color, RenderBlendDesc blend)
+    : impl_(std::make_unique<Impl>(c, ps, samplers, nullptr, color, blend)) {}
 ColorRenderer::~ColorRenderer() = default;
 uint64_t ColorRenderer::Render(const DepthDraw& draw, std::span<const uint8_t> ps,
                                std::span<const SampledTexture* const> textures) {

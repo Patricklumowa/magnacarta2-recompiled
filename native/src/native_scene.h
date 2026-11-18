@@ -1,9 +1,11 @@
 #pragma once
 #include "native_depth.h"
 #include "texture_blocks.h"
+#include "texture_decode.h"
 #include <array>
 #include <filesystem>
 #include <utility>
+#include <variant>
 struct PPCContext;
 namespace mc2::native {
 struct SceneVertexShader {
@@ -61,6 +63,10 @@ struct SceneFullscreenDraw {
     DepthDraw draw;
     std::vector<uint8_t> pixel_constants;
 };
+struct SceneOverlayBinding {
+    std::variant<mc2::texture::BaseRGBA8, mc2::texture::BlockTexture> texture;
+    uint32_t vertex_count = 0, index_count = 0;
+};
 struct SceneTileResolve {
     SceneSurface color, depth;
     SceneResolveTexture destination;
@@ -83,7 +89,8 @@ ScenePassShaders LoadDepthRestoreShaders(const std::filesystem::path& directory)
 SceneDepthRestore ReadSceneDepthRestore(const PPCContext& context, uint8_t* base,
     const ScenePassShaders& shaders, const SceneResolveTexture& source);
 void ReadDepthRestoreVertices(DepthDraw& draw, uint8_t* base, uint32_t address);
-ScenePassShaders LoadFullscreenColorShaders(const std::filesystem::path& directory, bool grade);
+ScenePassShaders LoadFullscreenColorShaders(const std::filesystem::path& directory, bool grade,
+    const char* pixel_dxil = "pixel-7e3.dxil");
 SceneFullscreenDraw ReadSceneFullscreenDraw(const PPCContext& context, uint8_t* base,
     const ScenePassShaders& shaders, const SceneResolveTexture& source, bool grade);
 void ReadFullscreenUpVertices(DepthDraw& draw, uint8_t* base, uint32_t address, uint32_t index_address);
@@ -99,5 +106,11 @@ SceneFullscreenDraw ReadCompositionDraw(const PPCContext& context, uint8_t* base
     const SceneResolveTexture& bloom);
 SceneFullscreenDraw ReadBackBufferDraw(const PPCContext& context, uint8_t* base,
     const ScenePassShaders& shaders, const SceneResolveTexture& color);
+SceneFullscreenDraw ReadBackBufferOverlay(const PPCContext& context, uint8_t* base,
+    const ScenePassShaders& shaders, SceneOverlayBinding& binding);
+void ReadOverlayUpVertices(DepthDraw& draw, uint8_t* base, uint32_t address, uint32_t index_address,
+    const SceneOverlayBinding& binding);
+plume::RenderBlendDesc OverlayBlend();
+plume::RenderSamplerDesc OverlaySampler();
 std::pair<SceneSurface, SceneResolveTexture> ReadBloomResolve(const PPCContext& context, uint8_t* base);
 }

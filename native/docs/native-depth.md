@@ -378,3 +378,16 @@ surface. Put its shader containers, `vertex.dxil`, and `pixel.dxil` in
 `fullscreen/back-buffer`. GPU readback matched the expected four channels
 at every pixel of the diagnostic. Live boot completed the same pass, then
 reached the first alpha-blended game overlay draw.
+
+## Back-buffer overlays
+
+The game's overlay draws reuse the 48-byte indexed vertex layout and feed
+the original color and gamma constants to the unspecialized pixel shader.
+The renderer samples the original RGBA8 and BC3 textures with the verified
+base-level sampler and blends RGB with source alpha while retaining the
+destination alpha. Put the shader containers, `vertex.dxil`, and `pixel.dxil`
+in `fullscreen/overlay`.
+
+The GPU check verifies the RGBA8 upload and blend result. The live run
+completed all seven overlay draws before the display resolve, including
+both 108-index atlas batches.

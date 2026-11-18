@@ -98,10 +98,11 @@ void ReadFullscreenConstants(const DeviceState& state, const SceneSurface& surfa
     draw.scissor = plume::RenderRect(0,0,surface.width,surface.height);
 }
 
-void RequireFullscreenDrawState(const DeviceState& state, const SceneSurface& surface, bool reverse_depth, bool grade = false) {
+void RequireFullscreenDrawState(const DeviceState& state, const SceneSurface& surface, bool reverse_depth,
+                                bool grade = false, uint32_t blend_control = 0x10001) {
     const float half_width = surface.width * 0.5f, half_height = surface.height * 0.5f;
     Require(state.Word(11824) == 0 && state.Word(10452) == 0 && state.Word(10460) == (grade ? 7 : 15) &&
-            state.Word(10548) == 0x00700770 && state.Word(10552) == 0x10001 && (state.Word(10556) & 0x1f) == 7 &&
+            state.Word(10548) == 0x00700770 && state.Word(10552) == blend_control && (state.Word(10556) & 0x1f) == 7 &&
             state.Word(10564) == 0x80000 && state.Word(10568) == (grade ? 0x18002 : 0x18000) && state.Word(10572) == 0x43f &&
             state.Float(12672) == (reverse_depth ? 1 : 0) && state.Float(12676) == (reverse_depth ? 0 : 1) &&
             state.Float(10504) == half_width && state.Float(10508) == half_width && state.Float(10512) == -half_height &&
@@ -443,7 +444,7 @@ void ReadDepthRestoreVertices(DepthDraw& draw, uint8_t* base, uint32_t address) 
     draw.index_count = uint32_t(draw.indices.size());
 }
 
-ScenePassShaders LoadFullscreenColorShaders(const std::filesystem::path& directory, bool grade) {
+ScenePassShaders LoadFullscreenColorShaders(const std::filesystem::path& directory, bool grade, const char* pixel_dxil) {
     auto vertex = LoadVertexShader(directory);
     const std::vector<VertexInput> copy_inputs = {{0,0,95,48,0,4}, {5,0,95,48,16,2}, {10,0,95,48,24,4},
         {10,1,95,48,40,4,false,VertexStorage::UNorm8}};
@@ -451,7 +452,7 @@ ScenePassShaders LoadFullscreenColorShaders(const std::filesystem::path& directo
         {7,0,95,32,12,4,false,VertexStorage::UInt8}, {3,0,95,32,16,4,false,VertexStorage::UInt8},
         {10,0,95,32,20,4,false,VertexStorage::UInt8}};
     Require(vertex.inputs == (grade ? grade_inputs : copy_inputs), "Fullscreen HDR vertex inputs changed");
-    return {std::move(vertex), ReadNativeFile(directory / "pixel-shader.container"), ReadNativeFile(directory / "pixel-7e3.dxil")};
+    return {std::move(vertex), ReadNativeFile(directory / "pixel-shader.container"), ReadNativeFile(directory / pixel_dxil)};
 }
 
 SceneFullscreenDraw ReadSceneFullscreenDraw(const PPCContext& ctx, uint8_t* base,
@@ -603,6 +604,72 @@ SceneFullscreenDraw ReadBackBufferDraw(const PPCContext& ctx, uint8_t* base, con
     RequireSceneTexture(state, color, 0x4800);
     ReadFullscreenConstants(state, pass.surface, pass.draw, pass.pixel_constants, false);
     return pass;
+}
+
+SceneFullscreenDraw ReadBackBufferOverlay(const PPCContext& ctx, uint8_t* base,
+        const ScenePassShaders& shaders, SceneOverlayBinding& binding) {
+    Require(ctx.lr == 0x826D9CC0 && ctx.r4.u32 == 4 && ctx.r5.u32 == 0 && ctx.r6.u32 && ctx.r6.u32 <= 4096 &&
+            ctx.r7.u32 && ctx.r7.u32 <= 12288 && !(ctx.r7.u32 % 3) && ctx.r8.u32 == 6 && ctx.r9.u32 == 48,
+            "Unsupported overlay geometry");
+    const DeviceState state(base, ctx.r3.u32);
+    SceneFullscreenDraw pass;
+    pass.surface = ReadFullscreenColorSurface(state, base, 0x2d0);
+    Require(state.Word(12464) == 0 && state.Word(10560) == 0x10, "Unsupported back-buffer overlay depth or blend state");
+    RequireFullscreenDrawState(state, pass.surface, false, false, 0x01000706);
+    Require(ReadBoundShader(base, state.Word(12704), true) == shaders.vertex.reference &&
+            ReadBoundShader(base, state.Word(12700), false) == shaders.pixel_reference, "Untranslated overlay shaders");
+    const auto fetch = std::span(state.bytes).subspan(1152, 24);
+    Require(state.Word(12552) && !(state.Word(1152) & 0x0007fc00) &&
+            (state.Word(1164) & 0xffffe000) == 0x06280000 && state.Word(1168) == 0x803 &&
+            !(state.Word(1172) & 0x1ff), "Unsupported overlay texture sampler");
+    ReadFullscreenConstants(state, pass.surface, pass.draw, pass.pixel_constants, false);
+    std::string error;
+    uint32_t mode;
+    if ((state.Word(1156) & 63) == 6) {
+        mc2::texture::BaseRGBA8 texture;
+        if (!mc2::texture::DescribeBaseRGBA8(fetch, texture, error)) throw std::runtime_error(error);
+        Require(texture.mip_min_level == 0 && texture.mip_max_level == 0, "Overlay texture needs its base level");
+        // DecodeBaseRGBA8 already applies the fetch swizzle to the upload.
+        mode = PackTextureFetchMode(0x688, texture.gamma_mask, texture.exp_adjust);
+        binding.texture = texture;
+    } else {
+        mc2::texture::BlockTexture texture;
+        if (!mc2::texture::DescribeBlockTexture(fetch, texture, error)) throw std::runtime_error(error);
+        Require(texture.mip_min_level == 0 && texture.mip_max_level == 0, "Overlay atlas needs its base level");
+        mode = PackTextureFetchMode(texture.swizzle, texture.gamma_mask, texture.exp_adjust);
+        binding.texture = std::move(texture);
+    }
+    std::memcpy(pass.draw.shared_constants.data() + 288, &mode, sizeof(mode));
+    binding.vertex_count = ctx.r6.u32;
+    binding.index_count = ctx.r7.u32;
+    return pass;
+}
+
+void ReadOverlayUpVertices(DepthDraw& draw, uint8_t* base, uint32_t address, uint32_t index_address,
+                           const SceneOverlayBinding& binding) {
+    std::vector<uint8_t> vertices, indices;
+    Require(binding.vertex_count && binding.vertex_count <= 4096 && binding.index_count && binding.index_count <= 12288 &&
+            ReadGuest(base, address, uint64_t(binding.vertex_count) * 48, vertices) &&
+            ReadGuest(base, index_address, uint64_t(binding.index_count) * 4, indices), "Unreadable overlay vertices or indices");
+    draw.vertices = NativeVertexBytes(vertices, 2);
+    draw.indices.resize(binding.index_count);
+    for (uint32_t i = 0; i < binding.index_count; ++i) draw.indices[i] = LoadBE32(indices.data() + i * 4);
+    draw.index_count = binding.index_count;
+}
+
+plume::RenderBlendDesc OverlayBlend() {
+    auto blend = plume::RenderBlendDesc::AlphaBlend();
+    blend.srcBlendAlpha = plume::RenderBlend::ZERO;
+    blend.dstBlendAlpha = plume::RenderBlend::ONE;
+    return blend;
+}
+
+plume::RenderSamplerDesc OverlaySampler() {
+    plume::RenderSamplerDesc sampler;
+    sampler.anisotropyEnabled = true;
+    sampler.maxAnisotropy = 4;
+    sampler.maxLOD = 0;
+    return sampler;
 }
 
 void ReadQuadUpVertices(DepthDraw& draw, uint8_t* base, uint32_t address, uint32_t index_address) {

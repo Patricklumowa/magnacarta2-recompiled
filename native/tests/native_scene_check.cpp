@@ -172,8 +172,10 @@ void CheckFullscreenColor(mc2::native::ColorTarget& source, const mc2::native::S
 
     if (!std::filesystem::is_directory(directory / "color-grade")) return;
     const auto grade_shaders = LoadFullscreenColorShaders(directory / "color-grade", true);
+    auto grade_blend = RenderBlendDesc::Copy();
+    grade_blend.renderTargetWriteMask = 7;
     ColorRenderer grade(ConfigureDepth(output_surface, grade_shaders.vertex), grade_shaders.pixel_dxil,
-                        std::span(&sampler,1), target, 7);
+                        std::span(&sampler,1), target, grade_blend);
     // Screen-space triangle fan uses the original packed vertex stride.
     constexpr float grade_vertices[][8] = {{-1,1,0,0,0,0,0,0},{-1,-1,0,0,0,0,0,1},
                                           {1,-1,0,0,0,0,1,1},{1,1,0,0,0,0,1,0}};
@@ -245,6 +247,55 @@ void CheckBackBuffer(mc2::native::DepthDraw draw, const mc2::native::SceneSurfac
         }
     }
     std::cout << "PASS: composed HDR sampled into RGBA8 with color scale, overlay and gamma\n";
+}
+
+void CheckOverlay(const std::shared_ptr<mc2::native::NativeDevice>& gpu, const std::filesystem::path& directory) {
+    using namespace mc2::native;
+    using namespace plume;
+    const SceneSurface surface{0,32,16,1,{}};
+    const auto shaders = LoadFullscreenColorShaders(directory, false, "pixel.dxil");
+    auto config = ConfigureDepth(surface, shaders.vertex);
+    config.cull = RenderCullMode::NONE;
+    ColorTarget target(surface.width, surface.height, 1, gpu, {}, RenderFormat::R8G8B8A8_UNORM);
+    const auto sampler = OverlaySampler();
+    ColorRenderer renderer(config, shaders.pixel_dxil, std::span(&sampler,1), target, OverlayBlend());
+    const std::vector<uint8_t> texels{255,0,64,128, 255,0,64,128, 255,0,64,128, 255,0,64,128};
+    SampledTexture texture(RenderFormat::R8G8B8A8_UNORM, 2, 2, std::span(&texels,1), gpu);
+    Check(texture.ReadBlocks().front() == texels, "Overlay texture upload changed its texel bytes");
+    const SampledTexture* source = &texture;
+
+    DepthDraw draw;
+    draw.viewport = RenderViewport(0,0,surface.width,surface.height);
+    draw.scissor = RenderRect(0,0,surface.width,surface.height);
+    const float half_pixel[] = {1.f / surface.width, -1.f / surface.height};
+    std::array<float,48> vertices{};
+    for (size_t i = 0; i < 4; ++i) {
+        const float u = i & 1 ? 1.f : 0.f, v = i & 2 ? 1.f : 0.f;
+        const float vertex[] = {2*u-1-half_pixel[0],1-2*v-half_pixel[1],0,1,u,v,0.5f,1,1,1,0,0};
+        std::copy(std::begin(vertex), std::end(vertex), vertices.begin() + i * 12);
+    }
+    draw.vertices.resize(sizeof(vertices));
+    std::memcpy(draw.vertices.data(), vertices.data(), sizeof(vertices));
+    draw.indices = {0,1,3,0,3,2};
+    draw.index_count = uint32_t(draw.indices.size());
+    draw.vertex_constants.resize(4096);
+    constexpr float identity[][4] = {{1,0,0,0},{0,1,0,0},{0,0,1,0},{0,0,0,1}};
+    std::memcpy(draw.vertex_constants.data() + 5 * 16, identity, sizeof(identity));
+    draw.shared_constants.resize(512);
+    std::memcpy(draw.shared_constants.data() + 264, half_pixel, sizeof(half_pixel));
+    std::vector<uint8_t> constants(4096);
+    constexpr float one = 1;
+    std::memcpy(constants.data(), &one, sizeof(one));
+    std::memcpy(constants.data() + 3 * 16, &one, sizeof(one));
+
+    target.Clear(RenderColor(32.f/255,64.f/255,191.f/255,64.f/255));
+    renderer.Render(draw, constants, std::span(&source,1));
+    const auto pixels = target.ReadRgba8();
+    constexpr uint8_t expected[] = {80,32,127,64};
+    for (size_t i = 0; i < pixels.size(); i += 4)
+        Check(std::equal(std::begin(expected), std::end(expected), pixels.begin() + i),
+              "Overlay did not blend RGB while retaining destination alpha");
+    std::cout << "PASS: overlay shader blends sampled RGBA8 and preserves destination alpha\n";
 }
 
 void CheckComposition(mc2::native::DepthRenderer& depth, mc2::native::ColorTarget& color,
@@ -321,6 +372,8 @@ void CheckComposition(mc2::native::DepthRenderer& depth, mc2::native::ColorTarge
         color.OverwriteResolved(target, -3, ReadNativeFile(resolve_path));
         CheckBackBuffer(std::move(draw), surface, color, gpu, back_buffer_directory);
     }
+    const auto overlay_directory = directory.parent_path() / "overlay";
+    if (std::filesystem::is_directory(overlay_directory)) CheckOverlay(gpu, overlay_directory);
 }
 
 void CheckBloom(mc2::native::DepthRenderer& depth, mc2::native::ColorTarget& color,
