@@ -141,9 +141,11 @@ untile/uploads the bound BC1 and BC3 textures at draw time. A run with the
 Xenos DLL physically unavailable completed the 18-index D3D12 draw with all
 fourteen mip levels. With local color and depth resolve shaders supplied, it
 replayed the lower tile and completed all four resolves into two full-size
-textures. It stopped at the subsequent indirect submission (`0x82388A14`).
-Scene composition and presentation remain pending. An empty color shader
-directory setting keeps the depth-only checkpoint.
+textures. After the last D3D12 fence, the guest's synchronous end-of-tiling path
+unlinked its staging chunks and published the completed marker and buffer
+cursor on the CPU. The next unsupported operation was a single-sample stencil
+clear at `0x8238B590`. An empty color shader directory setting keeps the
+depth-only checkpoint.
 
 Other indexed and nonindexed scene draws, direct begin-UP draws and raw/indirect GPU
 submission paths currently fail explicitly. Scene composition, remaining clears/resolves,

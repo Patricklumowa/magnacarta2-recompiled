@@ -46,7 +46,7 @@ An offline D3D12 replay now uses those textures and the actual shaders for the
 first indexed color draw. Its upper tile agrees with the prepass coverage and
 the diagnostic lighting check exercises texture sampling and gamma. Both tiles
 complete the draw and their color and depth resolves in a live boot without
-Xenos. The path stops at the following indirect submission. See
+Xenos. The guest then retires its staging chunks on the CPU. See
 [indexed color replay](native-depth.md#indexed-color-replay).
 
 The optional bounded live movie comparison uses the same native drawing code

@@ -89,6 +89,8 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     std::optional<TiledSceneDraw> scene_draw;
     std::array<SceneResolveTexture, 2> scene_textures;
     uint32_t scene_copies = 0;
+    bool retiring_tiles = false;
+    bool scene_tiles_retired = false;
     uint64_t depth_draws = 0;
     std::optional<QuadDraw> pending;
     HWND window = nullptr;
@@ -254,6 +256,59 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         }
         destination = resolve.destination;
         if (++scene_copies == 4) scene_draw.reset();
+    }
+
+    void RetireSceneTiles(PPCContext& ctx, uint8_t* base) {
+        const uint32_t device = ctx.r3.u32;
+        Require(device && device == guest_device && ctx.lr == 0x8237C1E4, "Unexpected tiled scene retirement caller");
+        const auto mode = REX_LOAD_U8(device + 10941);
+        const auto progress = REX_LOAD_U32(device + 10896);
+        const auto marker = REX_LOAD_U32(device + 10908);
+        Require((mode & ~0x10u) == 4 && progress && REX_LOAD_U32(device + 11012) == 0 && REX_LOAD_U32(device + 21532) == 0,
+                "Native tiled scene retirement needs a single CPU submission queue");
+        {
+            std::lock_guard lock(mutex);
+            Require(scene_copies == 4 && !scene_tiles_retired && !retiring_tiles && !pending && gpu && completed == gpu->completed,
+                    "Tile retirement requires four completed native copies");
+            retiring_tiles = true;
+        }
+
+        // The guest's no-hardware branch unlinks its staging chunks and writes
+        // progress directly on the CPU. The native draw/resolve fences have
+        // already completed, so no GPU callback is needed before retirement.
+        REX_STORE_U8(device + 10941, mode | 2);
+        try {
+            __imp__sub_82388898(ctx, base);
+        } catch (...) {
+            REX_STORE_U8(device + 10941, mode);
+            std::lock_guard lock(mutex);
+            retiring_tiles = false;
+            throw;
+        }
+        REX_STORE_U8(device + 10941, mode);
+        std::lock_guard lock(mutex);
+        retiring_tiles = false;
+        const auto retired_cursor = REX_LOAD_U32(device + 13240) | (REX_LOAD_U32(device + 13244) & 3);
+        Require(ctx.r3.u32 == 0 && retired_cursor && REX_LOAD_U32(progress) == marker && REX_LOAD_U32(progress + 4) == retired_cursor &&
+                REX_LOAD_U32(device + 10908) == marker + 2 && REX_LOAD_U32(device + 11012) == 0,
+                "Native tile retirement did not publish the completed guest marker");
+        scene_tiles_retired = true;
+        REXLOG_INFO("MC2 native scene: retired both tiles on the CPU after fence {}, guest marker={}", completed, marker);
+    }
+
+    bool RetireTileBatch(PPCContext& ctx, uint8_t* base) {
+        std::lock_guard lock(mutex);
+        if (!retiring_tiles) return false;
+        const auto device = ctx.r3.u32;
+        const bool cache_batch = ctx.lr == 0x82388A14 && ctx.r6.u32 == 11 && ctx.r8.u32 == device + 13388;
+        const bool completion_batch = ctx.lr == 0x82388A94 && ctx.r6.u32 == 10 && ctx.r8.u32 == device + 13368;
+        Require(device == guest_device && (cache_batch || completion_batch) && ctx.r7.u32 == 0 &&
+                (REX_LOAD_U8(device + 10941) & 2) && REX_LOAD_U32(device + 11012) == 0,
+                "Unsupported batch during native tile retirement");
+        // Matches the no-hardware path with no outstanding GPU submits: no
+        // linked entry is created and the caller's cursor is returned unchanged.
+        ctx.r3.u64 = ctx.r4.u64;
+        return true;
     }
 
     // Record bounded changes at the clear boundary while surface support grows.
@@ -436,6 +491,11 @@ REX_HOOK_RAW(sub_823893A0) {
     }
     __imp__sub_823893A0(ctx, base);
 }
+REX_HOOK_RAW(sub_82388898) {
+    if (!NativeBootActive()) { __imp__sub_82388898(ctx, base); return; }
+    try { Graphics().RetireSceneTiles(ctx, base); }
+    catch (const std::exception& error) { UnsupportedNativeOperation(error.what(), ctx); }
+}
 REX_HOOK_RAW(sub_82387370) {
     if (!NativeBootActive()) { __imp__sub_82387370(ctx, base); return; }
     // EDRAM retraining has no host GPU counterpart or CPU cached-state effects.
@@ -472,6 +532,7 @@ REX_HOOK_RAW(sub_8236C680) {
 }
 REX_HOOK_RAW(sub_8236CFF8) {
     if (!NativeBootActive()) { __imp__sub_8236CFF8(ctx, base); return; }
+    if (Graphics().RetireTileBatch(ctx, base)) return;
     UnsupportedNativeOperation("indirect GPU command batch", ctx);
 }
 REX_HOOK_RAW(sub_8236C9E0) {

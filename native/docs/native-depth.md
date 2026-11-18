@@ -271,6 +271,7 @@ copy, while the diagnostic maximum includes them. The captured scene check
 also verifies float24-representable output and scoped depth clears. It checks
 that the lower tile contributes 266,032 nonzero depth pixels and that both
 resolved textures retain the upper tile unchanged. A live run with the Xenos
-DLL physically absent completed all four copies and clears. It stopped at the
-indirect submission called from `0x82388A14`. The passes that sample these
-textures remain unfinished.
+DLL physically absent completed all four copies and cleared their sources.
+The guest then retired its staging chunks and wrote the completion marker on
+the CPU after the final native fence. The next operation is a single-sample
+stencil clear before the fullscreen pass that samples the HDR texture.
