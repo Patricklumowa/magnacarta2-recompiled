@@ -45,9 +45,9 @@ readback of the first color draw's two textures matches every compressed byte.
 An offline D3D12 replay now uses those textures and the actual shaders for the
 first indexed color draw. Its upper tile agrees with the prepass coverage and
 the diagnostic lighting check exercises texture sampling and gamma. The same
-draw now completes for the first tile in a live boot without Xenos. The path
-stops at the first resolve, before replaying the lower tile or presenting a
-scene. See [indexed color replay](native-depth.md#indexed-color-replay).
+draw and its color resolve now complete for the first tile in a live boot
+without Xenos. The path stops at the depth resolve, before replaying the lower
+tile or presenting a scene. See [indexed color replay](native-depth.md#indexed-color-replay).
 
 The optional bounded live movie comparison uses the same native drawing code
 on live guest inputs. Two movie draws passed the CPU comparison during a clean

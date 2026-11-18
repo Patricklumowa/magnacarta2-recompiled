@@ -63,6 +63,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     std::unique_ptr<ColorTarget> color_target;
     plume::RenderRect cleared_tile;
     bool color_draw_submitted = false;
+    std::optional<uint32_t> resolved_color_destination;
     uint64_t depth_draws = 0;
     std::optional<QuadDraw> pending;
     HWND window = nullptr;
@@ -115,7 +116,8 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             Flush(base,ctx.r3.u32);
             std::lock_guard lock(mutex);
             if (!color_target) {
-                color_target=std::make_unique<ColorTarget>(clear.surface.width,clear.surface.height,clear.surface.samples,gpu);
+                const auto resolve_shader = color_shaders ? std::span<const uint8_t>(color_shaders->resolve_dxil) : std::span<const uint8_t>{};
+                color_target=std::make_unique<ColorTarget>(clear.surface.width,clear.surface.height,clear.surface.samples,gpu,resolve_shader);
                 color_surface=clear.surface;
             }
             Require(*color_surface==clear.surface,"Native color surface allocation changed");
@@ -190,6 +192,19 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     bool HasColorDraw() {
         std::lock_guard lock(mutex);
         return color_draw_submitted;
+    }
+
+    void ResolveColor(const PPCContext& ctx, uint8_t* base) {
+        std::lock_guard lock(mutex);
+        Require(color_shaders && !color_shaders->resolve_dxil.empty(), "Tiled scene resolve shader is not configured");
+        Require(!resolved_color_destination, "Tiled depth resolve and lower tile replay are unsupported");
+        const auto resolve = ReadSceneColorResolve(ctx, base);
+        Require(color_target && color_surface && *color_surface == resolve.source && cleared_tile == resolve.rectangle,
+                "Native color resolve has no matching rendered tile");
+        completed = color_target->ResolveAndClear(resolve.rectangle, resolve.exponent);
+        resolved_color_destination = resolve.destination;
+        REXLOG_INFO("MC2 native scene: resolved and cleared first HDR tile into texture {:#x}, exponent={}, completed={}",
+                    resolve.destination, resolve.exponent, completed);
     }
 
     // Record bounded changes at the clear boundary while surface support grows.
@@ -364,8 +379,12 @@ REX_HOOK_RAW(sub_8238AD80) {
 }
 REX_HOOK_RAW(sub_823893A0) {
     if (REXCVAR_GET(mc2_scene_resolve_trace)) TraceSceneResolve(ctx, base);
-    if (NativeBootActive() && Graphics().HasColorDraw())
-        UnsupportedNativeOperation("tiled scene resolve and lower tile replay", ctx);
+    if (NativeBootActive() && Graphics().HasColorDraw()) {
+        try { Graphics().ResolveColor(ctx, base); }
+        catch (const std::exception& error) { UnsupportedNativeOperation(error.what(), ctx); }
+        // Preserve the guest's CPU resource bookkeeping. The original GPU
+        // commands go only to staging; the native copy has already completed.
+    }
     __imp__sub_823893A0(ctx, base);
 }
 REX_HOOK_RAW(sub_82387370) {

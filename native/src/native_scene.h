@@ -11,7 +11,7 @@ struct SceneVertexShader {
 };
 struct SceneColorShaders {
     SceneVertexShader vertex;
-    std::vector<uint8_t> pixel_reference, pixel_dxil;
+    std::vector<uint8_t> pixel_reference, pixel_dxil, resolve_dxil;
 };
 struct SceneSurface {
     uint32_t address = 0, width = 0, height = 0, samples = 0;
@@ -41,6 +41,12 @@ struct SceneColorDraw {
     std::array<mc2::texture::BlockTexture, 2> textures;
     std::array<plume::RenderSamplerDesc, 2> samplers;
 };
+struct SceneColorResolve {
+    SceneSurface source;
+    uint32_t destination = 0;
+    plume::RenderRect rectangle;
+    int32_t exponent = 0;
+};
 SceneVertexShader LoadDepthShaders(const std::filesystem::path& directory);
 SceneColorShaders LoadColorShaders(const std::filesystem::path& directory);
 DepthConfiguration ConfigureDepth(const SceneSurface& surface, const SceneVertexShader& shader);
@@ -48,4 +54,5 @@ DepthClear ReadDepthClear(const PPCContext& context, uint8_t* base);
 SceneColorClear ReadSceneColorClear(const PPCContext& context, uint8_t* base);
 SceneDepthDraw ReadSceneDepthDraw(const PPCContext& context, uint8_t* base, const SceneVertexShader& shader);
 SceneColorDraw ReadSceneColorDraw(const PPCContext& context, uint8_t* base, const SceneColorShaders& shaders);
+SceneColorResolve ReadSceneColorResolve(const PPCContext& context, uint8_t* base);
 }

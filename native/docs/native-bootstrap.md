@@ -139,9 +139,10 @@ the first tile's [indexed color path](native-depth.md#indexed-color-replay).
 It loads both shader containers and the local VS and 7e3 PS binaries, then
 untile/uploads the bound BC1 and BC3 textures at draw time. A run with the
 Xenos DLL physically unavailable completed the 18-index D3D12 draw with all
-fourteen mip levels and stopped explicitly at `0x826DA2D8`, the first tiled
-color resolve. The experimental backend still cannot compose or present a full
-scene. An empty color shader directory setting keeps the depth-only checkpoint.
+fourteen mip levels. With local `color-resolve.dxil` supplied, it also completed
+the first color resolve and stopped at the depth resolve (`0x826DA314`). The
+experimental backend still cannot compose or present a full scene. An empty
+color shader directory setting keeps the depth-only checkpoint.
 
 Other indexed and nonindexed scene draws, direct begin-UP draws and raw/indirect GPU
 submission paths currently fail explicitly. Scene composition, remaining clears/resolves,

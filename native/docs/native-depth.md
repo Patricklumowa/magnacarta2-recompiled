@@ -3,8 +3,8 @@
 The standalone native renderer can execute the first captured indexed scene
 draw through D3D12. An opt-in live path now executes that draw and its preceding
 two-sample depth clear on the same device as the movies, without loading Xenos.
-The following HDR clear and first tile's indexed color draw also run natively.
-The path stops at the first resolve. Native menu and gameplay rendering,
+The following HDR clear and first tile's indexed color draw and color resolve
+also run natively. The path stops at the depth resolve. Native menu and gameplay rendering,
 general surface lifetime, and scene composition remain unfinished.
 
 `NativeDevice` owns one device, queue, allocator/list and fence. Movie and depth
@@ -146,8 +146,8 @@ Passing an optional third directory (the captured first color draw) to
 the layout, predicate, scissor, clear color and cached attachment state.
 
 A live run with the Xenos DLL physically unavailable completed the depth draw,
-the HDR tile clear, and the first tile's color draw, then stopped at the first
-scene resolve. Frame composition remains unfinished.
+the HDR tile clear, and the first tile's color draw and resolve. Frame
+composition remains unfinished.
 
 ## Compressed scene textures
 
@@ -220,8 +220,8 @@ The optional live path consumes the same shader directory and reads the actual
 texture bytes from guest memory. The first tile begins at (0, 0) and its depth
 descriptor has the same base, pitch, sample count and format as the full depth
 prepass. The native draw tests and updates that retained depth attachment,
-scissored to the first tile. It stops before the resolve can consume or clear
-the surface. The lower tile needs replay at its own resolve boundary.
+scissored to the first tile. The lower tile needs replay at its own resolve
+boundary.
 
 `--mc2_scene_resolve_trace=true` logs the first eight tiled resolve calls on a
 native boot development build. The reference renderer observed two calls per
@@ -230,3 +230,23 @@ tile, at masks `2` and `8`. Flags `0xf4000100` average color samples into a
 depth sample zero into a separate 24-bit float depth/stencil texture and
 request a zero depth/stencil clear. Each tile uses its rectangle's origin in
 the destination. The reference run exited cleanly after collecting both pairs.
+
+To enable the first color resolve, put `color-resolve.dxil` next to the color
+shader inputs. Compile the project's resolve shader with:
+
+```text
+dxc -T cs_6_0 -E main -HV 2021 native/src/native_color_resolve.hlsl -Fo <color-shaders>/color-resolve.dxil
+```
+
+The native resolve validates the first tile's predicate, source, rectangle,
+destination origin, RGBA16F texture descriptor and zero clear. It averages the
+two samples, applies the destination exponent of -3 to all four channels,
+writes the retained single-sample texture and clears the source rectangle.
+Both operations complete on one native fence. The guest routine still updates
+CPU resource bookkeeping after the native fence.
+
+The offline replay compares every resolved channel with the D3D12 hardware
+average scaled by 1/8, and checks that the source clear stays within the tile.
+With the Xenos DLL physically absent, a live run completed that resolve and
+stopped at the following depth copy (`0x826DA314`). The lower tile and the
+passes that sample the resolved textures remain unfinished.

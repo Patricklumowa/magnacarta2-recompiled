@@ -26,7 +26,7 @@ void ReplayColor(const mc2::native::SceneDepthDraw& prepass, const mc2::native::
     auto gpu = std::make_shared<NativeDevice>(true);
     const auto& surface = draw.color_surface;
     DepthRenderer depth(ConfigureDepth(prepass.surface, depth_shader), gpu);
-    ColorTarget color(surface.width, surface.height, surface.samples, gpu);
+    ColorTarget color(surface.width, surface.height, surface.samples, gpu, shaders.resolve_dxil);
     ColorRenderer renderer(ConfigureDepth(surface, shaders.vertex), shaders.pixel_dxil, draw.samplers, depth, color);
     std::array<std::unique_ptr<SampledTexture>, 2> textures;
     std::array<const SampledTexture*, 2> bindings;
@@ -101,6 +101,28 @@ void ReplayColor(const mc2::native::SceneDepthDraw& prepass, const mc2::native::
     for (size_t i = 0; i < lit.size(); i += 4)
         gamma_changed += lit[i] != without_gamma[i];
     Check(gamma_changed == covered, "Diffuse texture gamma did not reach the material shader");
+    if (!shaders.resolve_dxil.empty()) {
+        Reject([&] { color.ReadResolvedPixels(); });
+        const auto before_resolve = gpu->completed;
+        Reject([&] { color.ResolveAndClear(clear.rectangle, -33); });
+        Reject([&] { color.ResolveAndClear(RenderRect(-1,0,1280,512), -3); });
+        Check(color.ResolveAndClear(clear.rectangle, -3) == before_resolve + 1,
+              "Native resolve and clear did not share one completed submission");
+        const auto resolved = color.ReadResolvedPixels();
+        const auto source_after = color.ReadPixels();
+        Check(resolved.size() == size_t(surface.width) * clear.rectangle.bottom * 4, "Resolved region extent differs");
+        for (size_t i = 0; i < resolved.size(); ++i) {
+            // The test material stays in the normalized float16 range after
+            // scaling. Multiplication by 1/8 subtracts three from the exponent.
+            const uint16_t value = without_gamma[i];
+            Check(!value || (value >= 0x1000 && value < 0x7c00), "Resolve fixture is outside the chosen float16 range");
+            Check(resolved[i] == (value ? value - 0x0c00 : 0), "Resolved sample average or destination exponent differs");
+            Check(source_after[i] == 0, "Resolved source tile was not cleared");
+        }
+        for (size_t i = resolved.size(); i < source_after.size(); ++i)
+            Check(source_after[i] == without_gamma[i], "Resolve cleared outside the selected tile");
+        std::cout << "PASS: captured tile resolve matches the D3D12 average scaled by 1/8, with a scoped source clear\n";
+    }
     draw.draw.shared_constants[0] = uint8_t(bindings.size());
     const auto before_rejection = gpu->completed;
     Reject(submit);
