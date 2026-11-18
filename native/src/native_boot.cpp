@@ -109,6 +109,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     std::optional<ScenePassShaders> depth_restore_shaders;
     std::optional<ScenePassShaders> fullscreen_shaders, color_grade_shaders;
     std::optional<ScenePassShaders> bloom_shaders, filter_shaders, composition_shaders, back_buffer_shaders;
+    std::optional<ScenePassShaders> three_tap_filter_shaders;
     std::optional<ScenePassShaders> overlay_shaders;
     std::vector<uint8_t> fullscreen_resolve_shader, bloom_resolve_shader;
     std::vector<uint8_t> present_vertex_shader, present_pixel_shader;
@@ -183,6 +184,9 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             if (std::filesystem::exists(bloom_resolve_path)) bloom_resolve_shader = ReadNativeFile(bloom_resolve_path);
             const auto filter_directory = bloom_directory / "filter";
             if (std::filesystem::is_directory(filter_directory)) filter_shaders = LoadQuadShaders(filter_directory, "pixel-fixed16.dxil");
+            const auto three_tap_directory = bloom_directory / "filter-three-taps";
+            if (std::filesystem::is_directory(three_tap_directory))
+                three_tap_filter_shaders = LoadQuadShaders(three_tap_directory, "pixel-fixed16.dxil");
         }
         NativeGraphics* expected = nullptr;
         Require(active.compare_exchange_strong(expected, this), "Only one native graphics system is supported");
@@ -220,8 +224,10 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         const bool clear_depth = ctx.r4.u32 == 0x30;
         Flush(base, ctx.r3.u32);
         std::lock_guard lock(mutex);
-        Require(scene_tiles_retired && (clear_depth ? (fullscreen_surface && stencil_surface && *stencil_surface == surface) : !stencil_surface),
-                "Unexpected native depth/stencil clear outside the first postprocess pass");
+        const bool expected_surface = stencil_surface
+            ? fullscreen_surface && !color_graded && *stencil_surface == surface
+            : !clear_depth;
+        Require(scene_tiles_retired && expected_surface, "Unexpected native depth/stencil clear outside postprocessing");
         if (!stencil_target) {
             stencil_target = gpu->device->createTexture(RenderTextureDesc::DepthTarget(
                 surface.width, surface.height, RenderFormat::D32_FLOAT_S8_UINT));
@@ -506,7 +512,8 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
                     scene = ReadBloomDraw(ctx, base, *bloom_shaders, scene_textures[1], &scene_textures[0]);
                 } else {
                     Require(filter_shaders && bloom_texture, "Bloom filter shaders or resolved texture are unavailable");
-                    scene = ReadBloomDraw(ctx, base, *filter_shaders, *bloom_texture);
+                    scene = ReadBloomDraw(ctx, base, *filter_shaders, *bloom_texture, nullptr,
+                        three_tap_filter_shaders ? &*three_tap_filter_shaders : nullptr);
                 }
                 Require(*bloom_surface == scene.surface, "Bloom draw differs from its cleared surface");
             } else if (fullscreen_copies == 1) {
@@ -549,7 +556,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         else if (up.pass != SceneQuadPass::HdrCopy)
             ReadQuadUpVertices(up.scene.draw, base, up.vertices, up.indices);
         if (up.pass == SceneQuadPass::Bloom) {
-            const auto& shaders = bloom_draws == 0 ? *bloom_shaders : *filter_shaders;
+            const auto& shaders = *up.scene.shaders;
             auto configuration = ConfigureDepth(surface, shaders.vertex);
             configuration.cull = plume::RenderCullMode::NONE;
             if (bloom_draws == 0) {
@@ -561,7 +568,8 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
                 const auto filter_sampler = FullscreenColorSampler(true);
                 ColorRenderer renderer(configuration, shaders.pixel_dxil, std::span(&filter_sampler, 1), *bloom_target);
                 completed = renderer.RenderResolved(up.scene.draw, up.scene.pixel_constants, *bloom_target);
-                REXLOG_INFO("MC2 native scene: filtered bloom pass {}, completed={}", bloom_draws, completed);
+                const auto taps = three_tap_filter_shaders && &shaders == &*three_tap_filter_shaders ? 3 : 2;
+                REXLOG_INFO("MC2 native scene: filtered bloom pass {} with {} taps, completed={}", bloom_draws, taps, completed);
             }
             ++bloom_draws;
         } else if (up.pass == SceneQuadPass::Composition) {

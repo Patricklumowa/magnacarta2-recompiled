@@ -393,10 +393,24 @@ SceneTileResolve ReadSceneTileResolve(const PPCContext& ctx, uint8_t* base) {
     return resolve;
 }
 
+static void NormalizeDepthRestoreVertex(std::vector<uint8_t>& shader) {
+    constexpr size_t position_fetch = 280;
+    if (shader.size() != 340 || LoadBE32(shader.data() + position_fetch) != 0x05f80000 ||
+        LoadBE32(shader.data() + position_fetch + 4) != 0x0026323f ||
+        LoadBE32(shader.data() + position_fetch + 8) != 4) return;
+    // The guest patches its position fetch with the bound declaration:
+    // float4, stride four dwords. The native input layout already supplies it.
+    shader[position_fetch + 5] = 0;
+    shader[position_fetch + 6] = 2;
+    shader[position_fetch + 11] = 0;
+}
+
 ScenePassShaders LoadDepthRestoreShaders(const std::filesystem::path& directory) {
     // This shader uses the explicit UP declaration, which supplies the fetch
     // format and stride at draw time.
-    return {{ReadNativeFile(directory / "vertex-shader.container"), ReadNativeFile(directory / "vertex.dxil"),
+    auto vertex = ReadNativeFile(directory / "vertex-shader.container");
+    NormalizeDepthRestoreVertex(vertex);
+    return {{std::move(vertex), ReadNativeFile(directory / "vertex.dxil"),
              {{0,0,95,16,0,4}}}, ReadNativeFile(directory / "pixel-shader.container"),
             ReadNativeFile(directory / "pixel.dxil")};
 }
@@ -417,15 +431,24 @@ SceneDepthRestore ReadSceneDepthRestore(const PPCContext& ctx, uint8_t* base,
             state.Float(10504) == 640 && state.Float(10508) == 640 && state.Float(10512) == -360 &&
             state.Float(10516) == 360 && state.Float(10520) == -1 && state.Float(10524) == 1,
             "Native depth restore depth/stencil, color mask or viewport state changed");
-    Require(ReadBoundShader(base, state.Word(12704), true) == shaders.vertex.reference &&
+    auto vertex = ReadBoundShader(base, state.Word(12704), true);
+    NormalizeDepthRestoreVertex(vertex);
+    Require(vertex == shaders.vertex.reference &&
             ReadBoundShader(base, state.Word(12700), false) == shaders.pixel_reference,
             "Untranslated native depth restore shaders");
     std::vector<uint8_t> declaration;
     Require(ReadGuest(base, state.Word(11824), 64, declaration) && (LoadBE32(declaration.data()) & 15) == 5,
             "Invalid native depth restore declaration");
     constexpr uint32_t declaration_words[] = {1,0,0xff000000,0,0,0,0,0,0x001a23a6,0};
-    for (uint32_t i = 0; i < std::size(declaration_words); ++i)
-        Require(LoadBE32(declaration.data() + 24 + i * 4) == declaration_words[i], "Native restore declaration differs");
+    for (uint32_t i = 0; i < std::size(declaration_words); ++i) {
+        const auto value = LoadBE32(declaration.data() + 24 + i * 4);
+        // The cached declaration changes its header flags after the first
+        // draw, while the element at byte 52 stays the same.
+        if (i == 6 && value == 3) continue;
+        if (value != declaration_words[i])
+            throw std::runtime_error(std::format("Native restore declaration word {} differs ({:#x}, expected {:#x})",
+                                                 i, value, declaration_words[i]));
+    }
     RequireSceneTexture(state, source, 0);
     ReadFullscreenConstants(state, restore.depth, restore.draw, restore.pixel_constants, true);
     return restore;
@@ -556,14 +579,17 @@ static void RequireQuadArguments(const PPCContext& ctx) {
 }
 
 SceneFullscreenDraw ReadBloomDraw(const PPCContext& ctx, uint8_t* base, const ScenePassShaders& shaders,
-        const SceneResolveTexture& primary, const SceneResolveTexture* color) {
+        const SceneResolveTexture& primary, const SceneResolveTexture* color, const ScenePassShaders* alternate) {
     RequireQuadArguments(ctx);
     const DeviceState state(base, ctx.r3.u32);
     SceneFullscreenDraw pass;
     pass.surface = ReadBloomColorSurface(state, base);
     RequireFullscreenDrawState(state, pass.surface, false);
-    Require(ReadBoundShader(base, state.Word(12704), true) == shaders.vertex.reference &&
-            ReadBoundShader(base, state.Word(12700), false) == shaders.pixel_reference, "Untranslated bloom shaders");
+    const auto vertex = ReadBoundShader(base, state.Word(12704), true);
+    const auto pixel = ReadBoundShader(base, state.Word(12700), false);
+    if (vertex == shaders.vertex.reference && pixel == shaders.pixel_reference) pass.shaders = &shaders;
+    else if (alternate && vertex == alternate->vertex.reference && pixel == alternate->pixel_reference) pass.shaders = alternate;
+    Require(pass.shaders, "Untranslated bloom shaders");
     RequireSceneTexture(state, primary, 0x4800, 0, !color);
     ReadFullscreenConstants(state, pass.surface, pass.draw, pass.pixel_constants, false);
     if (color) {

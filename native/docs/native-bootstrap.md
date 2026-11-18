@@ -153,14 +153,14 @@ each sample the preceding unsigned normalized resolve, then update it for
 the next pass. The fullscreen composition uses the filtered bloom, color,
 and depth textures and resolves to HDR. The final color shader then applies
 its gamma and overlay settings to the RGBA8 back buffer. The seven UI
-draws blend into that surface on the native queue. A live run submitted
-and completed the first scene swap through [native presentation](native-depth.md#scene-presentation).
-The next frame reused the native attachments and stopped at a different
-depth-restore shader.
+draws blend into that surface on the native queue. A 44-second live run
+completed two scene swaps through [native presentation](native-depth.md#scene-presentation)
+and continued into the next movie. The second frame reused the attachments
+and exercised the three-tap bloom shaders.
 An empty color shader directory setting keeps the depth-only checkpoint.
 
 Other indexed and nonindexed scene draws, direct begin-UP draws and raw/indirect GPU
-submission paths currently fail explicitly. Repeated scene frames, remaining clears/resolves,
+submission paths currently fail explicitly. Gameplay scene coverage, remaining clears/resolves,
 queries, shader/input coverage, asynchronous resource retirement and native
 platform services remain unfinished. Full effects and shadows are required.
 The original backend remains the default and the reference for those changes.

@@ -62,6 +62,7 @@ struct SceneFullscreenDraw {
     SceneSurface surface;
     DepthDraw draw;
     std::vector<uint8_t> pixel_constants;
+    const ScenePassShaders* shaders = nullptr;
 };
 struct SceneOverlayBinding {
     std::variant<mc2::texture::BaseRGBA8, mc2::texture::BlockTexture> texture;
@@ -99,7 +100,8 @@ SceneSurface ReadFullscreenResolve(const PPCContext& context, uint8_t* base, con
 SceneColorClear ReadBloomClear(const PPCContext& context, uint8_t* base);
 ScenePassShaders LoadQuadShaders(const std::filesystem::path& directory, const char* pixel_dxil);
 SceneFullscreenDraw ReadBloomDraw(const PPCContext& context, uint8_t* base,
-    const ScenePassShaders& shaders, const SceneResolveTexture& primary, const SceneResolveTexture* color = nullptr);
+    const ScenePassShaders& shaders, const SceneResolveTexture& primary, const SceneResolveTexture* color = nullptr,
+    const ScenePassShaders* alternate = nullptr);
 void ReadQuadUpVertices(DepthDraw& draw, uint8_t* base, uint32_t address, uint32_t index_address);
 SceneFullscreenDraw ReadCompositionDraw(const PPCContext& context, uint8_t* base,
     const ScenePassShaders& shaders, const SceneResolveTexture& depth, const SceneResolveTexture& color,

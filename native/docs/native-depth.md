@@ -353,9 +353,11 @@ The two subsequent filter draws sample this texture with bilinear clamp
 sampling. Each writes to the retained signed target and resolves into the
 same separate UNORM texture before the next draw samples it. Put the filter
 shader containers and compiled shaders, using the same filenames as the
-initial bloom pass, in `bloom/filter`. The GPU check uses a single-pixel
-input and verifies the weighted samples and the spread after the second draw.
-A live boot without Xenos completed both filters and all three bloom resolves.
+initial bloom pass, in `bloom/filter`. The game switches to a three-tap
+shader pair on the next frame. Put that pair in `bloom/filter-three-taps`.
+The GPU check uses a single-pixel input to verify the two-pass spread and
+the third sample's independent offset and weight.
+A live boot without Xenos completed both variants and their resolves.
 
 ## Depth of field composition
 
@@ -409,7 +411,11 @@ dxc -T ps_6_0 -E main -HV 2021 native/src/native_present.hlsl -Fo <color-shaders
 
 A live run with the Xenos DLL absent completed the first post-movie scene
 swap at a 2560 x 1600 window extent. That swapchain readback was black.
+The RGBA8 source was also black, and a separate known-color probe verified
+the GPU presentation draw and aspect-ratio bars at that window size.
 The swap retires the first frame's guest bindings and pass state while
-retaining the native targets. The next frame completed its depth prepass,
-both tiles, and the stencil clear before binding a different depth-restore
-shader pair.
+retaining the native targets. The next frame reuses the depth-restore
+translation when the guest patches its float4 position fetch. It preserves
+depth during the second stencil-only clear and uses the three-tap bloom
+shaders. A 44-second live test completed both scene swaps and continued
+into the next movie.
