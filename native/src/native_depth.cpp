@@ -207,7 +207,6 @@ struct DepthRenderer::Impl {
     std::unique_ptr<RenderFramebuffer> framebuffer;
     std::unique_ptr<RenderBuffer> readback;
     std::unique_ptr<TileResolve> tile_resolve;
-    RenderRect resolved_rectangle;
     bool initialized = false;
 
     Impl(const DepthConfiguration& c, std::shared_ptr<NativeDevice> context, std::span<const uint8_t> resolve_shader)
@@ -287,12 +286,11 @@ struct DepthRenderer::Impl {
         commands->clearDepth(true, 0, &rectangle, 1);
         commands->end();
         gpu->queue->executeCommandLists(commands.get(), gpu->fence.get());
-        const auto completed = gpu->Complete();
-        resolved_rectangle = rectangle;
-        return completed;
+        return tile_resolve->Complete(rectangle);
     }
     std::vector<float> ReadResolvedPixels() {
-        Require(!resolved_rectangle.isEmpty(), "Native depth resolve has not completed");
+        Require(tile_resolve && !tile_resolve->CompletedRegion().isEmpty(), "Native depth resolve has not completed");
+        const auto& resolved_rectangle = tile_resolve->CompletedRegion();
         EnsureReadback();
         auto& commands = gpu->commands;
         auto* source = tile_resolve->Output();

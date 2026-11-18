@@ -16,7 +16,7 @@ class ColorTarget {
     // storage, apply the destination exponent and clear the source to zero.
     uint64_t ResolveAndClear(const plume::RenderRect& rectangle, int32_t exponent);
     std::vector<uint16_t> ReadPixels(); // RGBA16_FLOAT, diagnostic readback only.
-    std::vector<uint16_t> ReadResolvedPixels(); // Most recent resolved rectangle.
+    std::vector<uint16_t> ReadResolvedPixels(); // Contiguous completed resolve region.
  private:
     friend class ColorRenderer;
     static constexpr auto kFormat = plume::RenderFormat::R16G16B16A16_FLOAT;

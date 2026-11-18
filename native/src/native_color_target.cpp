@@ -21,7 +21,7 @@ struct ColorTarget::Impl {
     std::unique_ptr<RenderBuffer> readback;
     std::unique_ptr<TileResolve> tile_resolve;
     bool fully_initialized=false;
-    RenderRect cleared_rectangle, resolved_rectangle;
+    RenderRect cleared_rectangle;
 
     Impl(uint32_t w,uint32_t h,uint32_t count,std::shared_ptr<NativeDevice> context, std::span<const uint8_t> shader)
         : width(w),height(h),samples(count),gpu(std::move(context)) {
@@ -75,14 +75,12 @@ struct ColorTarget::Impl {
         commands->clearColor(0, RenderColor(0,0,0,0), &rectangle, 1);
         commands->end();
         gpu->queue->executeCommandLists(commands.get(), gpu->fence.get());
-        const auto completed = gpu->Complete();
-        resolved_rectangle = rectangle;
-        return completed;
+        return tile_resolve->Complete(rectangle);
     }
     std::vector<uint16_t> ReadPixels(bool scene_resolve) {
-        const auto rectangle = scene_resolve ? resolved_rectangle : RenderRect(0,0,width,height);
-        if (scene_resolve) Require(!rectangle.isEmpty(), "Native color resolve has not completed");
+        if (scene_resolve) Require(tile_resolve && !tile_resolve->CompletedRegion().isEmpty(), "Native color resolve has not completed");
         else Require(fully_initialized,"Cannot read undefined pixels from a partially cleared native color target");
+        const auto rectangle = scene_resolve ? tile_resolve->CompletedRegion() : RenderRect(0,0,width,height);
         const uint32_t read_width = rectangle.right - rectangle.left, read_height = rectangle.bottom - rectangle.top;
         const uint32_t pitch=(read_width*8+255)&~255u;
         const bool resolve_for_read = !scene_resolve && samples > 1;

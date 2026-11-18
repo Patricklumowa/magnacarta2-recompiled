@@ -51,4 +51,15 @@ void TileResolve::Record(const RenderRect& rectangle, float scale) {
     commands->dispatch((parameters.width + 7) / 8, (parameters.height + 7) / 8, 1);
     commands->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(output_.get(), RenderTextureLayout::SHADER_READ));
 }
+
+uint64_t TileResolve::Complete(const RenderRect& rectangle) {
+    const auto completed = gpu_.Complete();
+    // Consecutive tiles with the same horizontal extent fill one region.
+    if (!completed_region_.isEmpty() && completed_region_.left == rectangle.left &&
+        completed_region_.right == rectangle.right && completed_region_.bottom == rectangle.top)
+        completed_region_.bottom = rectangle.bottom;
+    else
+        completed_region_ = rectangle;
+    return completed;
+}
 }

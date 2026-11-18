@@ -3,9 +3,9 @@
 The standalone native renderer can execute the first captured indexed scene
 draw through D3D12. An opt-in live path now executes that draw and its preceding
 two-sample depth clear on the same device as the movies, without loading Xenos.
-The following HDR clear, first tile's indexed color draw and both of its resolves
-also run natively. The path stops at the lower tile. Native menu and gameplay rendering,
-general surface lifetime, and scene composition remain unfinished.
+The following HDR clear and both tiles' indexed color draws and resolves also
+run natively. Native menu and gameplay rendering, general surface lifetime,
+and scene composition remain unfinished.
 
 `NativeDevice` owns one device, queue, allocator/list and fence. Movie and depth
 pipelines can share it. Submission completion checks the real fence and device
@@ -133,8 +133,8 @@ tile early or infer the scene extent from viewport dimensions alone.
 
 The observed color format is 7e3 RGB with two-bit normalized alpha. Native
 storage uses RGBA16_FLOAT; currently only the observed zero clear is accepted,
-which is exact in both formats. General color quantization, blending, tiled
-draw ordering, depth sharing across tile aliases and game resolves remain unfinished.
+which is exact in both formats. General blending, tiled draw ordering, depth
+sharing across tile aliases and resolve coverage beyond this pass remain unfinished.
 
 `ColorTarget` retains its two-sample allocation on the shared native device and
 completes its real fence after the clear. Diagnostic readback is optional and
@@ -146,7 +146,7 @@ Passing an optional third directory (the captured first color draw) to
 the layout, predicate, scissor, clear color and cached attachment state.
 
 A live run with the Xenos DLL physically unavailable completed the depth draw,
-the HDR tile clear, and the first tile's color draw and both resolves. Frame
+the HDR tile clear, and both tiles' color draws and resolves. Frame
 composition remains unfinished.
 
 ## Compressed scene textures
@@ -220,8 +220,12 @@ The optional live path consumes the same shader directory and reads the actual
 texture bytes from guest memory. The first tile begins at (0, 0) and its depth
 descriptor has the same base, pitch, sample count and format as the full depth
 prepass. The native draw tests and updates that retained depth attachment,
-scissored to the first tile. The lower tile needs replay at its own resolve
-boundary.
+scissored to the first tile. When the lower color resolve is requested, the
+backend clears the lower color region and replays the same opaque draw against
+the retained lower depth. It verifies that both shaders receive the same
+position transforms, geometry and viewport. The captured lower replay produces
+identical color and maximum depth values with either retained or freshly
+cleared depth.
 
 `--mc2_scene_resolve_trace=true` logs the first eight tiled resolve calls on a
 native boot development build. The reference renderer observed two calls per
@@ -238,10 +242,11 @@ shader inputs. Compile the project's resolve shader with:
 dxc -T cs_6_0 -E main -HV 2021 native/src/native_color_resolve.hlsl -Fo <color-shaders>/color-resolve.dxil
 ```
 
-The native resolve validates the first tile's predicate, source, rectangle,
+The native resolve validates each tile's predicate, source, rectangle,
 destination origin, RGBA16F texture descriptor and zero clear. It averages the
 two samples, applies the destination exponent of -3 to all four channels,
 writes the retained single-sample texture and clears the source rectangle.
+Both tiles write into the same allocation at their respective offsets.
 Both operations complete on one native fence. The guest routine still updates
 CPU resource bookkeeping after the native fence.
 
@@ -263,8 +268,9 @@ disabled. Native draw-time depth testing still uses D32_FLOAT.
 
 The diagonal test verifies that sample-one-only pixels stay clear in this
 copy, while the diagnostic maximum includes them. The captured scene check
-also verifies float24-representable output, scoped depth clear and retention
-outside the selected rectangle. A live run with the Xenos DLL physically
-absent completed both upper-tile copies and clears. It stopped at the color
-resolve for predicate `8`. Replay of that lower tile and the passes that
-sample these textures remain unfinished.
+also verifies float24-representable output and scoped depth clears. It checks
+that the lower tile contributes 266,032 nonzero depth pixels and that both
+resolved textures retain the upper tile unchanged. A live run with the Xenos
+DLL physically absent completed all four copies and clears. It stopped at the
+indirect submission called from `0x82388A14`. The passes that sample these
+textures remain unfinished.

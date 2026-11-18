@@ -41,10 +41,16 @@ struct SceneColorDraw {
     std::array<mc2::texture::BlockTexture, 2> textures;
     std::array<plume::RenderSamplerDesc, 2> samplers;
 };
+struct SceneResolveTexture {
+    uint32_t address = 0;
+    std::array<uint32_t, 6> fetch_words{};
+    bool operator==(const SceneResolveTexture&) const = default;
+};
 struct SceneTileResolve {
     SceneSurface color, depth;
-    uint32_t destination = 0;
+    SceneResolveTexture destination;
     plume::RenderRect rectangle;
+    uint32_t tile = 0;
     int32_t exponent = 0;
     bool copy_depth = false;
 };
@@ -55,5 +61,6 @@ DepthClear ReadDepthClear(const PPCContext& context, uint8_t* base);
 SceneColorClear ReadSceneColorClear(const PPCContext& context, uint8_t* base);
 SceneDepthDraw ReadSceneDepthDraw(const PPCContext& context, uint8_t* base, const SceneVertexShader& shader);
 SceneColorDraw ReadSceneColorDraw(const PPCContext& context, uint8_t* base, const SceneColorShaders& shaders);
+bool SameScenePositionInputs(const DepthDraw& depth, const DepthDraw& color);
 SceneTileResolve ReadSceneTileResolve(const PPCContext& context, uint8_t* base);
 }

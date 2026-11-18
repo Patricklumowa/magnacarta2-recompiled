@@ -59,6 +59,20 @@ void RequireFirstTileDepth(const SceneSurface& prepass, const SceneSurface& tile
             "Native first tile depth does not alias the retained prepass");
 }
 
+struct TiledSceneDraw {
+    DepthDraw draw;
+    std::vector<uint8_t> pixel_constants;
+    SceneSurface depth;
+    std::array<std::unique_ptr<SampledTexture>, 2> textures;
+    std::unique_ptr<ColorRenderer> renderer;
+
+    uint64_t Render(const plume::RenderRect& rectangle) {
+        draw.scissor = rectangle;
+        const std::array<const SampledTexture*, 2> bindings{textures[0].get(), textures[1].get()};
+        return renderer->Render(draw, pixel_constants, bindings);
+    }
+};
+
 class NativeGraphics final : public rex::system::IGraphicsSystem {
  public:
     MovieShaders shaders;
@@ -71,9 +85,10 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     std::unique_ptr<DepthRenderer> depth_renderer;
     std::unique_ptr<ColorTarget> color_target;
     plume::RenderRect cleared_tile;
-    bool color_draw_submitted = false;
-    std::optional<uint32_t> resolved_color_destination;
-    std::optional<uint32_t> resolved_depth_destination;
+    std::optional<DepthDraw> prepass_draw;
+    std::optional<TiledSceneDraw> scene_draw;
+    std::array<SceneResolveTexture, 2> scene_textures;
+    uint32_t scene_copies = 0;
     uint64_t depth_draws = 0;
     std::optional<QuadDraw> pending;
     HWND window = nullptr;
@@ -104,6 +119,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     bool has_presentation() const override { return true; }
     void Shutdown() override {
         std::lock_guard lock(mutex);
+        prepass_draw.reset(); scene_draw.reset();
         pending.reset(); renderer.reset(); depth_renderer.reset(); color_target.reset(); gpu.reset();
     }
     void SetInterruptCallback(uint32_t callback, uint32_t user_data) override {
@@ -170,6 +186,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         if (depth_draws <= 16 || depth_draws%120 == 0)
             REXLOG_INFO("MC2 native scene: indexed depth draw {}, indices={}, samples={}, completed={}",
                         depth_draws,snapshot.draw.index_count,snapshot.surface.samples,completed);
+        if (color_shaders && depth_draws == 1) prepass_draw = std::move(snapshot.draw);
     }
 
     void DrawColor(const PPCContext& ctx, uint8_t* base) {
@@ -177,53 +194,66 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         auto snapshot = ReadSceneColorDraw(ctx, base, *color_shaders);
         Flush(base, ctx.r3.u32);
         std::lock_guard lock(mutex);
-        Require(!color_draw_submitted && depth_draws == 1 && depth_renderer && color_target && depth_surface &&
+        Require(!scene_draw && scene_copies == 0 && depth_draws == 1 && prepass_draw && depth_renderer && color_target && depth_surface &&
                 color_surface && *color_surface == snapshot.color_surface &&
                 cleared_tile == plume::RenderRect(0,0,1280,512), "Native color draw has no matching first prepass and color clear");
         // The first tile starts at (0,0), with the same depth base, format and
-        // pitch as the full prepass. The lower tile needs its own replay after
-        // the resolve/clear boundary.
+        // pitch as the full prepass. Keep the lower region of that logical
+        // attachment for the matching opaque draw when the second tile runs.
         RequireFirstTileDepth(*depth_surface, snapshot.tile_depth);
-        auto first = UploadSceneTexture(base, snapshot.textures[0], gpu);
-        auto second = UploadSceneTexture(base, snapshot.textures[1], gpu);
-        const std::array<const SampledTexture*, 2> bindings{first.get(), second.get()};
-        ColorRenderer color_renderer(ConfigureDepth(snapshot.color_surface, color_shaders->vertex),
+        Require(SameScenePositionInputs(*prepass_draw, snapshot.draw), "Tiled scene draw differs from the verified depth prepass geometry");
+        TiledSceneDraw draw;
+        draw.draw = std::move(snapshot.draw);
+        draw.pixel_constants = std::move(snapshot.pixel_constants);
+        draw.depth = std::move(snapshot.tile_depth);
+        for (uint32_t slot = 0; slot < draw.textures.size(); ++slot)
+            draw.textures[slot] = UploadSceneTexture(base, snapshot.textures[slot], gpu);
+        draw.renderer = std::make_unique<ColorRenderer>(ConfigureDepth(snapshot.color_surface, color_shaders->vertex),
             color_shaders->pixel_dxil, snapshot.samplers, *depth_renderer, *color_target);
-        snapshot.draw.scissor = cleared_tile;
-        completed = color_renderer.Render(snapshot.draw, snapshot.pixel_constants, bindings);
-        color_draw_submitted = true;
+        completed = draw.Render(cleared_tile);
         REXLOG_INFO("MC2 native scene: indexed HDR color draw in first tile, indices={}, BC mip levels={}/{}, completed={}",
-            snapshot.draw.index_count, snapshot.textures[0].mips.size(), snapshot.textures[1].mips.size(), completed);
+            draw.draw.index_count, snapshot.textures[0].mips.size(), snapshot.textures[1].mips.size(), completed);
+        scene_draw = std::move(draw);
+        prepass_draw.reset();
     }
 
     bool HasColorDraw() {
         std::lock_guard lock(mutex);
-        return color_draw_submitted;
+        return scene_draw || scene_copies != 0;
     }
 
     void ResolveTile(const PPCContext& ctx, uint8_t* base) {
         std::lock_guard lock(mutex);
         Require(color_shaders && !color_shaders->resolve_dxil.empty(), "Tiled scene resolve shader is not configured");
-        Require(!resolved_depth_destination, "Lower scene tile replay is unsupported");
+        Require(ctx.r3.u32 == guest_device && scene_draw && scene_copies < 4, "Unexpected native scene resolve");
         const auto resolve = ReadSceneTileResolve(ctx, base);
-        Require(color_target && color_surface && *color_surface == resolve.color && cleared_tile == resolve.rectangle,
-                "Native resolve has no matching rendered tile");
+        const uint32_t kind = resolve.copy_depth ? 1 : 0;
+        Require(scene_copies == resolve.tile * 2 + kind, "Native tiled scene copies are out of order");
+        Require(*color_surface == resolve.color && scene_draw->depth == resolve.depth,
+                "Native resolve attachments differ from the rendered tile");
+        auto& destination = scene_textures[kind];
+        Require(!destination.address || destination == resolve.destination, "Native resolve destination allocation changed between tiles");
+        Require(scene_textures[1 - kind].address != resolve.destination.address, "Native color and depth resolves require separate textures");
+        if (resolve.tile == 1 && !resolve.copy_depth) {
+            color_target->Clear(plume::RenderColor(0,0,0,0), &resolve.rectangle);
+            completed = scene_draw->Render(resolve.rectangle);
+            cleared_tile = resolve.rectangle;
+            REXLOG_INFO("MC2 native scene: replayed indexed HDR draw in lower tile, indices={}, completed={}",
+                        scene_draw->draw.index_count, completed);
+        }
+        Require(cleared_tile == resolve.rectangle, "Native resolve has no matching rendered tile");
         if (resolve.copy_depth) {
             Require(!color_shaders->depth_resolve_dxil.empty(), "Tiled depth resolve shader is not configured");
-            Require(resolved_color_destination && *resolved_color_destination != resolve.destination && depth_renderer &&
-                    depth_surface, "Native tile depth resolve must follow its color resolve");
-            RequireFirstTileDepth(*depth_surface, resolve.depth);
             completed = depth_renderer->ResolveAndClear(resolve.rectangle);
-            resolved_depth_destination = resolve.destination;
-            REXLOG_INFO("MC2 native scene: resolved and cleared first depth tile into texture {:#x}, sample=0, completed={}",
-                        resolve.destination, completed);
+            REXLOG_INFO("MC2 native scene: resolved and cleared depth tile {} into texture {:#x}, sample=0, completed={}",
+                        resolve.tile, resolve.destination.address, completed);
         } else {
-            Require(!resolved_color_destination, "Native first color tile was already resolved");
             completed = color_target->ResolveAndClear(resolve.rectangle, resolve.exponent);
-            resolved_color_destination = resolve.destination;
-            REXLOG_INFO("MC2 native scene: resolved and cleared first HDR tile into texture {:#x}, exponent={}, completed={}",
-                        resolve.destination, resolve.exponent, completed);
+            REXLOG_INFO("MC2 native scene: resolved and cleared HDR tile {} into texture {:#x}, exponent={}, completed={}",
+                        resolve.tile, resolve.destination.address, resolve.exponent, completed);
         }
+        destination = resolve.destination;
+        if (++scene_copies == 4) scene_draw.reset();
     }
 
     // Record bounded changes at the clear boundary while surface support grows.

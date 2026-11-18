@@ -232,6 +232,20 @@ SceneColorDraw ReadSceneColorDraw(const PPCContext& ctx, uint8_t* base, const Sc
     return snapshot;
 }
 
+bool SameScenePositionInputs(const DepthDraw& depth, const DepthDraw& color) {
+    // The verified shaders form clip position from c0-c3 and c5-c8. Both
+    // receive the same half-pixel offset from the full logical viewport.
+    constexpr size_t position_bytes = 9 * 16;
+    return depth.vertex_constants.size() >= position_bytes && color.vertex_constants.size() >= position_bytes &&
+           std::equal(depth.vertex_constants.begin(), depth.vertex_constants.begin() + 4 * 16,
+                      color.vertex_constants.begin()) &&
+           std::equal(depth.vertex_constants.begin() + 5 * 16, depth.vertex_constants.begin() + position_bytes,
+                      color.vertex_constants.begin() + 5 * 16) &&
+           depth.vertices == color.vertices && depth.indices == color.indices &&
+           depth.first_index == color.first_index && depth.index_count == color.index_count &&
+           depth.viewport == color.viewport;
+}
+
 SceneTileResolve ReadSceneTileResolve(const PPCContext& ctx, uint8_t* base) {
     // Color 0, default sample selection (both samples), exponent -3, and
     // clear color after copy. The depth copy selects sample zero and clears depth/stencil.
@@ -244,13 +258,17 @@ SceneTileResolve ReadSceneTileResolve(const PPCContext& ctx, uint8_t* base) {
     resolve.color = ReadTiledColorSurface(state, base);
     resolve.depth = state.DepthSurface(base, 512);
     resolve.copy_depth = depth;
-    Require(state.Word(12724) == 1 && state.Word(12716) == 2 && state.Word(10932) == 2,
-            "Native scene resolve requires the first tile predicate");
+    const uint32_t predicate = state.Word(12716);
+    Require(state.Word(12724) == 1 && (predicate == 2 || predicate == 8) && state.Word(10932) == predicate,
+            "Native scene resolve requires an explicit tile predicate");
+    resolve.tile = predicate == 2 ? 0 : 1;
+    const auto tile_state = 12760 + resolve.tile * 16;
+    const auto top = state.Word(tile_state + 4), bottom = state.Word(tile_state + 12);
     std::vector<uint8_t> rectangle, origin, clear, destination;
     Require(ReadGuest(base, ctx.r5.u32, 16, rectangle) && LoadBE32(rectangle.data()) == 0 &&
-            LoadBE32(rectangle.data() + 4) == 0 && LoadBE32(rectangle.data() + 8) == 1280 &&
-            LoadBE32(rectangle.data() + 12) == 512, "Native resolve rectangle differs");
-    Require(ReadGuest(base, ctx.r7.u32, 8, origin) && LoadBE32(origin.data()) == 0 && LoadBE32(origin.data() + 4) == 0,
+            LoadBE32(rectangle.data() + 4) == top && LoadBE32(rectangle.data() + 8) == resolve.color.width &&
+            LoadBE32(rectangle.data() + 12) == bottom, "Native resolve rectangle differs");
+    Require(ReadGuest(base, ctx.r7.u32, 8, origin) && LoadBE32(origin.data()) == 0 && LoadBE32(origin.data() + 4) == top,
             "Native resolve destination origin differs");
     if (depth) {
         Require(ctx.f1.f64 == 0 && mc2::capture::GuestRange(ctx.r1.u32, 88) &&
@@ -268,8 +286,10 @@ SceneTileResolve ReadSceneTileResolve(const PPCContext& ctx, uint8_t* base) {
             (word(32) & 4095) == (depth ? 0x97u : 0x60u) && (word(32) >> 12) != 0 &&
             word(36) == 0x59e4ff && word(40) == 0xd11 && word(44) == 0 && word(48) == 0xa00,
             "Native resolve requires the verified full-size tiled texture destination");
-    resolve.destination = ctx.r6.u32;
-    resolve.rectangle = plume::RenderRect(0,0,1280,512);
+    resolve.destination.address = ctx.r6.u32;
+    for (uint32_t i = 0; i < resolve.destination.fetch_words.size(); ++i)
+        resolve.destination.fetch_words[i] = word(28 + i * 4);
+    resolve.rectangle = plume::RenderRect(0, top, resolve.color.width, bottom);
     resolve.exponent = depth ? 0 : -3;
     return resolve;
 }

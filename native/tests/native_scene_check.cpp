@@ -4,6 +4,7 @@
 #include "native_scene.h"
 #include "native_shader_input.h"
 #include "shader_capture.h"
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstring>
@@ -102,6 +103,8 @@ void ReplayColor(const mc2::native::SceneDepthDraw& prepass, const mc2::native::
     for (size_t i = 0; i < lit.size(); i += 4)
         gamma_changed += lit[i] != without_gamma[i];
     Check(gamma_changed == covered, "Diffuse texture gamma did not reach the material shader");
+    std::vector<uint16_t> upper_color;
+    std::vector<float> upper_depth;
     if (!shaders.resolve_dxil.empty()) {
         Reject([&] { color.ReadResolvedPixels(); });
         const auto before_resolve = gpu->completed;
@@ -109,7 +112,8 @@ void ReplayColor(const mc2::native::SceneDepthDraw& prepass, const mc2::native::
         Reject([&] { color.ResolveAndClear(RenderRect(-1,0,1280,512), -3); });
         Check(color.ResolveAndClear(clear.rectangle, -3) == before_resolve + 1,
               "Native resolve and clear did not share one completed submission");
-        const auto resolved = color.ReadResolvedPixels();
+        upper_color = color.ReadResolvedPixels();
+        const auto& resolved = upper_color;
         const auto source_after = color.ReadPixels();
         Check(resolved.size() == size_t(surface.width) * clear.rectangle.bottom * 4, "Resolved region extent differs");
         for (size_t i = 0; i < resolved.size(); ++i) {
@@ -134,7 +138,8 @@ void ReplayColor(const mc2::native::SceneDepthDraw& prepass, const mc2::native::
         Reject([&] { depth.ResolveAndClear(RenderRect(0,0,1280,721)); });
         Check(depth.ResolveAndClear(clear.rectangle) == before_resolve + 1,
               "Native depth copy and clear did not share one completed submission");
-        const auto sample_zero = depth.ReadResolvedPixels();
+        upper_depth = depth.ReadResolvedPixels();
+        const auto& sample_zero = upper_depth;
         const auto max_after = depth.Render(diagnostic, true).pixels;
         Check(sample_zero.size() == size_t(surface.width) * clear.rectangle.bottom, "Resolved depth tile extent differs");
         size_t nonzero = 0, maximum_only = 0;
@@ -153,6 +158,47 @@ void ReplayColor(const mc2::native::SceneDepthDraw& prepass, const mc2::native::
             Check(max_after[i] == max_before[i], "Depth resolve cleared outside the selected tile");
         std::cout << "PASS: captured depth sample zero and float24 storage, covered=" << nonzero
                   << ", max-only edge pixels=" << maximum_only << '\n';
+    }
+    if (!upper_color.empty() && !upper_depth.empty()) {
+        const RenderRect lower(0,clear.rectangle.bottom,surface.width,surface.height);
+        draw.draw.scissor = lower;
+        auto probe = prepass.draw;
+        probe.scissor = RenderRect(0,0,1,1);
+        color.Clear(clear.value, &lower);
+        submit();
+        const auto lower_pixels = color.ReadPixels();
+        const auto lower_max = depth.Render(probe, true).pixels;
+        depth.Clear(0, &lower);
+        color.Clear(clear.value, &lower);
+        submit();
+        Check(color.ReadPixels() == lower_pixels && depth.Render(probe, true).pixels == lower_max,
+              "Lower opaque replay differs with fresh depth and retained prepass depth");
+        color.ResolveAndClear(lower, -3);
+        depth.ResolveAndClear(lower);
+        const auto full_color = color.ReadResolvedPixels();
+        const auto full_depth = depth.ReadResolvedPixels();
+        Check(full_color.size() == lower_pixels.size() && full_depth.size() == lower_max.size() &&
+              std::equal(upper_color.begin(), upper_color.end(), full_color.begin()) &&
+              std::equal(upper_depth.begin(), upper_depth.end(), full_depth.begin()),
+              "Lower resolves did not retain the upper outputs at their destination offsets");
+        size_t lower_coverage = 0;
+        for (size_t i = upper_depth.size(); i < full_depth.size(); ++i) {
+            for (size_t channel = 0; channel < 4; ++channel) {
+                const size_t index = i * 4 + channel;
+                const uint16_t value = lower_pixels[index];
+                Check(!value || (value >= 0x1000 && value < 0x7c00), "Lower resolve fixture is outside float16 range");
+                Check(full_color[index] == (value ? value - 0x0c00 : 0), "Lower HDR resolve offset or exponent differs");
+            }
+            Check((full_depth[i] != 0) == (lower_max[i] != 0), "Lower depth resolve coverage differs");
+            lower_coverage += full_depth[i] != 0;
+        }
+        Check(lower_coverage > 1000, "Lower scene replay shaded too few pixels");
+        const auto cleared_color = color.ReadPixels();
+        const auto cleared_depth = depth.Render(probe, true).pixels;
+        Check(std::all_of(cleared_color.begin(), cleared_color.end(), [](uint16_t value) { return value == 0; }) &&
+              std::all_of(cleared_depth.begin(), cleared_depth.end(), [](float value) { return value == 0; }),
+              "Retained tile source clears did not cover both regions");
+        std::cout << "PASS: both captured tiles retained at the original resolve offsets, lower coverage=" << lower_coverage << '\n';
     }
     draw.draw.shared_constants[0] = uint8_t(bindings.size());
     const auto before_rejection = gpu->completed;
@@ -271,9 +317,11 @@ int main(int argc,char** argv) try {
             const auto scene_bytes = memory;
             const auto color_draw = ReadSceneColorDraw(context, base, color_shaders);
             Check(memory == scene_bytes && color_draw.color_surface == hdr.surface && color_draw.tile_depth.height == 512 &&
-                  color_draw.draw.vertices == draw.draw.vertices && color_draw.draw.indices == draw.draw.indices &&
-                  color_draw.draw.viewport.x == draw.draw.viewport.x && color_draw.draw.viewport.y == draw.draw.viewport.y,
+                  SameScenePositionInputs(draw.draw, color_draw.draw),
                   "First color draw did not preserve its captured geometry and attachments");
+            auto altered_draw = color_draw.draw;
+            altered_draw.vertex_constants[8 * 16] ^= 1;
+            Check(!SameScenePositionInputs(draw.draw, altered_draw), "Changed depth-to-color transform was accepted");
             for (const auto [offset, value] : std::array<std::pair<uint32_t,uint32_t>,5>{{
                     {10552,0}, {10556,15}, {12700,0}, {12724,1}, {1152+12,0}}}) {
                 store(device + offset, value);
