@@ -225,7 +225,9 @@ void CheckBloom(mc2::native::DepthRenderer& depth, mc2::native::ColorTarget& col
     const auto shaders = LoadBloomShaders(directory);
     auto configuration = ConfigureDepth(surface, shaders.vertex);
     configuration.cull = RenderCullMode::NONE;
-    ColorTarget target(surface.width,surface.height,1,gpu,{},RenderFormat::R16G16B16A16_SNORM);
+    const auto resolve_path = directory / "color-resolve.dxil";
+    const auto resolve_shader = std::filesystem::exists(resolve_path) ? ReadNativeFile(resolve_path) : std::vector<uint8_t>{};
+    ColorTarget target(surface.width,surface.height,1,gpu,resolve_shader,RenderFormat::R16G16B16A16_SNORM);
     const auto sampler = FullscreenColorSampler();
     const std::array samplers{sampler, sampler};
     ColorRenderer renderer(configuration, shaders.pixel_dxil, samplers, target);
@@ -281,6 +283,24 @@ void CheckBloom(mc2::native::DepthRenderer& depth, mc2::native::ColorTarget& col
     }
     Check(shaded == 320 * 180 && depth_changed > 100 && color_changed > 100, "Bloom did not use both scene inputs or cover its inner viewport");
     std::cout << "PASS: fixed-point blur and bloom, changed by depth=" << depth_changed << ", color=" << color_changed << '\n';
+
+    if (!resolve_shader.empty()) {
+        const auto check_resolve = [&](const std::vector<uint16_t>& input) {
+            const auto before = gpu->completed;
+            Check(target.ResolveFixedPoint() == before + 1, "Bloom resolve fence did not complete");
+            const auto resolved = target.ReadResolvedPixels();
+            Check(resolved.size() == input.size() && target.ReadPixels() == input, "Bloom resolve changed its source or extent");
+            for (size_t i = 0; i < resolved.size(); ++i) {
+                const float value = float(int16_t(input[i])) * (32.f / 32767.f);
+                const auto expected = uint16_t(std::floor(std::clamp(value, 0.f, 1.f) * 65535.f + 0.5f));
+                Check(resolved[i] == expected, "Bloom resolve has incorrect signed-to-UNORM conversion");
+            }
+        };
+        check_resolve(black);
+        target.Clear(RenderColor(-0.5f,1.f/64,-1.f/32767,0.5f));
+        check_resolve(target.ReadPixels());
+        std::cout << "PASS: bloom resolve scales signed channels and clamps into RGBA16_UNORM\n";
+    }
 }
 
 void ReplayColor(const mc2::native::SceneDepthDraw& prepass, const mc2::native::SceneVertexShader& depth_shader,

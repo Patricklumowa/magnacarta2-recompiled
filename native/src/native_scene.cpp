@@ -560,4 +560,19 @@ void ReadBloomUpVertices(DepthDraw& draw, uint8_t* base, uint32_t address, uint3
         Require((uint32_t(indices[i*2]) << 8 | indices[i*2+1]) == draw.indices[i], "Bloom triangle indices changed");
     draw.index_count = uint32_t(draw.indices.size());
 }
+
+SceneSurface ReadBloomResolve(const PPCContext& ctx, uint8_t* base) {
+    Require(ctx.lr == 0x827B3694 && ctx.r4.u32 == 0 && !ctx.r5.u32 && !ctx.r7.u32 && !ctx.r8.u32 && !ctx.r9.u32,
+            "Unsupported bloom resolve flags or region");
+    const DeviceState state(base, ctx.r3.u32);
+    const auto surface = ReadBloomColorSurface(state, base);
+    std::vector<uint8_t> descriptor;
+    Require(ReadGuest(base, ctx.r6.u32, 52, descriptor) && (LoadBE32(descriptor.data()) & 15) == 3,
+            "Invalid bloom resolve destination");
+    const auto word = [&](uint32_t offset) { return LoadBE32(descriptor.data() + offset); };
+    Require(word(28) == 0x82c00002 && (word(32) & 4095) == 0x5a && (word(32) >> 12) != 0 &&
+            word(36) == 0x16a141 && word(40) == 0xd10 && word(44) == 0 && word(48) == 0x200,
+            "Bloom resolve requires the verified 322x182 RGBA16_UNORM texture");
+    return surface;
+}
 }

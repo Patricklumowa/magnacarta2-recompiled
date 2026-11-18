@@ -148,8 +148,9 @@ cursor on the CPU. The single-sample clears, optional
 [fullscreen HDR passes](native-depth.md#fullscreen-hdr-passes) complete on
 the native queue. The graded image also resolves back into the existing HDR
 texture. The subsequent 322 x 182 fixed-point target clears and draws the
-first blur and bloom pass on the native queue. The next unsupported operation
-is the resolve of that smaller target.
+first blur and bloom pass on the native queue. The bloom resolve exports the
+smaller target as an unsigned normalized texture. The next unsupported
+operation is a filter draw that samples that texture.
 An empty color shader directory setting keeps the depth-only checkpoint.
 
 Other indexed and nonindexed scene draws, direct begin-UP draws and raw/indirect GPU

@@ -16,6 +16,7 @@ class ColorTarget {
     // Resolve the specified 2x MSAA region into retained single-sample HDR
     // storage, apply the destination exponent and clear the source to zero.
     uint64_t ResolveAndClear(const plume::RenderRect& rectangle, int32_t exponent);
+    uint64_t ResolveFixedPoint();
     uint64_t OverwriteResolved(const ColorTarget& source, int32_t exponent, std::span<const uint8_t> shader);
     std::vector<uint16_t> ReadPixels(); // Raw float16 or SNORM channels for diagnostics.
     std::vector<uint16_t> ReadResolvedPixels(); // Contiguous completed resolve region.

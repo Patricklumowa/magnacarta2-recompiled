@@ -338,5 +338,15 @@ Put `vertex-shader.container`, `pixel-shader.container`, `vertex.dxil` and
 The D3D12 replay verified the one-pixel border and changed the input textures
 independently. The depth change altered 18,560 output alpha values and the
 color change altered all 57,600 interior red values in the diagnostic. A live
-boot without Xenos completed this draw with the original game parameters,
-then stopped at the resolve of the bloom target.
+boot without Xenos completed this draw with the original game parameters.
+
+The game then resolves the signed target into a 322 x 182 RGBA16_UNORM
+texture. The native dispatch decodes the signed range, rounds to unsigned
+16-bit values and retains the source. The GPU replay checks the conversion
+with the bloom output and signed test values. Compile the shader into `bloom`:
+
+```text
+dxc -T cs_6_0 -E main -HV 2021 -D MC2_SINGLE_SAMPLE=1 -D MC2_FIXED16_TO_UNORM=1 native/src/native_color_resolve.hlsl -Fo <color-shaders>/bloom/color-resolve.dxil
+```
+
+The live run completed this resolve and stopped at the following filter draw.

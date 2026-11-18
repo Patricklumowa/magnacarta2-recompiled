@@ -93,4 +93,5 @@ ScenePassShaders LoadBloomShaders(const std::filesystem::path& directory);
 SceneFullscreenDraw ReadBloomDraw(const PPCContext& context, uint8_t* base,
     const ScenePassShaders& shaders, const SceneResolveTexture& color, const SceneResolveTexture& depth);
 void ReadBloomUpVertices(DepthDraw& draw, uint8_t* base, uint32_t address, uint32_t index_address);
+SceneSurface ReadBloomResolve(const PPCContext& context, uint8_t* base);
 }
