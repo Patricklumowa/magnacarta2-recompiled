@@ -94,7 +94,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     std::optional<SceneColorShaders> color_shaders;
     std::optional<ScenePassShaders> depth_restore_shaders;
     std::optional<ScenePassShaders> fullscreen_shaders, color_grade_shaders;
-    std::optional<ScenePassShaders> bloom_shaders;
+    std::optional<ScenePassShaders> bloom_shaders, filter_shaders;
     std::vector<uint8_t> fullscreen_resolve_shader, bloom_resolve_shader;
     std::optional<SceneSurface> depth_surface,color_surface;
     std::unique_ptr<DepthRenderer> depth_renderer;
@@ -111,8 +111,8 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     bool fullscreen_resolved = false;
     std::optional<SceneSurface> bloom_surface;
     std::unique_ptr<ColorTarget> bloom_target;
-    bool bloom_drawn = false;
-    bool bloom_resolved = false;
+    std::optional<SceneResolveTexture> bloom_texture;
+    uint32_t bloom_draws = 0, bloom_copies = 0;
     plume::RenderRect cleared_tile;
     std::optional<DepthDraw> prepass_draw;
     std::optional<TiledSceneDraw> scene_draw;
@@ -147,6 +147,8 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             if (std::filesystem::is_directory(bloom_directory)) bloom_shaders = LoadBloomShaders(bloom_directory);
             const auto bloom_resolve_path = bloom_directory / "color-resolve.dxil";
             if (std::filesystem::exists(bloom_resolve_path)) bloom_resolve_shader = ReadNativeFile(bloom_resolve_path);
+            const auto filter_directory = bloom_directory / "filter";
+            if (std::filesystem::is_directory(filter_directory)) filter_shaders = LoadBloomShaders(filter_directory);
         }
         NativeGraphics* expected = nullptr;
         Require(active.compare_exchange_strong(expected, this), "Only one native graphics system is supported");
@@ -456,8 +458,15 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             Require(device && device == guest_device && depth_restored && !pending_up, "Unexpected native indexed user-memory draw");
             bloom = fullscreen_resolved;
             if (bloom) {
-                Require(bloom_shaders && bloom_surface && bloom_target && !bloom_drawn, "Indexed bloom draw requires the first bloom shaders and clear");
-                scene = ReadBloomDraw(ctx, base, *bloom_shaders, scene_textures[0], scene_textures[1]);
+                Require(bloom_surface && bloom_target && bloom_draws == bloom_copies && bloom_draws < 3,
+                        "Bloom draw requires its cleared target and preceding resolve");
+                if (bloom_draws == 0) {
+                    Require(bool(bloom_shaders), "Initial bloom shaders are unavailable");
+                    scene = ReadBloomDraw(ctx, base, *bloom_shaders, scene_textures[1], &scene_textures[0]);
+                } else {
+                    Require(filter_shaders && bloom_texture, "Bloom filter shaders or resolved texture are unavailable");
+                    scene = ReadBloomDraw(ctx, base, *filter_shaders, *bloom_texture);
+                }
                 Require(*bloom_surface == scene.surface, "Bloom draw differs from its cleared surface");
             } else {
                 Require(fullscreen_shaders && !fullscreen_target, "Indexed begin-UP draw requires the first fullscreen HDR shaders");
@@ -484,13 +493,21 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         const auto sampler = FullscreenColorSampler();
         if (up.bloom) {
             ReadBloomUpVertices(up.scene.draw, base, up.vertices, up.indices);
-            auto configuration = ConfigureDepth(surface, bloom_shaders->vertex);
+            const auto& shaders = bloom_draws == 0 ? *bloom_shaders : *filter_shaders;
+            auto configuration = ConfigureDepth(surface, shaders.vertex);
             configuration.cull = plume::RenderCullMode::NONE;
-            const std::array samplers{sampler, sampler};
-            ColorRenderer renderer(configuration, bloom_shaders->pixel_dxil, samplers, *bloom_target);
-            completed = renderer.RenderResolved(up.scene.draw, up.scene.pixel_constants, *depth_renderer, *color_target);
-            bloom_drawn = true;
-            REXLOG_INFO("MC2 native scene: drew fixed-point blur and bloom from both scene textures, completed={}", completed);
+            if (bloom_draws == 0) {
+                const std::array samplers{sampler, sampler};
+                ColorRenderer renderer(configuration, shaders.pixel_dxil, samplers, *bloom_target);
+                completed = renderer.RenderResolved(up.scene.draw, up.scene.pixel_constants, *depth_renderer, *color_target);
+                REXLOG_INFO("MC2 native scene: drew fixed-point blur and bloom from both scene textures, completed={}", completed);
+            } else {
+                const auto filter_sampler = FullscreenColorSampler(true);
+                ColorRenderer renderer(configuration, shaders.pixel_dxil, std::span(&filter_sampler, 1), *bloom_target);
+                completed = renderer.RenderResolved(up.scene.draw, up.scene.pixel_constants, *bloom_target);
+                REXLOG_INFO("MC2 native scene: filtered bloom pass {}, completed={}", bloom_draws, completed);
+            }
+            ++bloom_draws;
         } else {
             ReadFullscreenUpVertices(up.scene.draw, base, up.vertices, up.indices);
             fullscreen_target = std::make_unique<ColorTarget>(surface.width, surface.height, surface.samples, gpu);
@@ -534,13 +551,16 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
 
     void ResolveBloom(const PPCContext& ctx, uint8_t* base) {
         std::lock_guard lock(mutex);
-        Require(ctx.r3.u32 && ctx.r3.u32 == guest_device && bloom_drawn && !bloom_resolved,
+        Require(ctx.r3.u32 && ctx.r3.u32 == guest_device && bloom_draws == bloom_copies + 1,
                 "Bloom resolve requires the completed native bloom draw");
-        const auto surface = ReadBloomResolve(ctx, base);
+        const auto [surface, destination] = ReadBloomResolve(ctx, base);
         Require(*bloom_surface == surface, "Bloom resolve source differs from the drawn target");
+        Require(!bloom_texture || *bloom_texture == destination, "Bloom resolve destination changed between passes");
         completed = bloom_target->ResolveFixedPoint();
-        bloom_resolved = true;
-        REXLOG_INFO("MC2 native scene: resolved fixed-point bloom to UNORM texture {:#x}, completed={}", ctx.r6.u32, completed);
+        bloom_texture = destination;
+        ++bloom_copies;
+        REXLOG_INFO("MC2 native scene: resolved bloom pass {} to UNORM texture {:#x}, completed={}",
+                    bloom_copies, destination.address, completed);
     }
 
     // Record bounded changes at the clear boundary while surface support grows.
@@ -628,7 +648,7 @@ void TraceSceneResolve(const PPCContext& ctx, uint8_t* base) {
     if (!postprocess && ctx.lr != 0x826DA2D8 && ctx.lr != 0x826DA314) return;
     static std::atomic<uint32_t> tile_count = 0, postprocess_count = 0;
     auto& count = postprocess ? postprocess_count : tile_count;
-    const uint32_t limit = postprocess ? 2 : 8;
+    constexpr uint32_t limit = 8;
     if (count.load(std::memory_order_relaxed) >= limit || count.fetch_add(1, std::memory_order_relaxed) >= limit) return;
     using mc2::capture::ReadGuest;
     using mc2::capture::LoadBE32;

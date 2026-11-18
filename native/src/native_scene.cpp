@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <format>
 #include <stdexcept>
 
 namespace mc2::native {
@@ -55,13 +56,25 @@ void RequireFullClearRect(const PPCContext& ctx, uint8_t* base, const SceneSurfa
             LoadBE32(rectangle.data() + 12) == surface.height, "Only the verified full surface clear rectangle is supported");
 }
 
-void RequireSceneTexture(const DeviceState& state, const SceneResolveTexture& source, uint32_t clamp_bits, uint32_t slot = 0) {
+uint32_t PhysicalFetchAddress(uint32_t address) {
+    // The guest's 4 KiB physical heap starts one page into physical memory.
+    return (address & 0x1fffffff) + (address >= 0xe0000000 ? 0x1000 : 0);
+}
+
+void RequireSceneTexture(const DeviceState& state, const SceneResolveTexture& source, uint32_t clamp_bits,
+                         uint32_t slot = 0, bool linear = false) {
     Require(source.address && state.Word(12552 + slot * 4) == source.address, "Fullscreen pass did not bind the scene resolve");
     for (uint32_t i = 0; i < source.fetch_words.size(); ++i) {
         uint32_t expected = source.fetch_words[i];
         if (i == 0) expected |= clamp_bits;
-        if (i == 1) expected &= 0x1fffffff;
-        Require(state.Word(1152 + slot * 24 + i * 4) == expected, "Fullscreen scene texture fetch differs");
+        if (i == 1) expected = PhysicalFetchAddress(expected);
+        if (linear && i == 3) expected |= 0x280000;
+        if (linear && i == 4) expected |= 3;
+        const auto value = state.Word(1152 + slot * 24 + i * 4);
+        if (value != expected) {
+            throw std::runtime_error(std::format("Fullscreen scene texture {} fetch word {} differs ({:#x}, expected {:#x})",
+                                                 slot, i, value, expected));
+        }
     }
 }
 
@@ -156,7 +169,7 @@ DepthDraw ReadGeometry(const PPCContext& ctx, uint8_t* base, const DeviceState& 
             mc2::draw_capture::BufferBytes(vertex_descriptor.data(),vertex_descriptor.size(),true,address,size) &&
             ReadGuest(base,address,size,raw), "Invalid scene vertex buffer");
     const auto vertex_address=LoadBE32(vertex_descriptor.data()+24);
-    const auto physical_fetch=(vertex_address & 0x1fffffff) + (((vertex_address>>20)+512)&0x1000);
+    const auto physical_fetch = PhysicalFetchAddress(vertex_address);
     Require(state.Word(1912) == physical_fetch && state.Word(1916) == LoadBE32(vertex_descriptor.data()+28),
             "Bound vertex fetch differs from its resource descriptor");
     DepthDraw draw;
@@ -451,7 +464,7 @@ SceneFullscreenDraw ReadSceneFullscreenDraw(const PPCContext& ctx, uint8_t* base
                 size == 128 && state.Word(1916) == LoadBE32(descriptor.data() + 28) &&
                 (state.Word(1916) & 3) == 2 && ReadGuest(base,address,size,raw), "Invalid color grade vertex buffer");
         const auto vertex_address = LoadBE32(descriptor.data() + 24);
-        const auto physical_fetch = (vertex_address & 0x1fffffff) + (((vertex_address >> 20) + 512) & 0x1000);
+        const auto physical_fetch = PhysicalFetchAddress(vertex_address);
         Require(state.Word(1912) == physical_fetch, "Color grade vertex binding differs from its buffer");
         pass.draw.vertices = NativeVertexBytes(raw, 2);
         pass.draw.indices = {0,1,2,0,2,3};
@@ -481,9 +494,9 @@ void ReadFullscreenUpVertices(DepthDraw& draw, uint8_t* base, uint32_t address, 
     draw.index_count = uint32_t(draw.indices.size());
 }
 
-plume::RenderSamplerDesc FullscreenColorSampler() {
+plume::RenderSamplerDesc FullscreenColorSampler(bool linear) {
     plume::RenderSamplerDesc sampler;
-    sampler.minFilter = sampler.magFilter = plume::RenderFilter::NEAREST;
+    sampler.minFilter = sampler.magFilter = linear ? plume::RenderFilter::LINEAR : plume::RenderFilter::NEAREST;
     sampler.mipmapMode = plume::RenderMipmapMode::NEAREST;
     sampler.addressU = sampler.addressV = plume::RenderTextureAddressMode::CLAMP;
     sampler.maxLOD = 0;
@@ -525,7 +538,7 @@ ScenePassShaders LoadBloomShaders(const std::filesystem::path& directory) {
 }
 
 SceneFullscreenDraw ReadBloomDraw(const PPCContext& ctx, uint8_t* base, const ScenePassShaders& shaders,
-        const SceneResolveTexture& color, const SceneResolveTexture& depth) {
+        const SceneResolveTexture& primary, const SceneResolveTexture* color) {
     Require(ctx.lr == 0x826D9CC0 && ctx.r4.u32 == 4 && ctx.r5.u32 == 0 && ctx.r6.u32 == 4 && ctx.r7.u32 == 6 &&
             ctx.r8.u32 == 1 && ctx.r9.u32 == 32, "Unsupported indexed bloom draw arguments");
     const DeviceState state(base, ctx.r3.u32);
@@ -540,14 +553,16 @@ SceneFullscreenDraw ReadBloomDraw(const PPCContext& ctx, uint8_t* base, const Sc
             "Unsupported bloom viewport, write mask or blend state");
     Require(ReadBoundShader(base, state.Word(12704), true) == shaders.vertex.reference &&
             ReadBoundShader(base, state.Word(12700), false) == shaders.pixel_reference, "Untranslated bloom shaders");
-    RequireSceneTexture(state, depth, 0x4800);
-    RequireSceneTexture(state, color, 0x4800, 1);
+    RequireSceneTexture(state, primary, 0x4800, 0, !color);
     ReadFullscreenConstants(state, pass.surface, pass.draw, pass.pixel_constants, false);
-    const uint32_t slot = 1, mode = PackTextureFetchMode(0x688,0,0);
-    auto* shared = pass.draw.shared_constants.data();
-    std::memcpy(shared + 4, &slot, sizeof(slot));
-    std::memcpy(shared + 196, &slot, sizeof(slot));
-    std::memcpy(shared + 292, &mode, sizeof(mode));
+    if (color) {
+        RequireSceneTexture(state, *color, 0x4800, 1);
+        const uint32_t slot = 1, mode = PackTextureFetchMode(0x688,0,0);
+        auto* shared = pass.draw.shared_constants.data();
+        std::memcpy(shared + 4, &slot, sizeof(slot));
+        std::memcpy(shared + 196, &slot, sizeof(slot));
+        std::memcpy(shared + 292, &mode, sizeof(mode));
+    }
     return pass;
 }
 
@@ -561,7 +576,7 @@ void ReadBloomUpVertices(DepthDraw& draw, uint8_t* base, uint32_t address, uint3
     draw.index_count = uint32_t(draw.indices.size());
 }
 
-SceneSurface ReadBloomResolve(const PPCContext& ctx, uint8_t* base) {
+std::pair<SceneSurface, SceneResolveTexture> ReadBloomResolve(const PPCContext& ctx, uint8_t* base) {
     Require(ctx.lr == 0x827B3694 && ctx.r4.u32 == 0 && !ctx.r5.u32 && !ctx.r7.u32 && !ctx.r8.u32 && !ctx.r9.u32,
             "Unsupported bloom resolve flags or region");
     const DeviceState state(base, ctx.r3.u32);
@@ -573,6 +588,9 @@ SceneSurface ReadBloomResolve(const PPCContext& ctx, uint8_t* base) {
     Require(word(28) == 0x82c00002 && (word(32) & 4095) == 0x5a && (word(32) >> 12) != 0 &&
             word(36) == 0x16a141 && word(40) == 0xd10 && word(44) == 0 && word(48) == 0x200,
             "Bloom resolve requires the verified 322x182 RGBA16_UNORM texture");
-    return surface;
+    SceneResolveTexture destination;
+    destination.address = ctx.r6.u32;
+    for (uint32_t i = 0; i < destination.fetch_words.size(); ++i) destination.fetch_words[i] = word(28 + i * 4);
+    return {surface, destination};
 }
 }

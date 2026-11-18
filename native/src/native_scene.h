@@ -3,6 +3,7 @@
 #include "texture_blocks.h"
 #include <array>
 #include <filesystem>
+#include <utility>
 struct PPCContext;
 namespace mc2::native {
 struct SceneVertexShader {
@@ -86,12 +87,12 @@ ScenePassShaders LoadFullscreenColorShaders(const std::filesystem::path& directo
 SceneFullscreenDraw ReadSceneFullscreenDraw(const PPCContext& context, uint8_t* base,
     const ScenePassShaders& shaders, const SceneResolveTexture& source, bool grade);
 void ReadFullscreenUpVertices(DepthDraw& draw, uint8_t* base, uint32_t address, uint32_t index_address);
-plume::RenderSamplerDesc FullscreenColorSampler();
+plume::RenderSamplerDesc FullscreenColorSampler(bool linear = false);
 SceneSurface ReadFullscreenResolve(const PPCContext& context, uint8_t* base, const SceneResolveTexture& destination);
 SceneColorClear ReadBloomClear(const PPCContext& context, uint8_t* base);
 ScenePassShaders LoadBloomShaders(const std::filesystem::path& directory);
 SceneFullscreenDraw ReadBloomDraw(const PPCContext& context, uint8_t* base,
-    const ScenePassShaders& shaders, const SceneResolveTexture& color, const SceneResolveTexture& depth);
+    const ScenePassShaders& shaders, const SceneResolveTexture& primary, const SceneResolveTexture* color = nullptr);
 void ReadBloomUpVertices(DepthDraw& draw, uint8_t* base, uint32_t address, uint32_t index_address);
-SceneSurface ReadBloomResolve(const PPCContext& context, uint8_t* base);
+std::pair<SceneSurface, SceneResolveTexture> ReadBloomResolve(const PPCContext& context, uint8_t* base);
 }

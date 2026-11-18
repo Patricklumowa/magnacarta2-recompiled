@@ -300,6 +300,43 @@ void CheckBloom(mc2::native::DepthRenderer& depth, mc2::native::ColorTarget& col
         target.Clear(RenderColor(-0.5f,1.f/64,-1.f/32767,0.5f));
         check_resolve(target.ReadPixels());
         std::cout << "PASS: bloom resolve scales signed channels and clamps into RGBA16_UNORM\n";
+
+        if (std::filesystem::is_directory(directory / "filter")) {
+            const auto filter_shaders = LoadBloomShaders(directory / "filter");
+            configuration.vertex_shader = filter_shaders.vertex.dxil;
+            configuration.inputs = filter_shaders.vertex.inputs;
+            const auto linear = FullscreenColorSampler(true);
+            ColorRenderer filter(configuration, filter_shaders.pixel_dxil, std::span(&linear, 1), target);
+            draw.shared_constants[4] = 0;
+            draw.shared_constants[196] = 0;
+            constexpr uint32_t x = 20, y = 20;
+            const RenderRect impulse(x,y,x+1,y+1);
+            target.Clear(RenderColor(0,0,0,0));
+            target.Clear(RenderColor(512.f/32767,0,0,0), &impulse);
+            target.ResolveFixedPoint();
+            const auto initial = target.ReadResolvedPixels();
+            for (uint32_t i = 0; i < 4; ++i) {
+                const float uv[] = {(i & 1 ? surface.width - 1.f : 1.f) / surface.width,
+                                    (i & 2 ? surface.height - 1.f : 1.f) / surface.height};
+                std::memcpy(draw.vertices.data() + i * 32 + 16, uv, sizeof(uv));
+            }
+            const float offsets[] = {0,0,0,half_pixel[0] * 0.5f};
+            std::memcpy(draw.vertex_constants.data() + 5 * 16, offsets, sizeof(offsets));
+            const float weights[][4] = {{1,1,1,1},{1,1,1,1}};
+            std::memcpy(constants.data() + 3 * 16, weights, sizeof(weights));
+            const auto index = [&](uint32_t px) { return (size_t(y) * surface.width + px) * 4; };
+            const float sample = initial[index(x)] / 65535.f;
+            const auto encoded = [&](float scale) { return int(std::floor(sample * scale * (32767.f / 32.f) + 0.5f)); };
+            filter.RenderResolved(draw, constants, target);
+            const auto first = target.ReadPixels();
+            Check(std::abs(int(first[index(x)]) - encoded(1.5f)) <= 1 &&
+                  std::abs(int(first[index(x-1)]) - encoded(0.5f)) <= 1 && !first[index(x-2)],
+                  "Bloom filter did not use bilinear sampling and the two bound weights");
+            target.ResolveFixedPoint();
+            filter.RenderResolved(draw, constants, target);
+            Check(target.ReadPixels()[index(x-2)] != 0, "Second bloom filter sampled stale resolved data");
+            std::cout << "PASS: bilinear bloom filtering and feedback across both passes\n";
+        }
     }
 }
 

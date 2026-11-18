@@ -228,7 +228,7 @@ identical color and maximum depth values with either retained or freshly
 cleared depth.
 
 `--mc2_scene_resolve_trace=true` logs the first eight tiled resolve calls and
-the first two fullscreen resolve calls on a native boot development build.
+the first eight untiled scene resolve calls on a native boot development build.
 The reference renderer observed two calls per
 tile, at masks `2` and `8`. Flags `0xf4000100` average color samples into a
 1280 x 720 RGBA16F texture and request a zero color clear. Flags `0x214` copy
@@ -349,4 +349,10 @@ with the bloom output and signed test values. Compile the shader into `bloom`:
 dxc -T cs_6_0 -E main -HV 2021 -D MC2_SINGLE_SAMPLE=1 -D MC2_FIXED16_TO_UNORM=1 native/src/native_color_resolve.hlsl -Fo <color-shaders>/bloom/color-resolve.dxil
 ```
 
-The live run completed this resolve and stopped at the following filter draw.
+The two subsequent filter draws sample this texture with bilinear clamp
+sampling. Each writes to the retained signed target and resolves into the
+same separate UNORM texture before the next draw samples it. Put the filter
+shader containers and compiled shaders, using the same filenames as the
+initial bloom pass, in `bloom/filter`. The GPU check uses a single-pixel
+input and verifies the weighted samples and the spread after the second draw.
+A live boot without Xenos completed both filters and all three bloom resolves.
