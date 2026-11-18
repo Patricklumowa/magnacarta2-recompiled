@@ -144,18 +144,18 @@ SceneSurface ReadTiledColorSurface(const DeviceState& state, uint8_t* base) {
     return surface;
 }
 
-SceneSurface ReadFullscreenColorSurface(const DeviceState& state, uint8_t* base) {
+SceneSurface ReadFullscreenColorSurface(const DeviceState& state, uint8_t* base, uint32_t format_word = 0x302d0) {
     SceneSurface surface{state.Word(12448),1280,720,1,{}};
     std::vector<uint8_t> descriptor;
     Require(state.Word(12452) == 0 && state.Word(12456) == 0 && state.Word(12460) == 0 &&
-            ReadGuest(base, surface.address, 48, descriptor), "Missing fullscreen HDR attachment");
+            ReadGuest(base, surface.address, 48, descriptor), "Missing fullscreen color attachment");
     Require((LoadBE32(descriptor.data()) & 15) == 4 && LoadBE32(descriptor.data() + 24) == 0x14000500 &&
-            LoadBE32(descriptor.data() + 28) == 0x302d0 && LoadBE32(descriptor.data() + 36) == 0x13fc1678 &&
-            state.Word(10372) == 0x302d0, "Fullscreen HDR attachment layout changed");
+            LoadBE32(descriptor.data() + 28) == format_word && LoadBE32(descriptor.data() + 36) == 0x13fc1678 &&
+            state.Word(10372) == format_word, "Fullscreen color attachment layout changed");
     surface.description.assign(descriptor.begin()+24,descriptor.end());
     state.FullViewport(surface);
     Require((state.bytes[10940] & 0x30) == 0 && state.Word(12724) == 0 && state.Word(12716) == UINT32_MAX,
-            "Fullscreen HDR pass needs an untiled surface");
+            "Fullscreen color pass needs an untiled surface");
     return surface;
 }
 
@@ -587,6 +587,21 @@ SceneFullscreenDraw ReadCompositionDraw(const PPCContext& ctx, uint8_t* base, co
     ReadFullscreenConstants(state, pass.surface, pass.draw, pass.pixel_constants, true);
     BindSceneTexture(pass.draw, 1);
     BindSceneTexture(pass.draw, 2);
+    return pass;
+}
+
+SceneFullscreenDraw ReadBackBufferDraw(const PPCContext& ctx, uint8_t* base, const ScenePassShaders& shaders,
+        const SceneResolveTexture& color) {
+    RequireQuadArguments(ctx);
+    const DeviceState state(base, ctx.r3.u32);
+    SceneFullscreenDraw pass;
+    pass.surface = ReadFullscreenColorSurface(state, base, 0x2d0);
+    Require(state.Word(12464) == 0, "Back-buffer copy requires no depth attachment");
+    RequireFullscreenDrawState(state, pass.surface, false);
+    Require(ReadBoundShader(base, state.Word(12704), true) == shaders.vertex.reference &&
+            ReadBoundShader(base, state.Word(12700), false) == shaders.pixel_reference, "Untranslated back-buffer shaders");
+    RequireSceneTexture(state, color, 0x4800);
+    ReadFullscreenConstants(state, pass.surface, pass.draw, pass.pixel_constants, false);
     return pass;
 }
 

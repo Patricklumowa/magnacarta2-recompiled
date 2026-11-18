@@ -4,7 +4,7 @@
 #include <vector>
 
 namespace mc2::native {
-// Persistent HDR surface on the same queue as native movie/depth work. Partial
+// Persistent color surface on the same queue as native movie/depth work. Partial
 // clears are allowed before drawing, but undefined pixels cannot be read back.
 class ColorTarget {
  public:
@@ -20,6 +20,7 @@ class ColorTarget {
     uint64_t OverwriteResolved(const ColorTarget& source, int32_t exponent, std::span<const uint8_t> shader);
     std::vector<uint16_t> ReadPixels(); // Raw float16 or SNORM channels for diagnostics.
     std::vector<uint16_t> ReadResolvedPixels(); // Contiguous completed resolve region.
+    std::vector<uint8_t> ReadRgba8();
  private:
     friend class ColorRenderer;
     NativeDevice& Device() const;

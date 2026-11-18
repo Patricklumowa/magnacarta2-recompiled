@@ -151,12 +151,13 @@ texture. The subsequent 322 x 182 fixed-point target clears and draws the
 first blur and bloom pass on the native queue. The two subsequent filters
 each sample the preceding unsigned normalized resolve, then update it for
 the next pass. The fullscreen composition uses the filtered bloom, color,
-and depth textures and resolves to HDR before the next unsupported draw
-into the back buffer.
+and depth textures and resolves to HDR. The final color shader then applies
+its gamma and overlay settings to the RGBA8 back buffer. The next unsupported
+draw blends the game's UI into that surface.
 An empty color shader directory setting keeps the depth-only checkpoint.
 
 Other indexed and nonindexed scene draws, direct begin-UP draws and raw/indirect GPU
-submission paths currently fail explicitly. Back-buffer drawing and presentation, remaining clears/resolves,
+submission paths currently fail explicitly. UI blending, scene presentation, remaining clears/resolves,
 queries, shader/input coverage, asynchronous resource retirement and native
 platform services remain unfinished. Full effects and shadows are required.
 The original backend remains the default and the reference for those changes.

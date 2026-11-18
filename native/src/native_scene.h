@@ -97,5 +97,7 @@ void ReadQuadUpVertices(DepthDraw& draw, uint8_t* base, uint32_t address, uint32
 SceneFullscreenDraw ReadCompositionDraw(const PPCContext& context, uint8_t* base,
     const ScenePassShaders& shaders, const SceneResolveTexture& depth, const SceneResolveTexture& color,
     const SceneResolveTexture& bloom);
+SceneFullscreenDraw ReadBackBufferDraw(const PPCContext& context, uint8_t* base,
+    const ScenePassShaders& shaders, const SceneResolveTexture& color);
 std::pair<SceneSurface, SceneResolveTexture> ReadBloomResolve(const PPCContext& context, uint8_t* base);
 }

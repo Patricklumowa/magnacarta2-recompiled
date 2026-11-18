@@ -369,3 +369,12 @@ grade pass. Put the corresponding containers, `vertex.dxil`, and
 The GPU replay varied each of the three sources and matched the expected
 quantized RGBA output at every pixel. The live run without Xenos completed
 the composition and resolve before reaching the back-buffer draw.
+
+## Back-buffer color pass
+
+The back-buffer pass reads the resolved HDR image and applies the game's
+color scale, overlay and gamma constants to a native 1280 x 720 RGBA8
+surface. Put its shader containers, `vertex.dxil`, and `pixel.dxil` in
+`fullscreen/back-buffer`. GPU readback matched the expected four channels
+at every pixel of the diagnostic. Live boot completed the same pass, then
+reached the first alpha-blended game overlay draw.

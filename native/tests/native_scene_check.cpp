@@ -216,6 +216,37 @@ void CheckFullscreenColor(mc2::native::ColorTarget& source, const mc2::native::S
     }
 }
 
+void CheckBackBuffer(mc2::native::DepthDraw draw, const mc2::native::SceneSurface& surface,
+                     const mc2::native::ColorTarget& source, const std::shared_ptr<mc2::native::NativeDevice>& gpu,
+                     const std::filesystem::path& directory) {
+    using namespace mc2::native;
+    using namespace plume;
+    const auto shaders = LoadQuadShaders(directory, "pixel.dxil");
+    auto configuration = ConfigureDepth(surface, shaders.vertex);
+    configuration.cull = RenderCullMode::NONE;
+    ColorTarget target(surface.width, surface.height, 1, gpu, {}, RenderFormat::R8G8B8A8_UNORM);
+    const auto sampler = FullscreenColorSampler();
+    ColorRenderer renderer(configuration, shaders.pixel_dxil, std::span(&sampler,1), target);
+    draw.viewport = RenderViewport(0,0,surface.width,surface.height);
+    std::fill_n(draw.shared_constants.begin(), 12, 0);
+    std::fill_n(draw.shared_constants.begin() + 192, 12, 0);
+    std::vector<uint8_t> constants(4096);
+    const float parameters[][4] = {{4,8,32,0},{0.75f,0.25f,0.25f,0.5f},{0.5f,0,0,0}};
+    std::memcpy(constants.data() + 3 * 16, parameters, sizeof(parameters));
+    target.Clear(RenderColor(0,0,0,0));
+    renderer.RenderResolved(draw, constants, source);
+    const auto pixels = target.ReadRgba8();
+    constexpr uint8_t expected[] = {180,156,202,255};
+    for (size_t i = 0; i < pixels.size(); i += 4) {
+        if (!std::equal(std::begin(expected), std::end(expected), pixels.begin() + i)) {
+            std::cerr << "Back-buffer pixel " << i / 4 << ": "
+                      << int(pixels[i]) << ' ' << int(pixels[i+1]) << ' ' << int(pixels[i+2]) << ' ' << int(pixels[i+3]) << '\n';
+            Check(false, "Back-buffer shader did not preserve color scale, overlay and gamma");
+        }
+    }
+    std::cout << "PASS: composed HDR sampled into RGBA8 with color scale, overlay and gamma\n";
+}
+
 void CheckComposition(mc2::native::DepthRenderer& depth, mc2::native::ColorTarget& color,
                       mc2::native::ColorTarget& bloom, const mc2::native::SceneSurface& scene,
                       const std::shared_ptr<mc2::native::NativeDevice>& gpu, const std::filesystem::path& directory) {
@@ -284,6 +315,12 @@ void CheckComposition(mc2::native::DepthRenderer& depth, mc2::native::ColorTarge
     bloom.ResolveFixedPoint();
     check({0x3800,0x3800,0x3400,0x3c00});
     std::cout << "PASS: fullscreen composition responds to all three scene textures\n";
+    const auto back_buffer_directory = directory.parent_path() / "back-buffer";
+    const auto resolve_path = directory.parent_path() / "color-resolve.dxil";
+    if (std::filesystem::is_directory(back_buffer_directory) && std::filesystem::exists(resolve_path)) {
+        color.OverwriteResolved(target, -3, ReadNativeFile(resolve_path));
+        CheckBackBuffer(std::move(draw), surface, color, gpu, back_buffer_directory);
+    }
 }
 
 void CheckBloom(mc2::native::DepthRenderer& depth, mc2::native::ColorTarget& color,
