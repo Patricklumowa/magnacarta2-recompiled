@@ -216,13 +216,84 @@ void CheckFullscreenColor(mc2::native::ColorTarget& source, const mc2::native::S
     }
 }
 
-void CheckBloom(mc2::native::DepthRenderer& depth, mc2::native::ColorTarget& color,
-                const mc2::native::SceneSurface& scene, const std::shared_ptr<mc2::native::NativeDevice>& gpu,
-                const std::filesystem::path& directory) {
+void CheckComposition(mc2::native::DepthRenderer& depth, mc2::native::ColorTarget& color,
+                      mc2::native::ColorTarget& bloom, const mc2::native::SceneSurface& scene,
+                      const std::shared_ptr<mc2::native::NativeDevice>& gpu, const std::filesystem::path& directory) {
     using namespace mc2::native;
     using namespace plume;
+    auto surface = scene;
+    surface.samples = 1;
+    const auto shaders = LoadQuadShaders(directory, "pixel-7e3.dxil");
+    auto configuration = ConfigureDepth(surface, shaders.vertex);
+    configuration.cull = RenderCullMode::NONE;
+    ColorTarget target(surface.width, surface.height, 1, gpu);
+    const auto point = FullscreenColorSampler();
+    const std::array samplers{point, point, FullscreenColorSampler(true)};
+    ColorRenderer renderer(configuration, shaders.pixel_dxil, samplers, target);
+
+    DepthDraw draw;
+    const RenderRect full(0, 0, surface.width, surface.height);
+    draw.viewport = RenderViewport(0, 0, surface.width, surface.height, 1, 0);
+    draw.scissor = full;
+    const float half_pixel[] = {1.f / surface.width, -1.f / surface.height};
+    const float left = -1 - half_pixel[0], right = 1 - half_pixel[0];
+    const float top = 1 - half_pixel[1], bottom = -1 - half_pixel[1];
+    const float vertices[][8] = {{left,top,0,1,0,0},{right,top,0,1,1,0},
+                                  {left,bottom,0,1,0,1},{right,bottom,0,1,1,1}};
+    draw.vertices.resize(sizeof(vertices));
+    std::memcpy(draw.vertices.data(), vertices, sizeof(vertices));
+    draw.indices = {0,1,3,0,3,2};
+    draw.index_count = uint32_t(draw.indices.size());
+    draw.vertex_constants.resize(4096);
+    draw.shared_constants.resize(512);
+    std::memcpy(draw.shared_constants.data() + 264, half_pixel, sizeof(half_pixel));
+    const auto mode = PackTextureFetchMode(0x688, 0, 0);
+    for (uint32_t slot = 0; slot < 3; ++slot) {
+        std::memcpy(draw.shared_constants.data() + slot * 4, &slot, sizeof(slot));
+        std::memcpy(draw.shared_constants.data() + 192 + slot * 4, &slot, sizeof(slot));
+        std::memcpy(draw.shared_constants.data() + 288 + slot * 4, &mode, sizeof(mode));
+    }
+    const float scale_bias[] = {0.5f,-0.5f,0.5f,0.5f};
+    std::memcpy(draw.vertex_constants.data(), scale_bias, sizeof(scale_bias));
+    std::vector<uint8_t> constants(4096);
+    // Eye depth is 1/z. Focus is at 2, with a blur factor of 1/8 per unit.
+    const float parameters[][4] = {{1,0,0,0},{0,0,0,0},{0,0,1,0},{2,0.125f,1,0},{1,1,0,0}};
+    std::memcpy(constants.data(), parameters, sizeof(parameters));
+    target.Clear(RenderColor(0,0,0,0));
+    const auto check = [&](std::array<uint16_t,4> expected) {
+        renderer.RenderResolved(draw, constants, depth, color, &bloom);
+        const auto pixels = target.ReadPixels();
+        for (size_t i = 0; i < pixels.size(); i += 4)
+            Check(std::equal(expected.begin(), expected.end(), pixels.begin() + i),
+                  "Fullscreen composition differs from the expected quantized color and alpha");
+    };
+    depth.Clear(0.5f);
+    depth.ResolveAndClear(full);
+    color.Clear(RenderColor(8,4,2,0));
+    color.ResolveAndClear(full, -3);
+    bloom.Clear(RenderColor(0.25f/32,0,0,0.125f/32));
+    bloom.ResolveFixedPoint();
+    check({0x3d58,0x3558,0x3150,0x3c00});
+    depth.Clear(0.25f);
+    depth.ResolveAndClear(full);
+    check({0x3d98,0x34d0,0x30d0,0x3c00});
+    color.Clear(RenderColor(4,4,2,0));
+    color.ResolveAndClear(full, -3);
+    check({0x3c68,0x34d0,0x30d0,0x3c00});
+    bloom.Clear(RenderColor(0,0,0,0));
+    bloom.ResolveFixedPoint();
+    check({0x3800,0x3800,0x3400,0x3c00});
+    std::cout << "PASS: fullscreen composition responds to all three scene textures\n";
+}
+
+void CheckBloom(mc2::native::DepthRenderer& depth, mc2::native::ColorTarget& color,
+                const mc2::native::SceneSurface& scene, const std::shared_ptr<mc2::native::NativeDevice>& gpu,
+                const std::filesystem::path& color_directory) {
+    using namespace mc2::native;
+    using namespace plume;
+    const auto directory = color_directory / "bloom";
     const SceneSurface surface{0,322,182,1,{}};
-    const auto shaders = LoadBloomShaders(directory);
+    const auto shaders = LoadQuadShaders(directory, "pixel-fixed16.dxil");
     auto configuration = ConfigureDepth(surface, shaders.vertex);
     configuration.cull = RenderCullMode::NONE;
     const auto resolve_path = directory / "color-resolve.dxil";
@@ -302,7 +373,7 @@ void CheckBloom(mc2::native::DepthRenderer& depth, mc2::native::ColorTarget& col
         std::cout << "PASS: bloom resolve scales signed channels and clamps into RGBA16_UNORM\n";
 
         if (std::filesystem::is_directory(directory / "filter")) {
-            const auto filter_shaders = LoadBloomShaders(directory / "filter");
+            const auto filter_shaders = LoadQuadShaders(directory / "filter", "pixel-fixed16.dxil");
             configuration.vertex_shader = filter_shaders.vertex.dxil;
             configuration.inputs = filter_shaders.vertex.inputs;
             const auto linear = FullscreenColorSampler(true);
@@ -337,6 +408,9 @@ void CheckBloom(mc2::native::DepthRenderer& depth, mc2::native::ColorTarget& col
             Check(target.ReadPixels()[index(x-2)] != 0, "Second bloom filter sampled stale resolved data");
             std::cout << "PASS: bilinear bloom filtering and feedback across both passes\n";
         }
+        const auto composition_directory = color_directory / "fullscreen" / "compose";
+        if (std::filesystem::is_directory(composition_directory))
+            CheckComposition(depth, color, target, scene, gpu, composition_directory);
     }
 }
 
@@ -525,7 +599,7 @@ void ReplayColor(const mc2::native::SceneDepthDraw& prepass, const mc2::native::
         if (std::filesystem::is_directory(shader_directory / "fullscreen"))
             CheckFullscreenColor(color, surface, gpu, shader_directory);
         if (std::filesystem::is_directory(shader_directory / "bloom"))
-            CheckBloom(depth, color, surface, gpu, shader_directory / "bloom");
+            CheckBloom(depth, color, surface, gpu, shader_directory);
     }
     draw.draw.shared_constants[0] = uint8_t(bindings.size());
     const auto before_rejection = gpu->completed;

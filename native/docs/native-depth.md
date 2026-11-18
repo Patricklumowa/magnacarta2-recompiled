@@ -356,3 +356,16 @@ shader containers and compiled shaders, using the same filenames as the
 initial bloom pass, in `bloom/filter`. The GPU check uses a single-pixel
 input and verifies the weighted samples and the spread after the second draw.
 A live boot without Xenos completed both filters and all three bloom resolves.
+
+## Depth of field composition
+
+The fullscreen composition samples the completed depth and HDR textures with
+point sampling and the filtered bloom texture with bilinear sampling. It
+writes the original four-channel output to the existing HDR target. The
+game then resolves it with the same exponent and destination used by the
+grade pass. Put the corresponding containers, `vertex.dxil`, and
+`pixel-7e3.dxil` in `fullscreen/compose`.
+
+The GPU replay varied each of the three sources and matched the expected
+quantized RGBA output at every pixel. The live run without Xenos completed
+the composition and resolve before reaching the back-buffer draw.

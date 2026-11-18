@@ -78,10 +78,11 @@ struct PendingDepthRestore {
     SceneDepthRestore scene;
     uint32_t vertices, endpoint;
 };
+enum class SceneQuadPass { HdrCopy, Bloom, Composition };
 struct PendingUpDraw {
     SceneFullscreenDraw scene;
     uint32_t vertices, indices, endpoint;
-    bool bloom;
+    SceneQuadPass pass;
 };
 
 class NativeGraphics final : public rex::system::IGraphicsSystem {
@@ -94,7 +95,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     std::optional<SceneColorShaders> color_shaders;
     std::optional<ScenePassShaders> depth_restore_shaders;
     std::optional<ScenePassShaders> fullscreen_shaders, color_grade_shaders;
-    std::optional<ScenePassShaders> bloom_shaders, filter_shaders;
+    std::optional<ScenePassShaders> bloom_shaders, filter_shaders, composition_shaders;
     std::vector<uint8_t> fullscreen_resolve_shader, bloom_resolve_shader;
     std::optional<SceneSurface> depth_surface,color_surface;
     std::unique_ptr<DepthRenderer> depth_renderer;
@@ -108,7 +109,8 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     std::optional<SceneSurface> fullscreen_surface;
     std::unique_ptr<ColorTarget> fullscreen_target;
     bool color_graded = false;
-    bool fullscreen_resolved = false;
+    bool scene_composited = false;
+    uint32_t fullscreen_copies = 0;
     std::optional<SceneSurface> bloom_surface;
     std::unique_ptr<ColorTarget> bloom_target;
     std::optional<SceneResolveTexture> bloom_texture;
@@ -141,14 +143,16 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             if (std::filesystem::is_directory(fullscreen_directory)) fullscreen_shaders = LoadFullscreenColorShaders(fullscreen_directory, false);
             const auto fullscreen_resolve_path = fullscreen_directory / "color-resolve.dxil";
             if (std::filesystem::exists(fullscreen_resolve_path)) fullscreen_resolve_shader = ReadNativeFile(fullscreen_resolve_path);
+            const auto composition_directory = fullscreen_directory / "compose";
+            if (std::filesystem::is_directory(composition_directory)) composition_shaders = LoadQuadShaders(composition_directory, "pixel-7e3.dxil");
             const auto grade_directory = std::filesystem::path(color_directory) / "color-grade";
             if (std::filesystem::is_directory(grade_directory)) color_grade_shaders = LoadFullscreenColorShaders(grade_directory, true);
             const auto bloom_directory = std::filesystem::path(color_directory) / "bloom";
-            if (std::filesystem::is_directory(bloom_directory)) bloom_shaders = LoadBloomShaders(bloom_directory);
+            if (std::filesystem::is_directory(bloom_directory)) bloom_shaders = LoadQuadShaders(bloom_directory, "pixel-fixed16.dxil");
             const auto bloom_resolve_path = bloom_directory / "color-resolve.dxil";
             if (std::filesystem::exists(bloom_resolve_path)) bloom_resolve_shader = ReadNativeFile(bloom_resolve_path);
             const auto filter_directory = bloom_directory / "filter";
-            if (std::filesystem::is_directory(filter_directory)) filter_shaders = LoadBloomShaders(filter_directory);
+            if (std::filesystem::is_directory(filter_directory)) filter_shaders = LoadQuadShaders(filter_directory, "pixel-fixed16.dxil");
         }
         NativeGraphics* expected = nullptr;
         Require(active.compare_exchange_strong(expected, this), "Only one native graphics system is supported");
@@ -225,7 +229,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             {
                 std::lock_guard lock(mutex);
                 if (!depth_renderer) return false;
-                bloom = fullscreen_resolved;
+                bloom = fullscreen_copies != 0;
             }
             const auto clear=bloom ? ReadBloomClear(ctx,base) : ReadSceneColorClear(ctx,base);
             Flush(base,ctx.r3.u32);
@@ -452,13 +456,17 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     void BeginIndexedUp(PPCContext& ctx, uint8_t* base) {
         const uint32_t device = ctx.r3.u32;
         SceneFullscreenDraw scene;
-        bool bloom;
+        SceneQuadPass pass;
         {
             std::lock_guard lock(mutex);
             Require(device && device == guest_device && depth_restored && !pending_up, "Unexpected native indexed user-memory draw");
-            bloom = fullscreen_resolved;
-            if (bloom) {
-                Require(bloom_surface && bloom_target && bloom_draws == bloom_copies && bloom_draws < 3,
+            if (!fullscreen_copies) {
+                pass = SceneQuadPass::HdrCopy;
+                Require(fullscreen_shaders && !fullscreen_target, "Indexed begin-UP draw requires the first fullscreen HDR shaders");
+                scene = ReadSceneFullscreenDraw(ctx, base, *fullscreen_shaders, scene_textures[0], false);
+            } else if (bloom_copies < 3) {
+                pass = SceneQuadPass::Bloom;
+                Require(bloom_surface && bloom_target && bloom_draws == bloom_copies,
                         "Bloom draw requires its cleared target and preceding resolve");
                 if (bloom_draws == 0) {
                     Require(bool(bloom_shaders), "Initial bloom shaders are unavailable");
@@ -469,8 +477,11 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
                 }
                 Require(*bloom_surface == scene.surface, "Bloom draw differs from its cleared surface");
             } else {
-                Require(fullscreen_shaders && !fullscreen_target, "Indexed begin-UP draw requires the first fullscreen HDR shaders");
-                scene = ReadSceneFullscreenDraw(ctx, base, *fullscreen_shaders, scene_textures[0], false);
+                pass = SceneQuadPass::Composition;
+                Require(composition_shaders && bloom_texture && !scene_composited,
+                        "Fullscreen composition requires the three ready scene textures and translated shaders");
+                scene = ReadCompositionDraw(ctx, base, *composition_shaders, scene_textures[1], scene_textures[0], *bloom_texture);
+                Require(*fullscreen_surface == scene.surface, "Composition destination differs from the fullscreen HDR target");
             }
         }
         const auto vertex_out = REX_LOAD_U32(ctx.r1.u32 + 84), index_out = ctx.r10.u32;
@@ -481,7 +492,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         Require(vertices && indices && endpoint && !(vertices & 15) && !(indices & 3) && !(endpoint & 3),
                 "Invalid native indexed user-memory addresses");
         std::lock_guard lock(mutex);
-        pending_up = PendingUpDraw{std::move(scene), vertices, indices, endpoint, bloom};
+        pending_up = PendingUpDraw{std::move(scene), vertices, indices, endpoint, pass};
     }
 
     void CompleteIndexedUp(uint8_t* base) {
@@ -491,8 +502,8 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         Require(REX_LOAD_U32(guest_device + 48) == up.endpoint, "Guest did not commit its indexed user-memory geometry");
         const auto& surface = up.scene.surface;
         const auto sampler = FullscreenColorSampler();
-        if (up.bloom) {
-            ReadBloomUpVertices(up.scene.draw, base, up.vertices, up.indices);
+        if (up.pass == SceneQuadPass::Bloom) {
+            ReadQuadUpVertices(up.scene.draw, base, up.vertices, up.indices);
             const auto& shaders = bloom_draws == 0 ? *bloom_shaders : *filter_shaders;
             auto configuration = ConfigureDepth(surface, shaders.vertex);
             configuration.cull = plume::RenderCullMode::NONE;
@@ -508,6 +519,15 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
                 REXLOG_INFO("MC2 native scene: filtered bloom pass {}, completed={}", bloom_draws, completed);
             }
             ++bloom_draws;
+        } else if (up.pass == SceneQuadPass::Composition) {
+            ReadQuadUpVertices(up.scene.draw, base, up.vertices, up.indices);
+            auto configuration = ConfigureDepth(surface, composition_shaders->vertex);
+            configuration.cull = plume::RenderCullMode::NONE;
+            const std::array samplers{sampler, sampler, FullscreenColorSampler(true)};
+            ColorRenderer renderer(configuration, composition_shaders->pixel_dxil, samplers, *fullscreen_target);
+            completed = renderer.RenderResolved(up.scene.draw, up.scene.pixel_constants, *depth_renderer, *color_target, bloom_target.get());
+            scene_composited = true;
+            REXLOG_INFO("MC2 native scene: composed fullscreen depth of field and bloom, completed={}", completed);
         } else {
             ReadFullscreenUpVertices(up.scene.draw, base, up.vertices, up.indices);
             fullscreen_target = std::make_unique<ColorTarget>(surface.width, surface.height, surface.samples, gpu);
@@ -539,14 +559,15 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
 
     void ResolveFullscreen(const PPCContext& ctx, uint8_t* base) {
         std::lock_guard lock(mutex);
-        Require(ctx.r3.u32 && ctx.r3.u32 == guest_device && color_graded && !fullscreen_resolved &&
-                !fullscreen_resolve_shader.empty(), "Fullscreen resolve requires the completed grade and single-sample copy shader");
+        const bool ready = (fullscreen_copies == 0 && color_graded) || (fullscreen_copies == 1 && scene_composited);
+        Require(ctx.r3.u32 && ctx.r3.u32 == guest_device && ready && !fullscreen_resolve_shader.empty(),
+                "Fullscreen resolve requires the completed native pass and single-sample copy shader");
         const auto surface = ReadFullscreenResolve(ctx, base, scene_textures[0]);
-        Require(*fullscreen_surface == surface, "Fullscreen resolve source differs from the graded target");
+        Require(*fullscreen_surface == surface, "Fullscreen resolve source differs from the drawn target");
         completed = color_target->OverwriteResolved(*fullscreen_target, -3, fullscreen_resolve_shader);
-        fullscreen_resolved = true;
-        REXLOG_INFO("MC2 native scene: copied graded HDR to scene texture {:#x}, exponent=-3, completed={}",
-                    scene_textures[0].address, completed);
+        ++fullscreen_copies;
+        REXLOG_INFO("MC2 native scene: resolved fullscreen pass {} into scene texture {:#x}, exponent=-3, completed={}",
+                    fullscreen_copies, scene_textures[0].address, completed);
     }
 
     void ResolveBloom(const PPCContext& ctx, uint8_t* base) {

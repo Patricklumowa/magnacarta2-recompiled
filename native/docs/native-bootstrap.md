@@ -150,12 +150,13 @@ the native queue. The graded image also resolves back into the existing HDR
 texture. The subsequent 322 x 182 fixed-point target clears and draws the
 first blur and bloom pass on the native queue. The two subsequent filters
 each sample the preceding unsigned normalized resolve, then update it for
-the next pass. The next unsupported draw is the fullscreen composition of
-the filtered bloom, color, and depth textures.
+the next pass. The fullscreen composition uses the filtered bloom, color,
+and depth textures and resolves to HDR before the next unsupported draw
+into the back buffer.
 An empty color shader directory setting keeps the depth-only checkpoint.
 
 Other indexed and nonindexed scene draws, direct begin-UP draws and raw/indirect GPU
-submission paths currently fail explicitly. Scene composition, remaining clears/resolves,
+submission paths currently fail explicitly. Back-buffer drawing and presentation, remaining clears/resolves,
 queries, shader/input coverage, asynchronous resource retirement and native
 platform services remain unfinished. Full effects and shadows are required.
 The original backend remains the default and the reference for those changes.

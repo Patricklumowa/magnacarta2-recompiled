@@ -90,9 +90,12 @@ void ReadFullscreenUpVertices(DepthDraw& draw, uint8_t* base, uint32_t address, 
 plume::RenderSamplerDesc FullscreenColorSampler(bool linear = false);
 SceneSurface ReadFullscreenResolve(const PPCContext& context, uint8_t* base, const SceneResolveTexture& destination);
 SceneColorClear ReadBloomClear(const PPCContext& context, uint8_t* base);
-ScenePassShaders LoadBloomShaders(const std::filesystem::path& directory);
+ScenePassShaders LoadQuadShaders(const std::filesystem::path& directory, const char* pixel_dxil);
 SceneFullscreenDraw ReadBloomDraw(const PPCContext& context, uint8_t* base,
     const ScenePassShaders& shaders, const SceneResolveTexture& primary, const SceneResolveTexture* color = nullptr);
-void ReadBloomUpVertices(DepthDraw& draw, uint8_t* base, uint32_t address, uint32_t index_address);
+void ReadQuadUpVertices(DepthDraw& draw, uint8_t* base, uint32_t address, uint32_t index_address);
+SceneFullscreenDraw ReadCompositionDraw(const PPCContext& context, uint8_t* base,
+    const ScenePassShaders& shaders, const SceneResolveTexture& depth, const SceneResolveTexture& color,
+    const SceneResolveTexture& bloom);
 std::pair<SceneSurface, SceneResolveTexture> ReadBloomResolve(const PPCContext& context, uint8_t* base);
 }
