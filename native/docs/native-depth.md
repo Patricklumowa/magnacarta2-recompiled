@@ -408,5 +408,8 @@ dxc -T ps_6_0 -E main -HV 2021 native/src/native_present.hlsl -Fo <color-shaders
 ```
 
 A live run with the Xenos DLL absent completed the first post-movie scene
-swap at a 2560 x 1600 window extent. It reached the second scene's depth
-clear, which still requires per-frame state reset.
+swap at a 2560 x 1600 window extent. That swapchain readback was black.
+The swap retires the first frame's guest bindings and pass state while
+retaining the native targets. The next frame completed its depth prepass,
+both tiles, and the stencil clear before binding a different depth-restore
+shader pair.

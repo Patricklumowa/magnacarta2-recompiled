@@ -143,6 +143,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     bool retiring_tiles = false;
     bool scene_tiles_retired = false;
     uint64_t depth_draws = 0;
+    uint64_t scene_frames = 0;
     std::optional<QuadDraw> pending;
     HWND window = nullptr;
     uint64_t completed = 0;
@@ -200,6 +201,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         prepass_draw.reset(); scene_draw.reset(); pending_restore.reset();
         pending_up.reset(); fullscreen_target.reset();
         bloom_target.reset();
+        overlay_renderer.reset(); back_buffer.reset();
         stencil_framebuffer.reset(); stencil_target.reset();
         pending.reset(); renderer.reset(); depth_renderer.reset(); color_target.reset(); gpu.reset();
     }
@@ -218,7 +220,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         const bool clear_depth = ctx.r4.u32 == 0x30;
         Flush(base, ctx.r3.u32);
         std::lock_guard lock(mutex);
-        Require(scene_tiles_retired && (clear_depth ? (fullscreen_target && stencil_surface && *stencil_surface == surface) : !stencil_surface),
+        Require(scene_tiles_retired && (clear_depth ? (fullscreen_surface && stencil_surface && *stencil_surface == surface) : !stencil_surface),
                 "Unexpected native depth/stencil clear outside the first postprocess pass");
         if (!stencil_target) {
             stencil_target = gpu->device->createTexture(RenderTextureDesc::DepthTarget(
@@ -247,7 +249,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         bool postprocess_clear = ctx.r4.u32 == 0x20;
         if (ctx.r4.u32 == 0x30) {
             std::lock_guard lock(mutex);
-            postprocess_clear = bool(fullscreen_target);
+            postprocess_clear = bool(fullscreen_surface);
         }
         if (postprocess_clear) {
             ClearPostprocessDepthStencil(ctx, base);
@@ -257,7 +259,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             bool bloom;
             {
                 std::lock_guard lock(mutex);
-                if (!depth_renderer) return false;
+                if (!depth_surface) return false;
                 bloom = fullscreen_copies != 0;
             }
             const auto clear=bloom ? ReadBloomClear(ctx,base) : ReadSceneColorClear(ctx,base);
@@ -267,8 +269,8 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
                 if (!bloom_target) {
                     bloom_target = std::make_unique<ColorTarget>(clear.surface.width, clear.surface.height, 1,
                         gpu, bloom_resolve_shader, plume::RenderFormat::R16G16B16A16_SNORM);
-                    bloom_surface = clear.surface;
                 }
+                if (!bloom_surface) bloom_surface = clear.surface;
                 Require(*bloom_surface == clear.surface, "Native bloom target allocation changed");
                 completed = bloom_target->Clear(clear.value);
                 REXLOG_INFO("MC2 native scene: cleared {}x{} fixed-point bloom target, completed={}",
@@ -278,8 +280,8 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             if (!color_target) {
                 const auto resolve_shader = color_shaders ? std::span<const uint8_t>(color_shaders->resolve_dxil) : std::span<const uint8_t>{};
                 color_target=std::make_unique<ColorTarget>(clear.surface.width,clear.surface.height,clear.surface.samples,gpu,resolve_shader);
-                color_surface=clear.surface;
             }
+            if (!color_surface) color_surface = clear.surface;
             Require(*color_surface==clear.surface,"Native color surface allocation changed");
             completed=color_target->Clear(clear.value,&clear.rectangle);
             cleared_tile = clear.rectangle;
@@ -295,8 +297,8 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         if (!depth_renderer) {
             const auto resolve_shader = color_shaders ? std::span<const uint8_t>(color_shaders->depth_resolve_dxil) : std::span<const uint8_t>{};
             depth_renderer=std::make_unique<DepthRenderer>(ConfigureDepth(clear.surface,*depth_shaders),gpu,resolve_shader);
-            depth_surface=clear.surface;
         }
+        if (!depth_surface) depth_surface = clear.surface;
         Require(*depth_surface == clear.surface, "Native depth surface allocation changed");
         // The verified pass clears stencil to zero but never reads it. Until
         // native stencil storage exists, ReadSceneDepthDraw rejects every
@@ -493,7 +495,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
                     "Unexpected native indexed user-memory draw");
             if (!fullscreen_copies) {
                 pass = SceneQuadPass::HdrCopy;
-                Require(fullscreen_shaders && !fullscreen_target, "Indexed begin-UP draw requires the first fullscreen HDR shaders");
+                Require(fullscreen_shaders && !fullscreen_surface, "Indexed begin-UP draw requires the first fullscreen HDR shaders");
                 scene = ReadSceneFullscreenDraw(ctx, base, *fullscreen_shaders, scene_textures[0], false);
             } else if (bloom_copies < 3) {
                 pass = SceneQuadPass::Bloom;
@@ -513,7 +515,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
                         "Fullscreen composition requires the three ready scene textures and translated shaders");
                 scene = ReadCompositionDraw(ctx, base, *composition_shaders, scene_textures[1], scene_textures[0], *bloom_texture);
                 Require(*fullscreen_surface == scene.surface, "Composition destination differs from the fullscreen HDR target");
-            } else if (!back_buffer) {
+            } else if (!back_buffer_surface) {
                 pass = SceneQuadPass::BackBuffer;
                 Require(bool(back_buffer_shaders), "Back-buffer copy requires the final translated shaders");
                 scene = ReadBackBufferDraw(ctx, base, *back_buffer_shaders, scene_textures[0]);
@@ -572,8 +574,9 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             REXLOG_INFO("MC2 native scene: composed fullscreen depth of field and bloom, completed={}", completed);
         } else if (up.pass == SceneQuadPass::BackBuffer) {
             using namespace plume;
-            back_buffer = std::make_unique<ColorTarget>(surface.width, surface.height, surface.samples, gpu,
-                std::span<const uint8_t>{}, RenderFormat::R8G8B8A8_UNORM);
+            if (!back_buffer)
+                back_buffer = std::make_unique<ColorTarget>(surface.width, surface.height, surface.samples, gpu,
+                    std::span<const uint8_t>{}, RenderFormat::R8G8B8A8_UNORM);
             back_buffer->Clear(RenderColor(0,0,0,1));
             auto configuration = ConfigureDepth(surface, back_buffer_shaders->vertex);
             configuration.cull = RenderCullMode::NONE;
@@ -596,7 +599,8 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
                         ++overlay_draws, up.scene.draw.index_count, completed);
         } else {
             ReadFullscreenUpVertices(up.scene.draw, base, up.vertices, up.indices);
-            fullscreen_target = std::make_unique<ColorTarget>(surface.width, surface.height, surface.samples, gpu);
+            if (!fullscreen_target)
+                fullscreen_target = std::make_unique<ColorTarget>(surface.width, surface.height, surface.samples, gpu);
             fullscreen_target->Clear(plume::RenderColor(0,0,0,0));
             auto configuration = ConfigureDepth(surface, fullscreen_shaders->vertex);
             configuration.cull = plume::RenderCullMode::NONE;
@@ -667,16 +671,44 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         std::lock_guard lock(mutex);
         if (!scanout_texture) return;
         Require(ctx.lr == 0x8248B7BC && ctx.r3.u32 == guest_device && ctx.r4.u32 == scanout_texture && !ctx.r5.u32 &&
-                !pending && renderer && window && !present_vertex_shader.empty() && !present_pixel_shader.empty(),
+                !pending && !pending_restore && !pending_up && !retiring_tiles &&
+                renderer && window && !present_vertex_shader.empty() && !present_pixel_shader.empty(),
                 "Scene swap requires the resolved back buffer, window and presentation shaders");
         renderer->SetWindow(window);
         const auto result = renderer->PresentColor(*back_buffer, back_buffer_surface->width, back_buffer_surface->height,
             present_vertex_shader, present_pixel_shader, REXCVAR_QUERY(std::string, mc2_framerate) != "unlocked");
         completed = result.completed_submission;
-        scanout_texture = 0;
+        ++scene_frames;
         if (result.present_submitted)
-            REXLOG_INFO("MC2 native scene: presented {}x{} with {} overlays, completed={}",
-                        result.width, result.height, overlay_draws, completed);
+            REXLOG_INFO("MC2 native scene: presented frame {} at {}x{} with {} overlays, completed={}",
+                        scene_frames, result.width, result.height, overlay_draws, completed);
+        ResetSceneFrame();
+    }
+
+    void ResetSceneFrame() {
+        // Swap has completed on the device. The attachments stay allocated
+        // while the next frame supplies its own guest bindings and copies.
+        depth_surface.reset();
+        color_surface.reset();
+        stencil_surface.reset();
+        fullscreen_surface.reset();
+        bloom_surface.reset();
+        bloom_texture.reset();
+        back_buffer_surface.reset();
+        prepass_draw.reset();
+        scene_draw.reset();
+        cleared_tile = {};
+        scene_textures = {};
+        depth_draws = 0;
+        depth_restored = false;
+        scene_copies = 0;
+        scene_tiles_retired = false;
+        color_graded = false;
+        scene_composited = false;
+        fullscreen_copies = 0;
+        bloom_draws = bloom_copies = 0;
+        overlay_draws = 0;
+        scanout_texture = 0;
     }
 
     // Record bounded changes at the clear boundary while surface support grows.

@@ -155,7 +155,8 @@ and depth textures and resolves to HDR. The final color shader then applies
 its gamma and overlay settings to the RGBA8 back buffer. The seven UI
 draws blend into that surface on the native queue. A live run submitted
 and completed the first scene swap through [native presentation](native-depth.md#scene-presentation).
-It stopped at the second frame's depth clear.
+The next frame reused the native attachments and stopped at a different
+depth-restore shader.
 An empty color shader directory setting keeps the depth-only checkpoint.
 
 Other indexed and nonindexed scene draws, direct begin-UP draws and raw/indirect GPU
