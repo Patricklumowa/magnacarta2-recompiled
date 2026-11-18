@@ -18,6 +18,7 @@
 #include <optional>
 #include <bit>
 #include <stdexcept>
+#include <unordered_map>
 
 REXCVAR_DEFINE_BOOL(mc2_native_boot, false, "Development", "Experimental native movie boot; unsupported operations fail");
 REXCVAR_DEFINE_STRING(mc2_native_boot_shader_dir, "", "Development", "Verified first-draw movie shader inputs for native boot");
@@ -133,7 +134,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     uint32_t bloom_draws = 0, bloom_copies = 0;
     std::unique_ptr<ColorTarget> back_buffer;
     std::optional<SceneSurface> back_buffer_surface;
-    std::unique_ptr<ColorRenderer> overlay_renderer;
+    std::unordered_map<const ScenePassShaders*, std::unique_ptr<ColorRenderer>> quad_renderers;
     uint32_t overlay_draws = 0;
     uint32_t scanout_texture = 0;
     plume::RenderRect cleared_tile;
@@ -203,9 +204,10 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     void Shutdown() override {
         std::lock_guard lock(mutex);
         prepass_draw.reset(); scene_draw.reset(); pending_restore.reset();
+        quad_renderers.clear();
         pending_up.reset(); fullscreen_target.reset();
         bloom_target.reset();
-        overlay_renderer.reset(); back_buffer.reset();
+        back_buffer.reset();
         stencil_framebuffer.reset(); stencil_target.reset();
         pending.reset(); renderer.reset(); depth_renderer.reset(); color_target.reset(); gpu.reset();
     }
@@ -544,6 +546,22 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         pending_up = PendingUpDraw{std::move(scene), vertices, indices, endpoint, pass, std::move(overlay)};
     }
 
+    ColorRenderer& QuadRendererFor(const SceneSurface& surface, const ScenePassShaders& program,
+            std::span<const plume::RenderSamplerDesc> samplers, ColorTarget& target,
+            plume::RenderBlendDesc blend = plume::RenderBlendDesc::Copy(),
+            plume::RenderCullMode cull = plume::RenderCullMode::NONE) {
+        // Each program belongs to one pass with a stable attachment and
+        // sampler layout. The draw updates its texture descriptors and bytes.
+        if (const auto existing = quad_renderers.find(&program); existing != quad_renderers.end())
+            return *existing->second;
+        auto configuration = ConfigureDepth(surface, program.vertex);
+        configuration.cull = cull;
+        auto pipeline = std::make_unique<ColorRenderer>(configuration, program.pixel_dxil, samplers, target, blend);
+        auto* result = pipeline.get();
+        quad_renderers.emplace(&program, std::move(pipeline));
+        return *result;
+    }
+
     void CompleteIndexedUp(uint8_t* base) {
         std::lock_guard lock(mutex);
         if (!pending_up) return;
@@ -557,26 +575,22 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             ReadQuadUpVertices(up.scene.draw, base, up.vertices, up.indices);
         if (up.pass == SceneQuadPass::Bloom) {
             const auto& shaders = *up.scene.shaders;
-            auto configuration = ConfigureDepth(surface, shaders.vertex);
-            configuration.cull = plume::RenderCullMode::NONE;
             if (bloom_draws == 0) {
                 const std::array samplers{sampler, sampler};
-                ColorRenderer renderer(configuration, shaders.pixel_dxil, samplers, *bloom_target);
+                auto& renderer = QuadRendererFor(surface, shaders, samplers, *bloom_target);
                 completed = renderer.RenderResolved(up.scene.draw, up.scene.pixel_constants, *depth_renderer, *color_target);
                 REXLOG_INFO("MC2 native scene: drew fixed-point blur and bloom from both scene textures, completed={}", completed);
             } else {
                 const auto filter_sampler = FullscreenColorSampler(true);
-                ColorRenderer renderer(configuration, shaders.pixel_dxil, std::span(&filter_sampler, 1), *bloom_target);
+                auto& renderer = QuadRendererFor(surface, shaders, std::span(&filter_sampler,1), *bloom_target);
                 completed = renderer.RenderResolved(up.scene.draw, up.scene.pixel_constants, *bloom_target);
                 const auto taps = three_tap_filter_shaders && &shaders == &*three_tap_filter_shaders ? 3 : 2;
                 REXLOG_INFO("MC2 native scene: filtered bloom pass {} with {} taps, completed={}", bloom_draws, taps, completed);
             }
             ++bloom_draws;
         } else if (up.pass == SceneQuadPass::Composition) {
-            auto configuration = ConfigureDepth(surface, composition_shaders->vertex);
-            configuration.cull = plume::RenderCullMode::NONE;
             const std::array samplers{sampler, sampler, FullscreenColorSampler(true)};
-            ColorRenderer renderer(configuration, composition_shaders->pixel_dxil, samplers, *fullscreen_target);
+            auto& renderer = QuadRendererFor(surface, *composition_shaders, samplers, *fullscreen_target);
             completed = renderer.RenderResolved(up.scene.draw, up.scene.pixel_constants, *depth_renderer, *color_target, bloom_target.get());
             scene_composited = true;
             REXLOG_INFO("MC2 native scene: composed fullscreen depth of field and bloom, completed={}", completed);
@@ -586,23 +600,16 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
                 back_buffer = std::make_unique<ColorTarget>(surface.width, surface.height, surface.samples, gpu,
                     std::span<const uint8_t>{}, RenderFormat::R8G8B8A8_UNORM);
             back_buffer->Clear(RenderColor(0,0,0,1));
-            auto configuration = ConfigureDepth(surface, back_buffer_shaders->vertex);
-            configuration.cull = RenderCullMode::NONE;
-            ColorRenderer renderer(configuration, back_buffer_shaders->pixel_dxil, std::span(&sampler,1), *back_buffer);
+            auto& renderer = QuadRendererFor(surface, *back_buffer_shaders, std::span(&sampler,1), *back_buffer);
             completed = renderer.RenderResolved(up.scene.draw, up.scene.pixel_constants, *color_target);
             back_buffer_surface = surface;
             REXLOG_INFO("MC2 native scene: drew gamma and overlay into RGBA8 back buffer {:#x}, completed={}", surface.address, completed);
         } else if (up.pass == SceneQuadPass::Overlay) {
-            if (!overlay_renderer) {
-                auto configuration = ConfigureDepth(surface, overlay_shaders->vertex);
-                configuration.cull = plume::RenderCullMode::NONE;
-                const auto overlay_sampler = OverlaySampler();
-                overlay_renderer = std::make_unique<ColorRenderer>(configuration, overlay_shaders->pixel_dxil,
-                    std::span(&overlay_sampler,1), *back_buffer, OverlayBlend());
-            }
+            const auto overlay_sampler = OverlaySampler();
+            auto& renderer = QuadRendererFor(surface, *overlay_shaders, std::span(&overlay_sampler,1), *back_buffer, OverlayBlend());
             auto texture = std::visit([&](const auto& source) { return UploadSceneTexture(base, source, gpu); }, up.overlay->texture);
             const auto* sampled = texture.get();
-            completed = overlay_renderer->Render(up.scene.draw, up.scene.pixel_constants, std::span(&sampled,1));
+            completed = renderer.Render(up.scene.draw, up.scene.pixel_constants, std::span(&sampled,1));
             REXLOG_INFO("MC2 native scene: blended overlay draw {} ({} indices), completed={}",
                         ++overlay_draws, up.scene.draw.index_count, completed);
         } else {
@@ -610,9 +617,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             if (!fullscreen_target)
                 fullscreen_target = std::make_unique<ColorTarget>(surface.width, surface.height, surface.samples, gpu);
             fullscreen_target->Clear(plume::RenderColor(0,0,0,0));
-            auto configuration = ConfigureDepth(surface, fullscreen_shaders->vertex);
-            configuration.cull = plume::RenderCullMode::NONE;
-            ColorRenderer renderer(configuration, fullscreen_shaders->pixel_dxil, std::span(&sampler, 1), *fullscreen_target);
+            auto& renderer = QuadRendererFor(surface, *fullscreen_shaders, std::span(&sampler,1), *fullscreen_target);
             completed = renderer.RenderResolved(up.scene.draw, up.scene.pixel_constants, *color_target);
             fullscreen_surface = surface;
             REXLOG_INFO("MC2 native scene: fullscreen HDR copy, completed={}", completed);
@@ -630,8 +635,8 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         const auto sampler = FullscreenColorSampler();
         auto blend = plume::RenderBlendDesc::Copy();
         blend.renderTargetWriteMask = 7;
-        ColorRenderer renderer(ConfigureDepth(scene.surface, color_grade_shaders->vertex), color_grade_shaders->pixel_dxil,
-            std::span(&sampler, 1), *fullscreen_target, blend);
+        auto& renderer = QuadRendererFor(scene.surface, *color_grade_shaders, std::span(&sampler,1), *fullscreen_target,
+            blend, plume::RenderCullMode::FRONT);
         completed = renderer.RenderResolved(scene.draw, scene.pixel_constants, *color_target);
         color_graded = true;
         REXLOG_INFO("MC2 native scene: fullscreen RGB color grading, completed={}", completed);
@@ -690,6 +695,8 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         if (result.present_submitted)
             REXLOG_INFO("MC2 native scene: presented frame {} at {}x{} with {} overlays, completed={}",
                         scene_frames, result.width, result.height, overlay_draws, completed);
+        if (REXCVAR_GET(mc2_scene_resolve_trace))
+            REXLOG_INFO("MC2 native scene: {} cached graphics pipelines after frame {}", quad_renderers.size(), scene_frames);
         ResetSceneFrame();
     }
 

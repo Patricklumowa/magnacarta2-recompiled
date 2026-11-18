@@ -419,3 +419,7 @@ translation when the guest patches its float4 position fetch. It preserves
 depth during the second stencil-only clear and uses the three-tap bloom
 shaders. A 44-second live test completed both scene swaps and continued
 into the next movie.
+
+The fullscreen and overlay graphics pipelines stay cached with their
+targets. A live run used seven pipelines for the first frame and added
+only the three-tap filter pipeline for the second.
