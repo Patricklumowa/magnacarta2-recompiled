@@ -370,7 +370,7 @@ REX_HOOK_RAW(sub_828652A0) {
 REX_HOOK_RAW(sub_82865690) {
   Capture(ctx, base, "indexed", 0x82865690);
 #ifdef MC2_ENABLE_NATIVE_BOOT
-  if (mc2::native::NativeBootActive()) { mc2::native::DrawNativeSceneDepth(ctx,base); return; }
+  if (mc2::native::NativeBootActive()) { mc2::native::DrawNativeSceneIndexed(ctx,base); return; }
 #endif
   __imp__sub_82865690(ctx, base);
 }

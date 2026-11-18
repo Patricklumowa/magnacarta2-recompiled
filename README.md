@@ -19,7 +19,7 @@ Magna Carta 2 Recompiled (MC2Recomp) uses [ReXGlue](https://github.com/rexglue/r
 | PC settings | F4 menu with 720p, 1440p, and 4K rendering presets |
 | Frame rate | 30 FPS, 60 FPS, and experimental unlocked modes; targets are not performance guarantees |
 | Graphics | D3D12 compatibility renderer; original shadow/tiling behavior retained |
-| Native graphics migration | Experimental movies and the first indexed depth pass run without Xenos; native menu/gameplay rendering is pending. See [native bootstrap](native/docs/native-bootstrap.md). |
+| Native graphics migration | Experimental movies, the first depth pass and the first tile's indexed color draw run without Xenos. Scene resolves and menu/gameplay rendering are pending. See [native bootstrap](native/docs/native-bootstrap.md). |
 | Performance | Substantial overhead and stutter remain; optimization is in progress |
 | Audio | Not working in current gameplay tests; enabling output does not resolve missing audio support |
 | Saves and progression | Full save/load, combat, and chapter coverage remain unverified |
@@ -152,9 +152,9 @@ The current priorities are consistent frame delivery while preserving the origin
 Experimental shader output/sample specialization and the fast constant-copy hook remain opt-in. Their presence in the source does not establish a validated whole-game improvement. GPU timing capture is also off by default.
 
 Native graphics migration includes opt-in shader capture, a partial graphics
-map, native movie presentation and the first indexed depth pass. The experimental
-backend stops at unsupported scene operations; the playable default still uses
-Xenos. See the
+map, native movie presentation and the first indexed depth and color passes.
+The experimental backend stops at the first scene resolve. The playable default
+uses Xenos. See the
 [implementation status and capture workflow](native/docs/native-renderer.md).
 
 ## Development

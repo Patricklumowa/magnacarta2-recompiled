@@ -3,9 +3,9 @@
 The standalone native renderer can execute the first captured indexed scene
 draw through D3D12. An opt-in live path now executes that draw and its preceding
 two-sample depth clear on the same device as the movies, without loading Xenos.
-The following tiled HDR color clear also runs natively; the first color draw
-still stops explicitly. Native menu/gameplay, general surface
-lifetime and scene composition remain unfinished.
+The following HDR clear and first tile's indexed color draw also run natively.
+The path stops at the first resolve. Native menu and gameplay rendering,
+general surface lifetime, and scene composition remain unfinished.
 
 `NativeDevice` owns one device, queue, allocator/list and fence. Movie and depth
 pipelines can share it. Submission completion checks the real fence and device
@@ -75,9 +75,9 @@ Live native tracing subsequently observed the preceding full-surface clear:
 `sub_8238AD80`, flags `0x30`, depth zero, a 1280 x 720 rectangle, matching viewport,
 no enabled scissor and a two-sample depth surface. With the optional depth shader
 directory configured, native boot replaces this clear and the following indexed
-draw and the next HDR tile clear, waits for their real native fences, then stops
-at the first unsupported color draw. Indexed capture runs before the native
-draw, preserving live inputs.
+draw and the next HDR tile clear. The optional color path continues into the
+first tile's indexed color draw. Indexed capture runs before the native draw,
+preserving live inputs.
 
 These comparisons do not match a full Xenos frame. The native target currently
 uses D32_FLOAT; console 24-bit depth quantization, stencil, other input
@@ -145,9 +145,9 @@ Passing an optional third directory (the captured first color draw) to
 `mc2_native_scene_check` verifies the tile selection and rejected changes to
 the layout, predicate, scissor, clear color and cached attachment state.
 
-A live run with the Xenos DLL physically unavailable completed the first depth
-draw and this HDR tile clear, then stopped at the first color draw. That is a
-bounded runtime checkpoint, not a rendered scene or full-frame parity result.
+A live run with the Xenos DLL physically unavailable completed the depth draw,
+the HDR tile clear, and the first tile's color draw, then stopped at the first
+scene resolve. Frame composition remains unfinished.
 
 ## Compressed scene textures
 
@@ -214,5 +214,19 @@ The pixel shader rounds each RGB channel to one of the 1024 representable
 7e3 values before writing the float16 target. Float16 stores these RGB values
 exactly and approximates the intermediate one-third and two-thirds alpha
 levels. This applies to copy passes. Blending needs separate handling.
-Float24 depth and console sample locations still need validation. Native boot currently
-stops before this color draw while its tile lifetime and resolves are mapped.
+Float24 depth and console sample locations still need validation.
+
+The optional live path consumes the same shader directory and reads the actual
+texture bytes from guest memory. The first tile begins at (0, 0) and its depth
+descriptor has the same base, pitch, sample count and format as the full depth
+prepass. The native draw tests and updates that retained depth attachment,
+scissored to the first tile. It stops before the resolve can consume or clear
+the surface. The lower tile needs replay at its own resolve boundary.
+
+`--mc2_scene_resolve_trace=true` logs the first eight tiled resolve calls on a
+native boot development build. The reference renderer observed two calls per
+tile, at masks `2` and `8`. Flags `0xf4000100` average color samples into a
+1280 x 720 RGBA16F texture and request a zero color clear. Flags `0x214` copy
+depth sample zero into a separate 24-bit float depth/stencil texture and
+request a zero depth/stencil clear. Each tile uses its rectangle's origin in
+the destination. The reference run exited cleanly after collecting both pairs.

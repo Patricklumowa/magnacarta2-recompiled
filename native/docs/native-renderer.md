@@ -37,15 +37,17 @@ The first indexed scene draw also has a [native depth path](native-depth.md),
 including bounded mini-fetch layouts and a shared native device/queue. Its
 captured geometry matches independent CPU coverage and depth calculations.
 An optional live path now completes its two-sample clear, indexed draw and the
-following tiled HDR color clear before stopping at the first color draw.
+following tiled HDR color clear.
 Full live scene composition is not implemented.
 
 Native BC1/BC3 texture uploads also preserve all captured mip levels. GPU
 readback of the first color draw's two textures matches every compressed byte.
 An offline D3D12 replay now uses those textures and the actual shaders for the
 first indexed color draw. Its upper tile agrees with the prepass coverage and
-the diagnostic lighting check exercises texture sampling and gamma. Live tile
-ordering and resolves remain unfinished. See [indexed color replay](native-depth.md#indexed-color-replay).
+the diagnostic lighting check exercises texture sampling and gamma. The same
+draw now completes for the first tile in a live boot without Xenos. The path
+stops at the first resolve, before replaying the lower tile or presenting a
+scene. See [indexed color replay](native-depth.md#indexed-color-replay).
 
 The optional bounded live movie comparison uses the same native drawing code
 on live guest inputs. Two movie draws passed the CPU comparison during a clean

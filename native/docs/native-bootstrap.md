@@ -131,13 +131,17 @@ A subsequent [native depth path](native-depth.md), enabled by
 the first full depth clear and indexed triangle draw with native two-sample
 D3D12 work on the movie renderer's device/queue. It completed that draw and then
 stopped at the following unsupported color clear. That clear is now implemented
-for the verified tiled HDR surface and first-tile predicate, moving the stop to
-the first color draw. The shader directory is
-optional, so the movie-only checkpoint remains available.
-The live depth and HDR-clear checkpoints also passed with the Xenos DLL physically unavailable;
-the stopped process reported the next unsupported operation rather than a clean
-exit. The default renderer subsequently passed a clean 12-second boot with two
-bounded native movie comparison draws. Native gameplay is still unverified.
+for the verified tiled HDR surface and first-tile predicate.
+
+With the depth shader directory configured, set
+`--mc2_native_boot_color_shader_dir=<verified color shader directory>` to enable
+the first tile's [indexed color path](native-depth.md#indexed-color-replay).
+It loads both shader containers and the local VS and 7e3 PS binaries, then
+untile/uploads the bound BC1 and BC3 textures at draw time. A run with the
+Xenos DLL physically unavailable completed the 18-index D3D12 draw with all
+fourteen mip levels and stopped explicitly at `0x826DA2D8`, the first tiled
+color resolve. The experimental backend still cannot compose or present a full
+scene. An empty color shader directory setting keeps the depth-only checkpoint.
 
 Other indexed and nonindexed scene draws, direct begin-UP draws and raw/indirect GPU
 submission paths currently fail explicitly. Scene composition, remaining clears/resolves,

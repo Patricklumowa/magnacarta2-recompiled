@@ -6,6 +6,8 @@
 #include "native_movie.h"
 #include "native_scene.h"
 #include "native_color_target.h"
+#include "native_sampled_texture.h"
+#include "draw_capture.h"
 #include "guest_graphics_read.h"
 #include <rex/cvar.h>
 #include <rex/hook.h>
@@ -19,6 +21,8 @@
 REXCVAR_DEFINE_BOOL(mc2_native_boot, false, "Development", "Experimental native movie boot; unsupported operations fail");
 REXCVAR_DEFINE_STRING(mc2_native_boot_shader_dir, "", "Development", "Verified first-draw movie shader inputs for native boot");
 REXCVAR_DEFINE_STRING(mc2_native_boot_depth_shader_dir, "", "Development", "Optional verified indexed depth shader inputs for native boot");
+REXCVAR_DEFINE_STRING(mc2_native_boot_color_shader_dir, "", "Development", "Optional verified indexed color shader inputs for native boot");
+REXCVAR_DEFINE_BOOL(mc2_scene_resolve_trace, false, "Development", "Log the first tiled scene resolve arguments on the reference renderer");
 
 namespace mc2::native {
 namespace {
@@ -27,6 +31,25 @@ std::atomic<NativeGraphics*> active{nullptr};
 void Require(bool value, const char* message) {
     if (!value) throw std::runtime_error(message);
 }
+
+std::unique_ptr<SampledTexture> UploadSceneTexture(uint8_t* base, const mc2::texture::BlockTexture& description,
+                                                  const std::shared_ptr<NativeDevice>& gpu) {
+    std::vector<std::vector<uint8_t>> levels(description.mips.size());
+    for (uint32_t level = 0; level < levels.size(); ++level) {
+        const auto& mip = description.mips[level];
+        uint32_t alias;
+        std::vector<uint8_t> source;
+        Require(mc2::draw_capture::TexturePhysicalAlias(mip.physical_address, mip.source_bytes, alias) &&
+                mc2::capture::ReadGuest(base, alias, mip.source_bytes, source), "Unreadable native scene texture mip");
+        std::string error;
+        if (!mc2::texture::LinearizeBlockMip(description, level, source, levels[level], error))
+            throw std::runtime_error(error);
+    }
+    const auto& top = description.mips.front();
+    const auto format = description.format == 18 ? plume::RenderFormat::BC1_UNORM : plume::RenderFormat::BC3_UNORM;
+    return std::make_unique<SampledTexture>(format, top.width, top.height, levels, gpu);
+}
+
 class NativeGraphics final : public rex::system::IGraphicsSystem {
  public:
     MovieShaders shaders;
@@ -34,9 +57,12 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     std::shared_ptr<NativeDevice> gpu;
     std::unique_ptr<QuadRenderer> renderer;
     std::optional<SceneVertexShader> depth_shaders;
+    std::optional<SceneColorShaders> color_shaders;
     std::optional<SceneSurface> depth_surface,color_surface;
     std::unique_ptr<DepthRenderer> depth_renderer;
     std::unique_ptr<ColorTarget> color_target;
+    plume::RenderRect cleared_tile;
+    bool color_draw_submitted = false;
     uint64_t depth_draws = 0;
     std::optional<QuadDraw> pending;
     HWND window = nullptr;
@@ -48,6 +74,11 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     NativeGraphics() : shaders(LoadMovieShaders(REXCVAR_GET(mc2_native_boot_shader_dir))) {
         const auto depth_directory = REXCVAR_GET(mc2_native_boot_depth_shader_dir);
         if (!depth_directory.empty()) depth_shaders=LoadDepthShaders(depth_directory);
+        const auto color_directory = REXCVAR_GET(mc2_native_boot_color_shader_dir);
+        if (!color_directory.empty()) {
+            Require(bool(depth_shaders), "Native color shaders require the verified depth shader directory");
+            color_shaders = LoadColorShaders(color_directory);
+        }
         NativeGraphics* expected = nullptr;
         Require(active.compare_exchange_strong(expected, this), "Only one native graphics system is supported");
     }
@@ -89,6 +120,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             }
             Require(*color_surface==clear.surface,"Native color surface allocation changed");
             completed=color_target->Clear(clear.value,&clear.rectangle);
+            cleared_tile = clear.rectangle;
             REXLOG_INFO("MC2 native scene: cleared HDR rectangle [{},{},{},{}] on {}x{}, samples={}, completed={}",
                 clear.rectangle.left,clear.rectangle.top,clear.rectangle.right,clear.rectangle.bottom,
                 clear.surface.width,clear.surface.height,clear.surface.samples,completed);
@@ -125,6 +157,39 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         if (depth_draws <= 16 || depth_draws%120 == 0)
             REXLOG_INFO("MC2 native scene: indexed depth draw {}, indices={}, samples={}, completed={}",
                         depth_draws,snapshot.draw.index_count,snapshot.surface.samples,completed);
+    }
+
+    void DrawColor(const PPCContext& ctx, uint8_t* base) {
+        Require(bool(color_shaders), "Indexed color shader directory is not configured");
+        auto snapshot = ReadSceneColorDraw(ctx, base, *color_shaders);
+        Flush(base, ctx.r3.u32);
+        std::lock_guard lock(mutex);
+        Require(!color_draw_submitted && depth_draws == 1 && depth_renderer && color_target && depth_surface &&
+                color_surface && *color_surface == snapshot.color_surface &&
+                cleared_tile == plume::RenderRect(0,0,1280,512), "Native color draw has no matching first prepass and color clear");
+        // The first tile starts at (0,0), with the same depth base, format and
+        // pitch as the full prepass. The lower tile needs its own replay after
+        // the resolve/clear boundary.
+        const auto& full_depth = depth_surface->description;
+        const auto& tile_depth = snapshot.tile_depth.description;
+        Require(std::equal(full_depth.begin(), full_depth.begin() + 12, tile_depth.begin()) &&
+                std::equal(full_depth.begin() + 16, full_depth.begin() + 20, tile_depth.begin() + 16),
+                "Native first tile depth does not alias the retained prepass");
+        auto first = UploadSceneTexture(base, snapshot.textures[0], gpu);
+        auto second = UploadSceneTexture(base, snapshot.textures[1], gpu);
+        const std::array<const SampledTexture*, 2> bindings{first.get(), second.get()};
+        ColorRenderer color_renderer(ConfigureDepth(snapshot.color_surface, color_shaders->vertex),
+            color_shaders->pixel_dxil, snapshot.samplers, *depth_renderer, *color_target);
+        snapshot.draw.scissor = cleared_tile;
+        completed = color_renderer.Render(snapshot.draw, snapshot.pixel_constants, bindings);
+        color_draw_submitted = true;
+        REXLOG_INFO("MC2 native scene: indexed HDR color draw in first tile, indices={}, BC mip levels={}/{}, completed={}",
+            snapshot.draw.index_count, snapshot.textures[0].mips.size(), snapshot.textures[1].mips.size(), completed);
+    }
+
+    bool HasColorDraw() {
+        std::lock_guard lock(mutex);
+        return color_draw_submitted;
     }
 
     // Record bounded changes at the clear boundary while surface support grows.
@@ -205,6 +270,31 @@ NativeGraphics& Graphics() {
     Require(system != nullptr, "Native graphics system is not active");
     return *system;
 }
+
+void TraceSceneResolve(const PPCContext& ctx, uint8_t* base) {
+    if (ctx.lr != 0x826DA2D8 && ctx.lr != 0x826DA314) return;
+    static std::atomic<uint32_t> count = 0;
+    if (count.load(std::memory_order_relaxed) >= 8 || count.fetch_add(1, std::memory_order_relaxed) >= 8) return;
+    using mc2::capture::ReadGuest;
+    using mc2::capture::LoadBE32;
+    std::vector<uint8_t> device, rect, destination, origin, color, stencil;
+    if (!ReadGuest(base, ctx.r3.u32, 13128, device) || !ReadGuest(base, ctx.r5.u32, 16, rect) ||
+        !ReadGuest(base, ctx.r6.u32, 52, destination) || !ReadGuest(base, ctx.r7.u32, 8, origin)) return;
+    const auto state = [&](uint32_t offset) { return LoadBE32(device.data() + offset); };
+    const auto dest = [&](uint32_t offset) { return LoadBE32(destination.data() + offset); };
+    REXLOG_INFO("MC2 scene resolve: caller={:#x} flags={:#x} predicate={:#x} rect=[{},{},{},{}] destination={:#x} origin=[{},{}] depth_clear={} slice={} color_ptr={:#x}",
+        ctx.lr, ctx.r4.u32, state(12716), LoadBE32(rect.data()), LoadBE32(rect.data()+4),
+        LoadBE32(rect.data()+8), LoadBE32(rect.data()+12), ctx.r6.u32, LoadBE32(origin.data()),
+        LoadBE32(origin.data()+4), ctx.f1.f64, ctx.r8.u32, ctx.r9.u32);
+    REXLOG_INFO("MC2 scene resolve surface: type={:#x} words=[{:#x},{:#x},{:#x},{:#x},{:#x},{:#x},{:#x}] color={:#x} depth={:#x} hiz=[{:#x},{:#x}]",
+        dest(0), dest(24), dest(28), dest(32), dest(36), dest(40), dest(44), dest(48),
+        state(10372), state(10376), state(13120), state(13124));
+    if (ReadGuest(base, ctx.r9.u32 ? ctx.r9.u32 : 0x82247720, 16, color) &&
+        mc2::capture::GuestRange(ctx.r1.u32, 88) && ReadGuest(base, ctx.r1.u32 + 84, 4, stencil))
+        REXLOG_INFO("MC2 scene resolve clear words: [{:#x},{:#x},{:#x},{:#x}] stencil={:#x}",
+            LoadBE32(color.data()), LoadBE32(color.data()+4), LoadBE32(color.data()+8), LoadBE32(color.data()+12),
+            LoadBE32(stencil.data()));
+}
 uint32_t ResetStaging(uint8_t* base, uint32_t device) {
     const auto begin = REX_LOAD_U32(device + 14904);
     const auto extent = REX_LOAD_U32(device + 14912);
@@ -237,8 +327,14 @@ void QueueNativeMovie(const PPCContext& ctx, uint8_t* base) {
         UnsupportedNativeOperation(error.what(), ctx);
     }
 }
-void DrawNativeSceneDepth(const PPCContext& ctx, uint8_t* base) {
-    try { Graphics().DrawDepth(ctx,base); }
+void DrawNativeSceneIndexed(const PPCContext& ctx, uint8_t* base) {
+    try {
+        auto& graphics = Graphics();
+        Require(ctx.r3.u32 != 0 && ctx.r3.u32 == graphics.guest_device, "Native indexed draw used an unknown device");
+        Require(!graphics.HasColorDraw(), "Additional draws before the native scene resolve are unsupported");
+        if (REX_LOAD_U32(ctx.r3.u32 + 12448)) graphics.DrawColor(ctx, base);
+        else graphics.DrawDepth(ctx, base);
+    }
     catch (const std::exception& error) { UnsupportedNativeOperation(error.what(),ctx); }
 }
 [[noreturn]] void UnsupportedNativeOperation(const char* operation, const PPCContext& ctx) {
@@ -265,6 +361,12 @@ REX_HOOK_RAW(sub_8238AD80) {
         catch (const std::exception& error) { UnsupportedNativeOperation(error.what(),ctx); }
     }
     __imp__sub_8238AD80(ctx, base);
+}
+REX_HOOK_RAW(sub_823893A0) {
+    if (REXCVAR_GET(mc2_scene_resolve_trace)) TraceSceneResolve(ctx, base);
+    if (NativeBootActive() && Graphics().HasColorDraw())
+        UnsupportedNativeOperation("tiled scene resolve and lower tile replay", ctx);
+    __imp__sub_823893A0(ctx, base);
 }
 REX_HOOK_RAW(sub_82387370) {
     if (!NativeBootActive()) { __imp__sub_82387370(ctx, base); return; }
