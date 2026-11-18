@@ -363,9 +363,10 @@ same separate UNORM texture before the next draw samples it. Put the filter
 shader containers and compiled shaders, using the same filenames as the
 initial bloom pass, in `bloom/filter`. The game switches to a three-tap
 shader pair on the next frame. Put that pair in `bloom/filter-three-taps`.
+The scene after Start uses the five-tap pair in `bloom/filter-five-taps`.
 The GPU check uses a single-pixel input to verify the two-pass spread and
-the third sample's independent offset and weight.
-A live boot without Xenos completed both variants and their resolves.
+the final sample's independent offset and weight in each longer filter.
+A live boot without Xenos completed all three variants and their resolves.
 
 ## Depth of field composition
 

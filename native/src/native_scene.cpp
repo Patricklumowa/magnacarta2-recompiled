@@ -583,8 +583,8 @@ static void RequireQuadArguments(const PPCContext& ctx) {
             ctx.r8.u32 == 1 && ctx.r9.u32 == 32, "Unsupported indexed scene quad arguments");
 }
 
-SceneFullscreenDraw ReadBloomDraw(const PPCContext& ctx, uint8_t* base, const ScenePassShaders& shaders,
-        const SceneResolveTexture& primary, const SceneResolveTexture* color, const ScenePassShaders* alternate) {
+SceneFullscreenDraw ReadBloomDraw(const PPCContext& ctx, uint8_t* base, std::span<const ScenePassShaders> programs,
+        const SceneResolveTexture& primary, const SceneResolveTexture* color) {
     RequireQuadArguments(ctx);
     const DeviceState state(base, ctx.r3.u32);
     SceneFullscreenDraw pass;
@@ -592,9 +592,11 @@ SceneFullscreenDraw ReadBloomDraw(const PPCContext& ctx, uint8_t* base, const Sc
     RequireFullscreenDrawState(state, pass.surface, false);
     const auto vertex = ReadBoundShader(base, state.Word(12704), true);
     const auto pixel = ReadBoundShader(base, state.Word(12700), false);
-    if (vertex == shaders.vertex.reference && pixel == shaders.pixel_reference) pass.shaders = &shaders;
-    else if (alternate && vertex == alternate->vertex.reference && pixel == alternate->pixel_reference) pass.shaders = alternate;
-    Require(pass.shaders, "Untranslated bloom shaders");
+    const auto program = std::find_if(programs.begin(), programs.end(), [&](const ScenePassShaders& candidate) {
+        return vertex == candidate.vertex.reference && pixel == candidate.pixel_reference;
+    });
+    Require(program != programs.end(), "Untranslated bloom shaders");
+    pass.shaders = &*program;
     RequireSceneTexture(state, primary, 0x4800, 0, !color);
     ReadFullscreenConstants(state, pass.surface, pass.draw, pass.pixel_constants, false);
     if (color) {

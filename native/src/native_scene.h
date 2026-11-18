@@ -100,8 +100,8 @@ SceneSurface ReadFullscreenResolve(const PPCContext& context, uint8_t* base, con
 SceneColorClear ReadBloomClear(const PPCContext& context, uint8_t* base);
 ScenePassShaders LoadQuadShaders(const std::filesystem::path& directory, const char* pixel_dxil);
 SceneFullscreenDraw ReadBloomDraw(const PPCContext& context, uint8_t* base,
-    const ScenePassShaders& shaders, const SceneResolveTexture& primary, const SceneResolveTexture* color = nullptr,
-    const ScenePassShaders* alternate = nullptr);
+    std::span<const ScenePassShaders> programs, const SceneResolveTexture& primary,
+    const SceneResolveTexture* color = nullptr);
 void ReadQuadUpVertices(DepthDraw& draw, uint8_t* base, uint32_t address, uint32_t index_address);
 SceneFullscreenDraw ReadCompositionDraw(const PPCContext& context, uint8_t* base,
     const ScenePassShaders& shaders, const SceneResolveTexture& depth, const SceneResolveTexture& color,

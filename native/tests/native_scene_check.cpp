@@ -498,24 +498,28 @@ void CheckBloom(mc2::native::DepthRenderer& depth, mc2::native::ColorTarget& col
             Check(target.ReadPixels()[index(x-2)] != 0, "Second bloom filter sampled stale resolved data");
             std::cout << "PASS: bilinear bloom filtering and feedback across both passes\n";
 
-            if (std::filesystem::is_directory(directory / "filter-three-taps")) {
-                const auto three_taps = LoadQuadShaders(directory / "filter-three-taps", "pixel-fixed16.dxil");
-                configuration.vertex_shader = three_taps.vertex.dxil;
-                configuration.inputs = three_taps.vertex.inputs;
-                ColorRenderer filter_three(configuration, three_taps.pixel_dxil, std::span(&linear,1), target);
+            const auto check_last_sample = [&](const char* name, uint32_t taps) {
+                if (!std::filesystem::is_directory(directory / name)) return;
+                const auto program = LoadQuadShaders(directory / name, "pixel-fixed16.dxil");
+                configuration.vertex_shader = program.vertex.dxil;
+                configuration.inputs = program.vertex.inputs;
+                ColorRenderer filter_variant(configuration, program.pixel_dxil, std::span(&linear,1), target);
                 target.Clear(RenderColor(0,0,0,0));
                 target.Clear(RenderColor(512.f/32767,0,0,0), &impulse);
                 target.ResolveFixedPoint();
-                const float third_offset[] = {-half_pixel[0],0,0,0};
-                std::memcpy(draw.vertex_constants.data() + 6 * 16, third_offset, sizeof(third_offset));
-                const float third_weight[][4] = {{0,0,0,0},{0,0,0,0},{1,1,1,1}};
-                std::memcpy(constants.data() + 3 * 16, third_weight, sizeof(third_weight));
-                filter_three.RenderResolved(draw, constants, target);
+                const float offset[] = {-half_pixel[0],0,0,0};
+                constexpr float weight[] = {1,1,1,1};
+                std::memcpy(draw.vertex_constants.data() + (5 + taps / 2) * 16, offset, sizeof(offset));
+                std::fill_n(constants.begin() + 3 * 16, taps * 16, 0);
+                std::memcpy(constants.data() + (3 + taps - 1) * 16, weight, sizeof(weight));
+                filter_variant.RenderResolved(draw, constants, target);
                 const auto result = target.ReadPixels();
                 Check(std::abs(int(result[index(x+1)]) - encoded(1.f)) <= 1 &&
-                      !result[index(x)] && !result[index(x+2)], "Three-tap bloom filter lost its third offset or weight");
-                std::cout << "PASS: three-tap bloom shader reads the third sample and weight\n";
-            }
+                      !result[index(x)] && !result[index(x+2)], "Bloom filter lost its final offset or weight");
+                std::cout << "PASS: " << taps << "-tap bloom shader reads its final sample and weight\n";
+            };
+            check_last_sample("filter-three-taps", 3);
+            check_last_sample("filter-five-taps", 5);
         }
         const auto composition_directory = color_directory / "fullscreen" / "compose";
         if (std::filesystem::is_directory(composition_directory))

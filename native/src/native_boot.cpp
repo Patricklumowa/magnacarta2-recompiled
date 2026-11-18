@@ -109,8 +109,8 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     std::optional<SceneColorShaders> color_shaders;
     std::optional<ScenePassShaders> depth_restore_shaders;
     std::optional<ScenePassShaders> fullscreen_shaders, color_grade_shaders;
-    std::optional<ScenePassShaders> bloom_shaders, filter_shaders, composition_shaders, back_buffer_shaders;
-    std::optional<ScenePassShaders> three_tap_filter_shaders;
+    std::optional<ScenePassShaders> bloom_shaders, composition_shaders, back_buffer_shaders;
+    std::vector<ScenePassShaders> filter_shaders;
     std::optional<ScenePassShaders> overlay_shaders;
     std::vector<uint8_t> fullscreen_resolve_shader, bloom_resolve_shader;
     std::vector<uint8_t> present_vertex_shader, present_pixel_shader;
@@ -184,11 +184,11 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             if (std::filesystem::is_directory(bloom_directory)) bloom_shaders = LoadQuadShaders(bloom_directory, "pixel-fixed16.dxil");
             const auto bloom_resolve_path = bloom_directory / "color-resolve.dxil";
             if (std::filesystem::exists(bloom_resolve_path)) bloom_resolve_shader = ReadNativeFile(bloom_resolve_path);
-            const auto filter_directory = bloom_directory / "filter";
-            if (std::filesystem::is_directory(filter_directory)) filter_shaders = LoadQuadShaders(filter_directory, "pixel-fixed16.dxil");
-            const auto three_tap_directory = bloom_directory / "filter-three-taps";
-            if (std::filesystem::is_directory(three_tap_directory))
-                three_tap_filter_shaders = LoadQuadShaders(three_tap_directory, "pixel-fixed16.dxil");
+            for (const auto* name : {"filter", "filter-three-taps", "filter-five-taps"}) {
+                const auto filter_directory = bloom_directory / name;
+                if (std::filesystem::is_directory(filter_directory))
+                    filter_shaders.push_back(LoadQuadShaders(filter_directory, "pixel-fixed16.dxil"));
+            }
         }
         NativeGraphics* expected = nullptr;
         Require(active.compare_exchange_strong(expected, this), "Only one native graphics system is supported");
@@ -517,11 +517,10 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
                         "Bloom draw requires its cleared target and preceding resolve");
                 if (bloom_draws == 0) {
                     Require(bool(bloom_shaders), "Initial bloom shaders are unavailable");
-                    scene = ReadBloomDraw(ctx, base, *bloom_shaders, scene_textures[1], &scene_textures[0]);
+                    scene = ReadBloomDraw(ctx, base, std::span(&*bloom_shaders,1), scene_textures[1], &scene_textures[0]);
                 } else {
-                    Require(filter_shaders && bloom_texture, "Bloom filter shaders or resolved texture are unavailable");
-                    scene = ReadBloomDraw(ctx, base, *filter_shaders, *bloom_texture, nullptr,
-                        three_tap_filter_shaders ? &*three_tap_filter_shaders : nullptr);
+                    Require(!filter_shaders.empty() && bloom_texture, "Bloom filter shaders or resolved texture are unavailable");
+                    scene = ReadBloomDraw(ctx, base, filter_shaders, *bloom_texture);
                 }
                 Require(*bloom_surface == scene.surface, "Bloom draw differs from its cleared surface");
             } else if (!composition_resolved) {
@@ -590,8 +589,9 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
                 const auto filter_sampler = FullscreenColorSampler(true);
                 auto& renderer = QuadRendererFor(surface, shaders, std::span(&filter_sampler,1), *bloom_target);
                 completed = renderer.RenderResolved(up.scene.draw, up.scene.pixel_constants, *bloom_target);
-                const auto taps = three_tap_filter_shaders && &shaders == &*three_tap_filter_shaders ? 3 : 2;
-                REXLOG_INFO("MC2 native scene: filtered bloom pass {} with {} taps, completed={}", bloom_draws, taps, completed);
+                const auto& vertex = shaders.vertex.reference;
+                const auto hash = mc2::capture::ContentHash(vertex.data(), vertex.size());
+                REXLOG_INFO("MC2 native scene: filtered bloom pass {} with vertex shader {:016x}, completed={}", bloom_draws, hash, completed);
             }
             ++bloom_draws;
         } else if (up.pass == SceneQuadPass::Composition) {
