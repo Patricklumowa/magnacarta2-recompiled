@@ -110,13 +110,15 @@ void RequireFullscreenDrawState(const DeviceState& state, const SceneSurface& su
 }
 
 void ReadBlockSceneTexture(const DeviceState& state, uint32_t slot, uint32_t format, DepthDraw& draw,
-                           mc2::texture::BlockTexture& texture, plume::RenderSamplerDesc& sampler) {
+                           mc2::texture::BlockTexture& texture, plume::RenderSamplerDesc& sampler, bool clamp_uv = false) {
     std::string error;
     if (!mc2::texture::DescribeBlockTexture(std::span(state.bytes).subspan(1152 + slot * 24, 24), texture, error))
         throw std::runtime_error(error);
     const auto& words = texture.fetch_words;
     constexpr uint32_t mip_max_mask = 15u << 6;
-    if (!state.Word(12552 + 4 * slot) || (words[0] & 0x0007fc00) != 0 || words[3] != 0x06280d10 ||
+    // Xenos clamp-to-edge is 2 in each of the U and V fields.
+    const uint32_t addressing = clamp_uv ? 0x00004800 : 0;
+    if (!state.Word(12552 + 4 * slot) || (words[0] & 0x0007fc00) != addressing || words[3] != 0x06280d10 ||
         (words[4] & ~mip_max_mask) != 0x803 || (words[5] & 0x1ff) != 0 ||
         texture.format != format || texture.mip_min_level != 0) {
         throw std::runtime_error(std::format(
@@ -125,6 +127,7 @@ void ReadBlockSceneTexture(const DeviceState& state, uint32_t slot, uint32_t for
             words[0], words[3], words[4], words[5]));
     }
     sampler = OverlaySampler(texture.mip_max_level);
+    if (clamp_uv) sampler.addressU = sampler.addressV = plume::RenderTextureAddressMode::CLAMP;
     BindSceneTexture(draw, slot, PackTextureFetchMode(texture.swizzle, texture.gamma_mask, texture.exp_adjust));
 }
 
@@ -712,8 +715,7 @@ ScenePassShaders LoadMenuFanShaders(const std::filesystem::path& directory) {
     return {std::move(vertex), ReadNativeFile(directory / "pixel-shader.container"), ReadNativeFile(directory / "pixel.dxil")};
 }
 
-SceneMenuFan ReadMenuFan(const PPCContext& ctx, uint8_t* base, const ScenePassShaders& base_shaders,
-                         const ScenePassShaders* additive_shaders) {
+SceneMenuFan ReadMenuFan(const PPCContext& ctx, uint8_t* base, std::span<const SceneMenuFanProgram> programs) {
     Require(ctx.lr == 0x826D9A60 && ctx.r4.u32 == 5 && ctx.r5.u32 == 4 && ctx.r6.u32 == 32,
             "Unsupported menu triangle fan");
     const DeviceState state(base, ctx.r3.u32);
@@ -721,23 +723,26 @@ SceneMenuFan ReadMenuFan(const PPCContext& ctx, uint8_t* base, const ScenePassSh
     auto& pass = menu.pass;
     pass.surface = ReadFullscreenColorSurface(state, base, 0x2d0);
     Require(state.Word(12464) == 0, "Menu fan needs only the back buffer");
-    constexpr uint32_t additive_blend = 0x01000106;
-    const bool additive = state.Word(10552) == additive_blend;
-    RequireFullscreenDrawState(state, pass.surface, false, 15, 0x18002, additive ? additive_blend : 0x10001);
-    pass.shaders = additive ? additive_shaders : &base_shaders;
-    Require(pass.shaders && ReadBoundShader(base, state.Word(12704), true) == pass.shaders->vertex.reference &&
-            ReadBoundShader(base, state.Word(12700), false) == pass.shaders->pixel_reference, "Untranslated menu fan shaders");
+    const auto vertex = ReadBoundShader(base, state.Word(12704), true);
+    const auto pixel = ReadBoundShader(base, state.Word(12700), false);
+    const auto program = std::find_if(programs.begin(), programs.end(), [&](const SceneMenuFanProgram& candidate) {
+        return vertex == candidate.shaders.vertex.reference && pixel == candidate.shaders.pixel_reference;
+    });
+    Require(program != programs.end(), "Untranslated menu fan shaders");
+    RequireFullscreenDrawState(state, pass.surface, false, 15, 0x18002, program->blend_control);
+    pass.shaders = &program->shaders;
     ReadFullscreenConstants(state, pass.surface, pass.draw, pass.pixel_constants, false);
-    menu.texture_count = additive ? 1 : 3;
     menu.blend = plume::RenderBlendDesc::Copy();
-    if (additive) {
+    if (program->blend_control == 0x01000106) {
         menu.blend = OverlayBlend();
         menu.blend.dstBlend = plume::RenderBlend::ONE;
     }
-    for (uint32_t slot = 0; slot < menu.texture_count; ++slot)
-        ReadBlockSceneTexture(state, slot, slot || additive ? 18u : 20u, pass.draw, menu.textures[slot], menu.samplers[slot]);
-    Require(additive || (menu.textures[1].mip_max_level == 0 && menu.textures[2].mip_max_level == 0),
-            "Menu fan detail textures require base-level sampling");
+    for (uint32_t format : program->block_formats) {
+        if (!format) break;
+        const auto slot = menu.texture_count++;
+        ReadBlockSceneTexture(state, slot, format, pass.draw, menu.textures[slot], menu.samplers[slot],
+                              (program->clamp_slots & (1u << slot)) != 0);
+    }
     return menu;
 }
 

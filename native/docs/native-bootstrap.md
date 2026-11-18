@@ -2,8 +2,8 @@
 
 These findings apply to the executable identified in [graphics-map.md](graphics-map.md).
 They come from its decoded instructions and generated functions. They identify
-the replacement boundary. The experimental movie-only backend described below
-now crosses it without loading the Xenos plugin; full scene rendering is pending.
+the replacement boundary. The experimental D3D12 backend plays movies and
+presents the first scene frames without loading the Xenos plugin.
 
 ## Host integration
 
@@ -161,11 +161,13 @@ its gamma and overlay settings to the RGBA8 back buffer. The seven UI
 draws blend into that surface on the native queue. A 44-second live run
 completed two scene swaps through [native presentation](native-depth.md#scene-presentation)
 and continued into the next movie. The second frame reused the attachments
-and exercised the three-tap bloom shaders.
+and exercised the three-tap bloom shaders. Skipping the movie with Start
+also reached four more swaps and the original title background draws. The
+title transition still encounters an unsupported menu shader.
 An empty color shader directory setting keeps the depth-only checkpoint.
 
-Other indexed and nonindexed scene draws, direct begin-UP draws and raw/indirect GPU
-submission paths currently fail explicitly. Gameplay scene coverage, remaining clears/resolves,
+Other indexed and nonindexed scene draws and raw or indirect GPU submission
+paths currently fail explicitly. Gameplay scene coverage, remaining clears and resolves,
 queries, shader/input coverage, asynchronous resource retirement and native
 platform services remain unfinished. Full effects and shadows are required.
 The original backend remains the default and the reference for those changes.

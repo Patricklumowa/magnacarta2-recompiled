@@ -103,7 +103,7 @@ struct PendingMenuFan {
 };
 struct CachedQuadRenderer {
     const ScenePassShaders* program;
-    float max_lod;
+    std::array<float, 3> max_lods;
     std::unique_ptr<ColorRenderer> renderer;
 };
 
@@ -119,7 +119,8 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     std::optional<ScenePassShaders> fullscreen_shaders, color_grade_shaders;
     std::optional<ScenePassShaders> bloom_shaders, composition_shaders, back_buffer_shaders;
     std::vector<ScenePassShaders> filter_shaders;
-    std::optional<ScenePassShaders> overlay_shaders, menu_fan_shaders, menu_fan_additive_shaders;
+    std::optional<ScenePassShaders> overlay_shaders;
+    std::vector<SceneMenuFanProgram> menu_fan_programs;
     std::vector<uint8_t> fullscreen_resolve_shader, bloom_resolve_shader;
     std::vector<uint8_t> present_vertex_shader, present_pixel_shader;
     std::optional<SceneSurface> depth_surface,color_surface;
@@ -183,10 +184,14 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             const auto overlay_directory = fullscreen_directory / "overlay";
             if (std::filesystem::is_directory(overlay_directory)) overlay_shaders = LoadFullscreenColorShaders(overlay_directory, false, "pixel.dxil");
             const auto menu_fan_directory = fullscreen_directory / "menu-fan";
-            if (std::filesystem::is_directory(menu_fan_directory)) menu_fan_shaders = LoadMenuFanShaders(menu_fan_directory);
+            if (std::filesystem::is_directory(menu_fan_directory))
+                menu_fan_programs.push_back({LoadMenuFanShaders(menu_fan_directory), {20,18,18}, 0x10001});
             const auto menu_additive_directory = menu_fan_directory / "additive";
             if (std::filesystem::is_directory(menu_additive_directory))
-                menu_fan_additive_shaders = LoadMenuFanShaders(menu_additive_directory);
+                menu_fan_programs.push_back({LoadMenuFanShaders(menu_additive_directory), {18}, 0x01000106});
+            const auto menu_detail_directory = menu_fan_directory / "additive-detail";
+            if (std::filesystem::is_directory(menu_detail_directory))
+                menu_fan_programs.push_back({LoadMenuFanShaders(menu_detail_directory), {20,18,20}, 0x01000106, 1u << 2});
             const auto present_directory = fullscreen_directory / "present";
             if (std::filesystem::is_directory(present_directory)) {
                 present_vertex_shader = ReadNativeFile(present_directory / "vertex.dxil");
@@ -569,17 +574,22 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             std::span<const plume::RenderSamplerDesc> samplers, ColorTarget& target,
             plume::RenderBlendDesc blend = plume::RenderBlendDesc::Copy(),
             plume::RenderCullMode cull = plume::RenderCullMode::NONE) {
-        // Only the first sampler's upper mip level varies within a pass.
-        const float max_lod = samplers.front().maxLOD;
+        // Addressing and filtering are fixed by the program. Any bound image
+        // can change the maximum sampled mip level.
+        std::array<float, 3> max_lods{};
+        Require(samplers.size() <= max_lods.size(), "Too many native fullscreen samplers");
+        std::transform(samplers.begin(), samplers.end(), max_lods.begin(), [](const plume::RenderSamplerDesc& sampler) {
+            return sampler.maxLOD;
+        });
         const auto existing = std::find_if(quad_renderers.begin(), quad_renderers.end(), [&](const CachedQuadRenderer& cache) {
-            return cache.program == &program && cache.max_lod == max_lod;
+            return cache.program == &program && cache.max_lods == max_lods;
         });
         if (existing != quad_renderers.end()) return *existing->renderer;
         auto configuration = ConfigureDepth(surface, program.vertex);
         configuration.cull = cull;
         auto pipeline = std::make_unique<ColorRenderer>(configuration, program.pixel_dxil, samplers, target, blend);
         auto* result = pipeline.get();
-        quad_renderers.push_back({&program, max_lod, std::move(pipeline)});
+        quad_renderers.push_back({&program, max_lods, std::move(pipeline)});
         return *result;
     }
 
@@ -588,9 +598,9 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         SceneMenuFan scene;
         {
             std::lock_guard lock(mutex);
-            Require(device && device == guest_device && back_buffer_surface && menu_fan_shaders &&
+            Require(device && device == guest_device && back_buffer_surface && !menu_fan_programs.empty() &&
                     !pending_up && !pending_menu_fan && !scanout_texture, "Menu fan requires the ready back buffer and shaders");
-            scene = ReadMenuFan(ctx, base, *menu_fan_shaders, menu_fan_additive_shaders ? &*menu_fan_additive_shaders : nullptr);
+            scene = ReadMenuFan(ctx, base, menu_fan_programs);
             Require(*back_buffer_surface == scene.pass.surface, "Menu fan target differs from the back buffer");
         }
         __imp__sub_828648A8(ctx, base);

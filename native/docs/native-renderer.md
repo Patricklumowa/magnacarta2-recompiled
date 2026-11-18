@@ -38,7 +38,6 @@ including bounded mini-fetch layouts and a shared native device/queue. Its
 captured geometry matches independent CPU coverage and depth calculations.
 An optional live path now completes its two-sample clear, indexed draw and the
 following tiled HDR color clear.
-Full live scene composition is not implemented.
 
 Native BC1/BC3 texture uploads also preserve all captured mip levels. GPU
 readback of the first color draw's two textures matches every compressed byte.
@@ -48,6 +47,10 @@ the diagnostic lighting check exercises texture sampling and gamma. Both tiles
 complete the draw and their color and depth resolves in a live boot without
 Xenos. The guest then retires its staging chunks on the CPU. See
 [indexed color replay](native-depth.md#indexed-color-replay).
+
+The native backend also runs the initial depth restore, bloom, scene
+composition, and RGBA8 presentation. The title transition still encounters
+an unsupported shader. See [scene presentation](native-depth.md#scene-presentation).
 
 The optional bounded live movie comparison uses the same native drawing code
 on live guest inputs. Two movie draws passed the CPU comparison during a clean

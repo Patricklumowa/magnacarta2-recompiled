@@ -410,8 +410,14 @@ target. Put its shader containers and `vertex.dxil` and `pixel.dxil` in
 
 The second fan adds source color scaled by source alpha and retains the
 destination alpha. Its shader reads one BC1 texture. Put this shader pair
-in `fullscreen/menu-fan/additive`. A live Start test completed both fans
-and presented four frames before reaching another shader pair.
+in `fullscreen/menu-fan/additive`. The next additive material samples
+mipmapped BC3 and BC1 textures and clamps its BC3 detail texture to the edge.
+Put that shader pair in `fullscreen/menu-fan/additive-detail`.
+
+A live Start test completed the three fan materials on the native queue.
+The first four displayed frames were black. A readback before the final
+overlays showed the title background and its additive effect. Another
+shader pair still stops the transition before the title screen is visible.
 
 ## Scene presentation
 
