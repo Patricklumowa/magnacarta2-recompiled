@@ -78,9 +78,8 @@ void RequireSceneTexture(const DeviceState& state, const SceneResolveTexture& so
     }
 }
 
-void BindSceneTexture(DepthDraw& draw, uint32_t slot) {
+void BindSceneTexture(DepthDraw& draw, uint32_t slot, uint32_t mode = PackTextureFetchMode(0x688, 0, 0)) {
     auto* shared = draw.shared_constants.data();
-    const auto mode = PackTextureFetchMode(0x688, 0, 0);
     std::memcpy(shared + slot * 4, &slot, sizeof(slot));
     std::memcpy(shared + 192 + slot * 4, &slot, sizeof(slot));
     std::memcpy(shared + 288 + slot * 4, &mode, sizeof(mode));
@@ -99,15 +98,34 @@ void ReadFullscreenConstants(const DeviceState& state, const SceneSurface& surfa
 }
 
 void RequireFullscreenDrawState(const DeviceState& state, const SceneSurface& surface, bool reverse_depth,
-                                bool grade = false, uint32_t blend_control = 0x10001) {
+                                uint32_t color_mask = 15, uint32_t raster_mode = 0x18000, uint32_t blend_control = 0x10001) {
     const float half_width = surface.width * 0.5f, half_height = surface.height * 0.5f;
-    Require(state.Word(11824) == 0 && state.Word(10452) == 0 && state.Word(10460) == (grade ? 7 : 15) &&
+    Require(state.Word(11824) == 0 && state.Word(10452) == 0 && state.Word(10460) == color_mask &&
             state.Word(10548) == 0x00700770 && state.Word(10552) == blend_control && (state.Word(10556) & 0x1f) == 7 &&
-            state.Word(10564) == 0x80000 && state.Word(10568) == (grade ? 0x18002 : 0x18000) && state.Word(10572) == 0x43f &&
+            state.Word(10564) == 0x80000 && state.Word(10568) == raster_mode && state.Word(10572) == 0x43f &&
             state.Float(12672) == (reverse_depth ? 1 : 0) && state.Float(12676) == (reverse_depth ? 0 : 1) &&
             state.Float(10504) == half_width && state.Float(10508) == half_width && state.Float(10512) == -half_height &&
             state.Float(10516) == half_height && state.Float(10520) == (reverse_depth ? -1 : 1) &&
             state.Float(10524) == (reverse_depth ? 1 : 0), "Fullscreen blend, mask, depth or viewport state changed");
+}
+
+void ReadBlockSceneTexture(const DeviceState& state, uint32_t slot, uint32_t format, DepthDraw& draw,
+                           mc2::texture::BlockTexture& texture, plume::RenderSamplerDesc& sampler) {
+    std::string error;
+    if (!mc2::texture::DescribeBlockTexture(std::span(state.bytes).subspan(1152 + slot * 24, 24), texture, error))
+        throw std::runtime_error(error);
+    const auto& words = texture.fetch_words;
+    constexpr uint32_t mip_max_mask = 15u << 6;
+    if (!state.Word(12552 + 4 * slot) || (words[0] & 0x0007fc00) != 0 || words[3] != 0x06280d10 ||
+        (words[4] & ~mip_max_mask) != 0x803 || (words[5] & 0x1ff) != 0 ||
+        texture.format != format || texture.mip_min_level != 0) {
+        throw std::runtime_error(std::format(
+            "Native scene texture {} format {}, levels {}-{}, sampler {:#x}/{:#x}/{:#x}/{:#x} differs",
+            slot, texture.format, texture.mip_min_level, texture.mip_max_level,
+            words[0], words[3], words[4], words[5]));
+    }
+    sampler = OverlaySampler(texture.mip_max_level);
+    BindSceneTexture(draw, slot, PackTextureFetchMode(texture.swizzle, texture.gamma_mask, texture.exp_adjust));
 }
 
 SceneVertexShader LoadVertexShader(const std::filesystem::path& directory) {
@@ -306,33 +324,8 @@ SceneColorDraw ReadSceneColorDraw(const PPCContext& ctx, uint8_t* base, const Sc
             "Untranslated native scene pixel shader");
     snapshot.draw = ReadGeometry(ctx, base, state, snapshot.color_surface, shaders.vertex);
     snapshot.pixel_constants = NativeVertexBytes(std::span(state.bytes).subspan(6016,4096),2);
-    for (uint32_t slot = 0; slot < snapshot.textures.size(); ++slot) {
-        auto& texture = snapshot.textures[slot];
-        std::string error;
-        if (!mc2::texture::DescribeBlockTexture(std::span(state.bytes).subspan(1152 + slot * 24, 24), texture, error))
-            throw std::runtime_error(error);
-        const auto& words = texture.fetch_words;
-        constexpr uint32_t mip_max_mask = 15u << 6;
-        if ((words[0] & 0x0007fc00) != 0 || words[3] != 0x06280d10 || (words[4] & ~mip_max_mask) != 0x803 ||
-            (words[5] & 0x1ff) != 0 || texture.format != (slot ? 20u : 18u) ||
-            texture.mip_min_level != 0) {
-            throw std::runtime_error(std::format(
-                "Native scene texture {} format {}, levels {}-{}, sampler {:#x}/{:#x}/{:#x}/{:#x} differs",
-                slot, texture.format, texture.mip_min_level, texture.mip_max_level,
-                words[0], words[3], words[4], words[5]));
-        }
-        // Both fetch instructions use the bound filter settings. The reference
-        // D3D12 sampler selects anisotropic filtering with a 4:1 limit for this state.
-        auto& sampler = snapshot.samplers[slot];
-        sampler.anisotropyEnabled = true;
-        sampler.maxAnisotropy = 4;
-        sampler.maxLOD = float(texture.mip_max_level);
-        auto* shared = snapshot.draw.shared_constants.data();
-        const auto mode = PackTextureFetchMode(texture.swizzle, texture.gamma_mask, texture.exp_adjust);
-        std::memcpy(shared + slot * 4, &slot, sizeof(slot));
-        std::memcpy(shared + 192 + slot * 4, &slot, sizeof(slot));
-        std::memcpy(shared + 288 + slot * 4, &mode, sizeof(mode));
-    }
+    for (uint32_t slot = 0; slot < snapshot.textures.size(); ++slot)
+        ReadBlockSceneTexture(state, slot, slot ? 20u : 18u, snapshot.draw, snapshot.textures[slot], snapshot.samplers[slot]);
     return snapshot;
 }
 
@@ -492,7 +485,7 @@ SceneFullscreenDraw ReadSceneFullscreenDraw(const PPCContext& ctx, uint8_t* base
     SceneFullscreenDraw pass;
     pass.surface = ReadFullscreenColorSurface(state, base);
     std::vector<uint8_t> descriptor;
-    RequireFullscreenDrawState(state, pass.surface, grade, grade);
+    RequireFullscreenDrawState(state, pass.surface, grade, grade ? 7 : 15, grade ? 0x18002 : 0x18000);
     Require(ReadBoundShader(base, state.Word(12704), true) == shaders.vertex.reference &&
             ReadBoundShader(base, state.Word(12700), false) == shaders.pixel_reference, "Untranslated fullscreen HDR shaders");
     RequireSceneTexture(state, source, 0x4800);
@@ -648,7 +641,7 @@ SceneFullscreenDraw ReadBackBufferOverlay(const PPCContext& ctx, uint8_t* base,
     SceneFullscreenDraw pass;
     pass.surface = ReadFullscreenColorSurface(state, base, 0x2d0);
     Require(state.Word(12464) == 0 && state.Word(10560) == 0x10, "Unsupported back-buffer overlay depth or blend state");
-    RequireFullscreenDrawState(state, pass.surface, false, false, 0x01000706);
+    RequireFullscreenDrawState(state, pass.surface, false, 15, 0x18000, 0x01000706);
     Require(ReadBoundShader(base, state.Word(12704), true) == shaders.vertex.reference &&
             ReadBoundShader(base, state.Word(12700), false) == shaders.pixel_reference, "Untranslated overlay shaders");
     const auto fetch = std::span(state.bytes).subspan(1152, 24);
@@ -708,6 +701,42 @@ plume::RenderSamplerDesc OverlaySampler(uint32_t max_mip_level) {
     sampler.maxAnisotropy = 4;
     sampler.maxLOD = float(max_mip_level);
     return sampler;
+}
+
+ScenePassShaders LoadMenuFanShaders(const std::filesystem::path& directory) {
+    auto vertex = LoadVertexShader(directory);
+    const std::vector<VertexInput> expected = {{0,0,95,32,0,4,true}, {6,0,95,32,0,3},
+        {7,0,95,32,12,4,false,VertexStorage::UInt8}, {3,0,95,32,16,4,false,VertexStorage::UInt8},
+        {10,0,95,32,20,4,false,VertexStorage::UInt8}, {5,0,95,32,24,2}};
+    Require(vertex.inputs == expected, "Menu fan vertex layout changed");
+    return {std::move(vertex), ReadNativeFile(directory / "pixel-shader.container"), ReadNativeFile(directory / "pixel.dxil")};
+}
+
+SceneMenuFan ReadMenuFan(const PPCContext& ctx, uint8_t* base, const ScenePassShaders& shaders) {
+    Require(ctx.lr == 0x826D9A60 && ctx.r4.u32 == 5 && ctx.r5.u32 == 4 && ctx.r6.u32 == 32,
+            "Unsupported menu triangle fan");
+    const DeviceState state(base, ctx.r3.u32);
+    SceneMenuFan menu;
+    auto& pass = menu.pass;
+    pass.surface = ReadFullscreenColorSurface(state, base, 0x2d0);
+    Require(state.Word(12464) == 0, "Menu fan needs only the back buffer");
+    RequireFullscreenDrawState(state, pass.surface, false, 15, 0x18002);
+    Require(ReadBoundShader(base, state.Word(12704), true) == shaders.vertex.reference &&
+            ReadBoundShader(base, state.Word(12700), false) == shaders.pixel_reference, "Untranslated menu fan shaders");
+    ReadFullscreenConstants(state, pass.surface, pass.draw, pass.pixel_constants, false);
+    for (uint32_t slot = 0; slot < menu.textures.size(); ++slot)
+        ReadBlockSceneTexture(state, slot, slot ? 18u : 20u, pass.draw, menu.textures[slot], menu.samplers[slot]);
+    Require(menu.textures[1].mip_max_level == 0 && menu.textures[2].mip_max_level == 0,
+            "Menu fan detail textures require base-level sampling");
+    return menu;
+}
+
+void ReadMenuFanVertices(DepthDraw& draw, uint8_t* base, uint32_t address) {
+    std::vector<uint8_t> vertices;
+    Require(ReadGuest(base, address, 128, vertices), "Unreadable menu fan vertices");
+    draw.vertices = NativeVertexBytes(vertices, 2);
+    draw.indices = {0,1,2,0,2,3};
+    draw.index_count = uint32_t(draw.indices.size());
 }
 
 uint32_t ReadScanoutResolve(const PPCContext& ctx, uint8_t* base, const SceneSurface& back_buffer) {

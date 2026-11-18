@@ -69,6 +69,11 @@ struct SceneOverlayBinding {
     uint32_t vertex_count = 0, index_count = 0;
     uint32_t max_mip_level = 0;
 };
+struct SceneMenuFan {
+    SceneFullscreenDraw pass;
+    std::array<mc2::texture::BlockTexture, 3> textures;
+    std::array<plume::RenderSamplerDesc, 3> samplers;
+};
 struct SceneTileResolve {
     SceneSurface color, depth;
     SceneResolveTexture destination;
@@ -115,6 +120,9 @@ void ReadOverlayUpVertices(DepthDraw& draw, uint8_t* base, uint32_t address, uin
     const SceneOverlayBinding& binding);
 plume::RenderBlendDesc OverlayBlend();
 plume::RenderSamplerDesc OverlaySampler(uint32_t max_mip_level = 0);
+ScenePassShaders LoadMenuFanShaders(const std::filesystem::path& directory);
+SceneMenuFan ReadMenuFan(const PPCContext& context, uint8_t* base, const ScenePassShaders& shaders);
+void ReadMenuFanVertices(DepthDraw& draw, uint8_t* base, uint32_t address);
 uint32_t ReadScanoutResolve(const PPCContext& context, uint8_t* base, const SceneSurface& back_buffer);
 std::pair<SceneSurface, SceneResolveTexture> ReadBloomResolve(const PPCContext& context, uint8_t* base);
 }

@@ -97,6 +97,10 @@ struct PendingUpDraw {
     SceneQuadPass pass;
     std::optional<SceneOverlayBinding> overlay;
 };
+struct PendingMenuFan {
+    SceneMenuFan scene;
+    uint32_t vertices, endpoint;
+};
 struct CachedQuadRenderer {
     const ScenePassShaders* program;
     float max_lod;
@@ -115,7 +119,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     std::optional<ScenePassShaders> fullscreen_shaders, color_grade_shaders;
     std::optional<ScenePassShaders> bloom_shaders, composition_shaders, back_buffer_shaders;
     std::vector<ScenePassShaders> filter_shaders;
-    std::optional<ScenePassShaders> overlay_shaders;
+    std::optional<ScenePassShaders> overlay_shaders, menu_fan_shaders;
     std::vector<uint8_t> fullscreen_resolve_shader, bloom_resolve_shader;
     std::vector<uint8_t> present_vertex_shader, present_pixel_shader;
     std::optional<SceneSurface> depth_surface,color_surface;
@@ -127,6 +131,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     std::optional<PendingDepthRestore> pending_restore;
     bool depth_restored = false;
     std::optional<PendingUpDraw> pending_up;
+    std::optional<PendingMenuFan> pending_menu_fan;
     std::optional<SceneSurface> fullscreen_surface;
     std::unique_ptr<ColorTarget> fullscreen_target;
     bool color_graded = false;
@@ -177,6 +182,8 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             if (std::filesystem::is_directory(back_buffer_directory)) back_buffer_shaders = LoadQuadShaders(back_buffer_directory, "pixel.dxil");
             const auto overlay_directory = fullscreen_directory / "overlay";
             if (std::filesystem::is_directory(overlay_directory)) overlay_shaders = LoadFullscreenColorShaders(overlay_directory, false, "pixel.dxil");
+            const auto menu_fan_directory = fullscreen_directory / "menu-fan";
+            if (std::filesystem::is_directory(menu_fan_directory)) menu_fan_shaders = LoadMenuFanShaders(menu_fan_directory);
             const auto present_directory = fullscreen_directory / "present";
             if (std::filesystem::is_directory(present_directory)) {
                 present_vertex_shader = ReadNativeFile(present_directory / "vertex.dxil");
@@ -210,7 +217,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         std::lock_guard lock(mutex);
         prepass_draw.reset(); scene_draw.reset(); pending_restore.reset();
         quad_renderers.clear();
-        pending_up.reset(); fullscreen_target.reset();
+        pending_up.reset(); pending_menu_fan.reset(); fullscreen_target.reset();
         bloom_target.reset();
         back_buffer.reset();
         stencil_framebuffer.reset(); stencil_target.reset();
@@ -509,7 +516,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         SceneQuadPass pass;
         {
             std::lock_guard lock(mutex);
-            Require(device && device == guest_device && depth_restored && !pending_up && !scanout_texture,
+            Require(device && device == guest_device && depth_restored && !pending_up && !pending_menu_fan && !scanout_texture,
                     "Unexpected native indexed user-memory draw");
             if (!fullscreen_surface) {
                 pass = SceneQuadPass::HdrCopy;
@@ -571,6 +578,47 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         auto* result = pipeline.get();
         quad_renderers.push_back({&program, max_lod, std::move(pipeline)});
         return *result;
+    }
+
+    void BeginMenuFan(PPCContext& ctx, uint8_t* base) {
+        const auto device = ctx.r3.u32;
+        SceneMenuFan scene;
+        {
+            std::lock_guard lock(mutex);
+            Require(device && device == guest_device && back_buffer_surface && menu_fan_shaders &&
+                    !pending_up && !pending_menu_fan && !scanout_texture, "Menu fan requires the ready back buffer and shaders");
+            scene = ReadMenuFan(ctx, base, *menu_fan_shaders);
+            Require(*back_buffer_surface == scene.pass.surface, "Menu fan target differs from the back buffer");
+        }
+        __imp__sub_828648A8(ctx, base);
+        const auto vertices = REX_LOAD_U32(device + 13448);
+        const auto endpoint = REX_LOAD_U32(device + 13444);
+        Require(vertices && !(vertices & 15) && ctx.r3.u32 == vertices && endpoint && !(endpoint & 3),
+                "Native menu fan staging allocation failed");
+        std::lock_guard lock(mutex);
+        pending_menu_fan = PendingMenuFan{std::move(scene), vertices, endpoint};
+    }
+
+    void CompleteMenuFan(uint8_t* base) {
+        std::lock_guard lock(mutex);
+        if (!pending_menu_fan) return;
+        auto& up = *pending_menu_fan;
+        Require(REX_LOAD_U32(guest_device + 48) == up.endpoint && REX_LOAD_U32(guest_device + 13448) == up.vertices,
+                "Guest did not commit its menu fan geometry");
+        auto& scene = up.scene;
+        ReadMenuFanVertices(scene.pass.draw, base, up.vertices);
+        std::array<std::unique_ptr<SampledTexture>, 3> textures;
+        std::array<const SampledTexture*, 3> bindings;
+        for (size_t i = 0; i < textures.size(); ++i) {
+            textures[i] = UploadSceneTexture(base, scene.textures[i], gpu);
+            bindings[i] = textures[i].get();
+        }
+        auto& renderer = QuadRendererFor(scene.pass.surface, *menu_fan_shaders, scene.samplers, *back_buffer,
+            plume::RenderBlendDesc::Copy(), plume::RenderCullMode::FRONT);
+        completed = renderer.Render(scene.pass.draw, scene.pass.pixel_constants, bindings);
+        ++overlay_draws;
+        pending_menu_fan.reset();
+        REXLOG_INFO("MC2 native scene: drew menu triangle fan with three textures, completed={}", completed);
     }
 
     void CompleteIndexedUp(uint8_t* base) {
@@ -687,7 +735,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     void ResolveScanout(const PPCContext& ctx, uint8_t* base) {
         std::lock_guard lock(mutex);
         Require(ctx.r3.u32 && ctx.r3.u32 == guest_device && back_buffer && back_buffer_surface &&
-                !pending_up && !scanout_texture && completed == gpu->completed,
+                !pending_up && !pending_menu_fan && !scanout_texture && completed == gpu->completed,
                 "Display resolve needs the completed native back buffer");
         // A full same-format single-sample resolve can retain the native
         // attachment until Swap consumes it. No guest texture upload is needed.
@@ -699,7 +747,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         std::lock_guard lock(mutex);
         if (!scanout_texture) return;
         Require(ctx.lr == 0x8248B7BC && ctx.r3.u32 == guest_device && ctx.r4.u32 == scanout_texture && !ctx.r5.u32 &&
-                !pending && !pending_restore && !pending_up && !retiring_tiles &&
+                !pending && !pending_restore && !pending_up && !pending_menu_fan && !retiring_tiles &&
                 renderer && window && !present_vertex_shader.empty() && !present_pixel_shader.empty(),
                 "Scene swap requires the resolved back buffer, window and presentation shaders");
         renderer->SetWindow(window);
@@ -793,7 +841,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     void Flush(uint8_t* base, uint32_t device) {
         std::lock_guard lock(mutex);
         Require(device != 0 && device == guest_device, "Native operation used an unknown device");
-        Require(!pending_restore && !pending_up, "Legacy staging flushed during a pending native user-memory draw");
+        Require(!pending_restore && !pending_up && !pending_menu_fan, "Legacy staging flushed during a pending native user-memory draw");
         if (pending) {
             Require(window && IsWindow(window), "Native game window is unavailable");
             if (!renderer) {
@@ -911,6 +959,13 @@ REX_HOOK_RAW(sub_826D9C10) {
         catch (const std::exception& error) { UnsupportedNativeOperation(error.what(), ctx); }
     }
 }
+REX_HOOK_RAW(sub_826D99A8) {
+    __imp__sub_826D99A8(ctx, base);
+    if (NativeBootActive()) {
+        try { Graphics().CompleteMenuFan(base); }
+        catch (const std::exception& error) { UnsupportedNativeOperation(error.what(), ctx); }
+    }
+}
 REX_HOOK_RAW(sub_826DA3A0) {
     __imp__sub_826DA3A0(ctx, base);
     if (NativeBootActive()) {
@@ -1010,7 +1065,10 @@ REX_HOOK_RAW(sub_8237CA28) {
 }
 REX_HOOK_RAW(sub_828648A8) {
     if (!NativeBootActive()) { __imp__sub_828648A8(ctx, base); return; }
-    try { Graphics().BeginDepthRestore(ctx, base); }
+    try {
+        if (ctx.lr == 0x826D9A60) Graphics().BeginMenuFan(ctx, base);
+        else Graphics().BeginDepthRestore(ctx, base);
+    }
     catch (const std::exception& error) { UnsupportedNativeOperation(error.what(), ctx); }
 }
 REX_HOOK_RAW(sub_82864D88) {

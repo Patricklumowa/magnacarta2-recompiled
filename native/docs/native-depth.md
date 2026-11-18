@@ -402,7 +402,14 @@ Put the shader containers, `vertex.dxil`, and `pixel.dxil` in `fullscreen/overla
 The GPU check verifies the RGBA8 upload and blend result. The live run
 completed all seven overlay draws before the display resolve, including
 both 108-index atlas batches. After Start it completed 27 indexed overlays,
-including an eight-level BC3 texture, before reaching a non-indexed draw.
+including an eight-level BC3 texture. The next draw reads four user-memory
+vertices and three compressed textures. The CPU staging allocation remains
+in the guest, and D3D12 renders the fan as two triangles in the same RGBA8
+target. Put its shader containers and `vertex.dxil` and `pixel.dxil` in
+`fullscreen/menu-fan`.
+
+A live test completed this first fan, then reached a second fan with
+different raster state.
 
 ## Scene presentation
 
