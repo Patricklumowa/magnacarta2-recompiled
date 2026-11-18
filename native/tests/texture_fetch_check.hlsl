@@ -12,6 +12,8 @@ void main(uint3 id : SV_DispatchThreadID)
     float4 value = asfloat(inputs.Load4(address));
     uint mode = inputs.Load(address + 16);
     uint slot = inputs.Load(address + 20);
-    results.Store4(address, asuint(applyTextureFetch(value, mode)));
-    results.Store4(address + 16, asuint(applyTextureFetch(value, TEXTURE_FETCH_MODE(slot))));
+    uint outputAddress = id.x * 48;
+    results.Store4(outputAddress, asuint(applyTextureFetch(value, mode)));
+    results.Store4(outputAddress + 16, asuint(applyTextureFetch(value, TEXTURE_FETCH_MODE(slot))));
+    results.Store4(outputAddress + 32, asuint(quantizeColor7e3(value)));
 }

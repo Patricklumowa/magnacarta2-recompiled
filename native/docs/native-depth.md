@@ -192,24 +192,27 @@ and two-sample HDR target. It selects the first tile's cleared rectangle for
 this diagnostic replay.
 
 Put the first color draw's `vertex-shader.container` and `pixel-shader.container`
-in a local directory with `vertex.dxil` and `pixel.dxil`, compiled with the
-patched XenosRecomp converter and pixel specialization flags zero. Use the
-schema 4 draw capture so the two textures include every raw mip.
+in a local directory with `vertex.dxil` and `pixel-7e3.dxil`. Compile with the
+patched XenosRecomp converter and link the pixel shader with specialization
+flags 4, which enables 7e3 color and two-bit alpha storage at target zero.
+Use the schema 4 draw capture so the two textures include every raw mip.
 
 ```text
 mc2_native_scene_check <depth-capture> <depth-shaders> <color-capture> <color-shaders> out/color-diagnostic.rgba16f
 ```
 
 In the first tile, 29,417 pixels receive the color pass, matching the retained
-depth coverage. The recorded lighting constants yield zero RGB and finite
-alpha on covered pixels. A second pass with diagnostic lighting produces HDR
+depth coverage. The recorded lighting constants yield zero RGB and saturated
+alpha, with partial coverage resolved to half alpha. A second pass with diagnostic lighting produces HDR
 color from the captured textures, and toggling the diffuse gamma interpretation
 changes the red channel in all 29,417 covered pixels. The check also verifies
 that writes stay within the tile, uncleared attachments reject draws and a closer
 depth clear rejects the geometry. The output file is the diagnostic lighting
 readback. The D3D12 debug layer was unavailable during validation.
 
-The replay uses the native float16 attachment and D3D12 sample positions.
-Console 7e3 color, two-bit alpha storage, float24 depth and sample locations
-still need validation against the original backend. Native boot currently
+The pixel shader rounds each RGB channel to one of the 1024 representable
+7e3 values before writing the float16 target. Float16 stores these RGB values
+exactly and approximates the intermediate one-third and two-thirds alpha
+levels. This applies to copy passes. Blending needs separate handling.
+Float24 depth and console sample locations still need validation. Native boot currently
 stops before this color draw while its tile lifetime and resolves are mapped.

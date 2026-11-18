@@ -226,7 +226,7 @@ dxc -T cs_6_0 -E main -HV 2021 -I <XenosRecomp-checkout>/XenosRecomp native/test
 mc2_native_fetch_check <local-output>/texture-fetch-check.dxil
 ```
 
-The test compares 8,576 GPU cases with a separate double-precision CPU
+The test compares GPU fetch cases with a separate double-precision CPU
 calculation: all byte values, points either side of curve boundaries, NaN and
 infinity handling, channel selection, constant zero/one, exponent extremes,
 bit-exact disabled bypass, and all sixteen shared-buffer slots. Maximum
@@ -236,6 +236,13 @@ persistent upload/presentation tests pass with the new shaders. All 187 captured
 shaders still compile/link; forward/reverse patch checks reproduce the tested
 sources. Live scene color draws, full sampler-state mapping and matched frame
 comparisons remain unfinished.
+
+The same check compares target-zero quantization against an independently
+enumerated table of all 1024 representable 7e3 values. It exercises their
+adjacent midpoints, float values on both sides of each rounding boundary, and
+two-bit alpha. Pixel specialization bit 2 (flags 4) enables this conversion
+after the alpha test on the non-Unleashed path. It currently serves opaque
+copy passes with 7e3 storage. Existing movie variants use flags zero.
 
 `tools/check_mc2_shaders.py` passes synthetic checks for stage-aware deduplication,
 little-endian dump matching to an unaligned embedded container, feature counting,

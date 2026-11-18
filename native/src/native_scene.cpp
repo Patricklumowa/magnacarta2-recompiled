@@ -138,7 +138,7 @@ SceneColorShaders LoadColorShaders(const std::filesystem::path& directory) {
         {3,0,95,40,16,4,false,VertexStorage::UInt8}, {10,0,95,40,20,4,false,VertexStorage::UInt8}, {5,0,95,40,24,2}
     };
     Require(vertex.inputs == expected, "Scene color shader input layout differs from the verified shader");
-    return {std::move(vertex), ReadNativeFile(directory / "pixel-shader.container"), ReadNativeFile(directory / "pixel.dxil")};
+    return {std::move(vertex), ReadNativeFile(directory / "pixel-shader.container"), ReadNativeFile(directory / "pixel-7e3.dxil")};
 }
 DepthConfiguration ConfigureDepth(const SceneSurface& surface, const SceneVertexShader& shader) {
     DepthConfiguration configuration;

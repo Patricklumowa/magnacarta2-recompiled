@@ -50,6 +50,22 @@ std::array<float,4> Reference(const std::array<float,4>& input,uint32_t mode) {
     }
     return output;
 }
+std::array<float,1024> Float7e3Values() {
+    std::array<float,1024> values;
+    for (uint32_t code = 0; code < values.size(); ++code) {
+        const int exponent = int(code >> 7);
+        const int fraction = code & 127;
+        values[code] = exponent ? std::ldexp(float(128 + fraction), exponent - 10) : float(fraction) / 512;
+    }
+    return values;
+}
+float Nearest7e3(float value, const std::array<float,1024>& levels) {
+    if (std::isnan(value) || value <= 0) return 0;
+    const auto hi = std::lower_bound(levels.begin(), levels.end(), value);
+    if (hi == levels.end()) return levels.back();
+    const double midpoint = (double(*hi) + *(hi - 1)) / 2;
+    return value > midpoint || (value == midpoint && (hi - levels.begin()) % 2 == 0) ? *hi : *(hi - 1);
+}
 }
 int main(int argc,char** argv) try {
     using namespace mc2::native;
@@ -76,6 +92,14 @@ int main(int argc,char** argv) try {
     }
     values.insert(values.end(),{-1,2,std::numeric_limits<float>::quiet_NaN(),
                                std::numeric_limits<float>::infinity(),-std::numeric_limits<float>::infinity()});
+    const auto levels = Float7e3Values();
+    values.insert(values.end(), levels.begin(), levels.end());
+    for (size_t i = 1; i < levels.size(); ++i) {
+        const float midpoint = (levels[i-1] + levels[i]) * 0.5f;
+        values.push_back(std::nextafter(midpoint, 0.0f));
+        values.push_back(midpoint);
+        values.push_back(std::nextafter(midpoint, 32.0f));
+    }
     std::vector<Input> cases;
     for (uint32_t i=0;i<values.size();++i) for (uint32_t slot=0;slot<modes.size();++slot) {
         Input input{{values[i],values[(i+59)%values.size()],values[(i+137)%values.size()],values[(i+203)%values.size()]},
@@ -87,10 +111,11 @@ int main(int argc,char** argv) try {
     auto gpu=std::make_shared<NativeDevice>(true);
     auto& device=gpu->device;
     const auto byte_size=cases.size()*sizeof(Input);
+    const auto result_size=cases.size()*12*sizeof(float);
     auto input=device->createBuffer(RenderBufferDesc::UploadBuffer(byte_size,RenderBufferFlag::STORAGE));
     auto constants=device->createBuffer(RenderBufferDesc::UploadBuffer(512,RenderBufferFlag::CONSTANT));
-    auto output=device->createBuffer(RenderBufferDesc::DefaultBuffer(byte_size,RenderBufferFlag::STORAGE|RenderBufferFlag::UNORDERED_ACCESS));
-    auto readback=device->createBuffer(RenderBufferDesc::ReadbackBuffer(byte_size));
+    auto output=device->createBuffer(RenderBufferDesc::DefaultBuffer(result_size,RenderBufferFlag::STORAGE|RenderBufferFlag::UNORDERED_ACCESS));
+    auto readback=device->createBuffer(RenderBufferDesc::ReadbackBuffer(result_size));
     Check(input && constants && output && readback,"Native fetch test allocation failed");
     auto* mapped=input->map(); Check(mapped!=nullptr,"Native fetch input mapping failed");
     std::memcpy(mapped,cases.data(),byte_size); input->unmap();
@@ -104,7 +129,7 @@ int main(int argc,char** argv) try {
     auto constant_set=device->createDescriptorSet(sets[4]),buffer_set=device->createDescriptorSet(sets[5]);
     Check(constant_set && buffer_set,"Native fetch test descriptor allocation failed");
     constant_set->setBuffer(0,constants.get(),512);
-    buffer_set->setBuffer(0,input.get(),byte_size); buffer_set->setBuffer(1,output.get(),byte_size);
+    buffer_set->setBuffer(0,input.get(),byte_size); buffer_set->setBuffer(1,output.get(),result_size);
     RenderPipelineLayoutDesc layout_desc;
     layout_desc.descriptorSetDescs=sets.data(); layout_desc.descriptorSetDescsCount=sets.size();
     auto layout=device->createPipelineLayout(layout_desc);
@@ -120,7 +145,7 @@ int main(int argc,char** argv) try {
     commands->setComputeDescriptorSet(constant_set.get(),4); commands->setComputeDescriptorSet(buffer_set.get(),5);
     commands->dispatch(uint32_t(cases.size()/64),1,1);
     commands->barriers(RenderBarrierStage::COPY,RenderBufferBarrier(output.get(),RenderBufferAccess::READ));
-    commands->copyBufferRegion(readback.get(),output.get(),byte_size);
+    commands->copyBufferRegion(readback.get(),output.get(),result_size);
     commands->end(); gpu->queue->executeCommandLists(commands.get(),gpu->fence.get()); gpu->Complete();
     const auto* actual=static_cast<const float*>(readback->map());
     Check(actual!=nullptr,"Native fetch test readback mapping failed");
@@ -129,7 +154,7 @@ int main(int argc,char** argv) try {
         const auto mode=test ? modes[cases[i].slot] : cases[i].mode;
         const auto expected=Reference(cases[i].value,mode);
         for (uint32_t c=0;c<4;++c) {
-            const float result=actual[i*8+test*4+c];
+            const float result=actual[i*12+test*4+c];
             const auto relative=std::abs(double(result)-expected[c])/std::max(1e-30,std::abs(double(expected[c])));
             bool matches;
             if (!(mode&0x80000000u)) matches=std::bit_cast<uint32_t>(result)==std::bit_cast<uint32_t>(expected[c]);
@@ -142,8 +167,20 @@ int main(int argc,char** argv) try {
                          <<", expected="<<expected[c]<<", actual="<<result<<'\n';
         }
     }
+    size_t hdr_mismatches = 0;
+    for (size_t i = 0; i < cases.size(); ++i) {
+        for (uint32_t c = 0; c < 3; ++c)
+            hdr_mismatches += actual[i*12+8+c] != Nearest7e3(cases[i].value[c], levels);
+        const float alpha = cases[i].value[3];
+        const float saturated = std::isnan(alpha) ? 0 : std::clamp(alpha,0.0f,1.0f);
+        const float expected_alpha = std::floor(std::fma(saturated,3.0f,0.5f))/3.0f;
+        const float stored_alpha = actual[i*12+11];
+        hdr_mismatches += !std::isfinite(stored_alpha) || std::abs(stored_alpha - expected_alpha) > 1e-7f;
+    }
     readback->unmap(); Check(!mismatches,"Native GPU fetch interpretation differs from CPU reference");
+    Check(!hdr_mismatches,"Native HDR storage differs from the representable 7e3/UNORM2 values");
     std::cout<<"PASS: "<<cases.size()*2<<" GPU fetch cases, gamma boundaries, swizzle/constants, signed exponent, disabled bypass and all 16 shared slots; max_relative="
              <<max_relative<<", debug_layer="<<gpu->debug_enabled<<'\n';
+    std::cout << "PASS: all 1024 finite 7e3 levels, adjacent rounding boundaries and two-bit alpha conversion\n";
     return 0;
 } catch (const std::exception& error) { std::cerr<<"Native fetch check: "<<error.what()<<'\n'; return 1; }

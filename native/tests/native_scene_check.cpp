@@ -67,7 +67,8 @@ void ReplayColor(const mc2::native::SceneDepthDraw& prepass, const mc2::native::
         const auto* pixel = pixels.data() + i * 4;
         const bool upper = i / surface.width < uint32_t(clear.rectangle.bottom);
         Check(!pixel[0] && !pixel[1] && pixel[2] == (upper ? 0 : 0x3400), "Captured color or tile scissor differs");
-        Check((pixel[3] != 0) == (upper && depth_result.pixels[i] > 0) && pixel[3] < 0x7c00,
+        Check((pixel[3] != 0) == (upper && depth_result.pixels[i] > 0) &&
+              (pixel[3] == 0 || pixel[3] == 0x3800 || pixel[3] == 0x3c00),
               "Captured color coverage differs from the preceding depth draw");
         covered += pixel[3] != 0;
     }
