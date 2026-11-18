@@ -55,13 +55,13 @@ void RequireFullClearRect(const PPCContext& ctx, uint8_t* base, const SceneSurfa
             LoadBE32(rectangle.data() + 12) == surface.height, "Only the verified full surface clear rectangle is supported");
 }
 
-void RequireSceneTexture(const DeviceState& state, const SceneResolveTexture& source, uint32_t clamp_bits) {
-    Require(source.address && state.Word(12552) == source.address, "Fullscreen pass did not bind the scene resolve");
+void RequireSceneTexture(const DeviceState& state, const SceneResolveTexture& source, uint32_t clamp_bits, uint32_t slot = 0) {
+    Require(source.address && state.Word(12552 + slot * 4) == source.address, "Fullscreen pass did not bind the scene resolve");
     for (uint32_t i = 0; i < source.fetch_words.size(); ++i) {
         uint32_t expected = source.fetch_words[i];
         if (i == 0) expected |= clamp_bits;
         if (i == 1) expected &= 0x1fffffff;
-        Require(state.Word(1152 + i * 4) == expected, "Fullscreen scene texture fetch differs");
+        Require(state.Word(1152 + slot * 24 + i * 4) == expected, "Fullscreen scene texture fetch differs");
     }
 }
 
@@ -125,6 +125,19 @@ SceneSurface ReadFullscreenColorSurface(const DeviceState& state, uint8_t* base)
     state.FullViewport(surface);
     Require((state.bytes[10940] & 0x30) == 0 && state.Word(12724) == 0 && state.Word(12716) == UINT32_MAX,
             "Fullscreen HDR pass needs an untiled surface");
+    return surface;
+}
+
+SceneSurface ReadBloomColorSurface(const DeviceState& state, uint8_t* base) {
+    SceneSurface surface{state.Word(12448),322,182,1,{}};
+    state.FullViewport(surface);
+    std::vector<uint8_t> descriptor;
+    Require((state.bytes[10940] & 0x30) == 0 && state.Word(12724) == 0 && state.Word(12716) == UINT32_MAX &&
+            state.Word(12452) == 0 && state.Word(12456) == 0 && state.Word(12460) == 0 && state.Word(12464) == 0 &&
+            ReadGuest(base, surface.address, 48, descriptor) && (LoadBE32(descriptor.data()) & 15) == 4 &&
+            LoadBE32(descriptor.data() + 24) == 0x05800190 && LoadBE32(descriptor.data() + 28) == 0x505a0 &&
+            LoadBE32(descriptor.data() + 36) == 0x050405a8 && state.Word(10372) == 0x505a0, "Unsupported bloom target layout");
+    surface.description.assign(descriptor.begin()+24,descriptor.end());
     return surface;
 }
 
@@ -494,20 +507,57 @@ SceneColorClear ReadBloomClear(const PPCContext& ctx, uint8_t* base) {
     Require(ctx.lr == 0x8238B590 && ctx.r4.u32 == 0xf, "Unsupported bloom color clear arguments");
     const DeviceState state(base, ctx.r3.u32);
     SceneColorClear clear;
-    clear.surface = {state.Word(12448),322,182,1,{}};
-    state.FullViewport(clear.surface);
+    clear.surface = ReadBloomColorSurface(state, base);
     RequireFullClearRect(ctx, base, clear.surface);
-    std::vector<uint8_t> descriptor, value;
-    Require((state.bytes[10940] & 0x30) == 0 && state.Word(12724) == 0 && state.Word(12716) == UINT32_MAX &&
-            state.Word(12452) == 0 && state.Word(12456) == 0 && state.Word(12460) == 0 && state.Word(12464) == 0 &&
-            ReadGuest(base, clear.surface.address, 48, descriptor) && (LoadBE32(descriptor.data()) & 15) == 4 &&
-            LoadBE32(descriptor.data() + 24) == 0x05800190 && LoadBE32(descriptor.data() + 28) == 0x505a0 &&
-            LoadBE32(descriptor.data() + 36) == 0x050405a8 && state.Word(10372) == 0x505a0, "Unsupported bloom target layout");
+    std::vector<uint8_t> value;
     Require(ReadGuest(base, ctx.r6.u32 ? ctx.r6.u32 : 0x82247720, 16, value) &&
             std::all_of(value.begin(), value.end(), [](uint8_t byte) { return byte == 0; }), "Bloom target clear requires zero");
-    clear.surface.description.assign(descriptor.begin()+24,descriptor.end());
     clear.value = plume::RenderColor(0,0,0,0);
     clear.rectangle = plume::RenderRect(0,0,clear.surface.width,clear.surface.height);
     return clear;
+}
+
+ScenePassShaders LoadBloomShaders(const std::filesystem::path& directory) {
+    auto vertex = LoadVertexShader(directory);
+    const std::vector<VertexInput> inputs = {{0,0,95,32,0,4}, {5,0,95,32,16,2}};
+    Require(vertex.inputs == inputs, "Bloom vertex layout changed");
+    return {std::move(vertex), ReadNativeFile(directory / "pixel-shader.container"), ReadNativeFile(directory / "pixel-fixed16.dxil")};
+}
+
+SceneFullscreenDraw ReadBloomDraw(const PPCContext& ctx, uint8_t* base, const ScenePassShaders& shaders,
+        const SceneResolveTexture& color, const SceneResolveTexture& depth) {
+    Require(ctx.lr == 0x826D9CC0 && ctx.r4.u32 == 4 && ctx.r5.u32 == 0 && ctx.r6.u32 == 4 && ctx.r7.u32 == 6 &&
+            ctx.r8.u32 == 1 && ctx.r9.u32 == 32, "Unsupported indexed bloom draw arguments");
+    const DeviceState state(base, ctx.r3.u32);
+    SceneFullscreenDraw pass;
+    pass.surface = ReadBloomColorSurface(state, base);
+    Require(state.Word(11824) == 0 && state.Word(10452) == 0 && state.Word(10460) == 15 &&
+            state.Word(10548) == 0x00700770 && state.Word(10552) == 0x10001 && (state.Word(10556) & 0x1f) == 7 &&
+            state.Word(10564) == 0x80000 && state.Word(10568) == 0x18000 && state.Word(10572) == 0x43f &&
+            state.Float(12672) == 0 && state.Float(12676) == 1 &&
+            state.Float(10504) == 161 && state.Float(10508) == 161 && state.Float(10512) == -91 &&
+            state.Float(10516) == 91 && state.Float(10520) == 1 && state.Float(10524) == 0,
+            "Unsupported bloom viewport, write mask or blend state");
+    Require(ReadBoundShader(base, state.Word(12704), true) == shaders.vertex.reference &&
+            ReadBoundShader(base, state.Word(12700), false) == shaders.pixel_reference, "Untranslated bloom shaders");
+    RequireSceneTexture(state, depth, 0x4800);
+    RequireSceneTexture(state, color, 0x4800, 1);
+    ReadFullscreenConstants(state, pass.surface, pass.draw, pass.pixel_constants, false);
+    const uint32_t slot = 1, mode = PackTextureFetchMode(0x688,0,0);
+    auto* shared = pass.draw.shared_constants.data();
+    std::memcpy(shared + 4, &slot, sizeof(slot));
+    std::memcpy(shared + 196, &slot, sizeof(slot));
+    std::memcpy(shared + 292, &mode, sizeof(mode));
+    return pass;
+}
+
+void ReadBloomUpVertices(DepthDraw& draw, uint8_t* base, uint32_t address, uint32_t index_address) {
+    std::vector<uint8_t> vertices, indices;
+    Require(ReadGuest(base,address,128,vertices) && ReadGuest(base,index_address,12,indices), "Unreadable bloom vertices or indices");
+    draw.vertices = NativeVertexBytes(vertices, 2);
+    draw.indices = {0,1,3,0,3,2};
+    for (size_t i = 0; i < draw.indices.size(); ++i)
+        Require((uint32_t(indices[i*2]) << 8 | indices[i*2+1]) == draw.indices[i], "Bloom triangle indices changed");
+    draw.index_count = uint32_t(draw.indices.size());
 }
 }

@@ -21,16 +21,17 @@ diff --git a/XenosRecomp/shader_common.h b/XenosRecomp/shader_common.h
 index 1c74034..195da4e 100644
 --- a/XenosRecomp/shader_common.h
 +++ b/XenosRecomp/shader_common.h
-@@ -8,6 +8,8 @@
+@@ -8,6 +8,9 @@
      #define SPEC_CONSTANT_BICUBIC_GI_FILTER (1 << 2)
      #define SPEC_CONSTANT_ALPHA_TO_COVERAGE (1 << 3)
      #define SPEC_CONSTANT_REVERSE_Z         (1 << 4)
 +#else
 +    #define SPEC_CONSTANT_RT0_7E3            (1 << 2)
++    #define SPEC_CONSTANT_RT0_FIXED16        (1 << 3)
  #endif
  
  #if !defined(__cplusplus) || defined(__INTELLISENSE__)
-@@ -30,6 +32,9 @@ struct PushConstants
+@@ -30,6 +33,9 @@ struct PushConstants
  #define g_SwappedTexcoords         vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 260)
  #define g_HalfPixelOffset          vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + 264)
  #define g_AlphaThreshold           vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 272)
@@ -40,7 +41,7 @@ index 1c74034..195da4e 100644
  
  [[vk::constant_id(0)]] const uint g_SpecConstants = 0;
  
-@@ -37,11 +42,19 @@ struct PushConstants
+@@ -37,11 +43,19 @@ struct PushConstants
  
  #else
  
@@ -61,7 +62,7 @@ index 1c74034..195da4e 100644
  
  uint g_SpecConstants();
  
-@@ -52,6 +65,61 @@ Texture3D<float4> g_Texture3DDescriptorHeap[] : register(t0, space1);
+@@ -52,6 +66,70 @@ Texture3D<float4> g_Texture3DDescriptorHeap[] : register(t0, space1);
  TextureCube<float4> g_TextureCubeDescriptorHeap[] : register(t0, space2);
  SamplerState g_SamplerDescriptorHeap[] : register(s0, space3);
  
@@ -117,6 +118,15 @@ index 1c74034..195da4e 100644
 +    uint3 exponent = asuint(max(rgb, 0.25)) & 0x7f800000u;
 +    float3 step = asfloat(exponent - (7u << 23));
 +    return float4(round(rgb / step) * step, floor(saturate(color.a) * 3.0 + 0.5) / 3.0);
++}
++
++// Encode the signed [-32, 32] fixed-point range into native RGBA16_SNORM.
++// Round half away from zero before writing the representable SNORM value.
++float4 encodeColorFixed16(float4 color)
++{
++    float4 value = clamp(color, -32.0, 32.0);
++    float4 encoded = trunc(mad(value, 32767.0 / 32.0, select(value < 0.0, -0.5, 0.5)));
++    return encoded / 32767.0;
 +}
 +#endif
 +
@@ -496,16 +506,18 @@ index 698a418..8f60391 100644
          #endif
  
              out += '\t';
-@@ -1824,6 +1883,13 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1824,6 +1883,15 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
  
                      indent();
                      out += '}';
 +                #else
 +                    if (static_cast<const PixelShader*>(shader)->outputs & PIXEL_SHADER_OUTPUT_COLOR0)
 +                    {
-+                        specConstantsMask |= SPEC_CONSTANT_RT0_7E3;
++                        specConstantsMask |= SPEC_CONSTANT_RT0_7E3 | SPEC_CONSTANT_RT0_FIXED16;
 +                        indent();
 +                        out += "if (g_SpecConstants() & SPEC_CONSTANT_RT0_7E3) oC0 = quantizeColor7e3(oC0);\n";
++                        indent();
++                        out += "else if (g_SpecConstants() & SPEC_CONSTANT_RT0_FIXED16) oC0 = encodeColorFixed16(oC0);\n";
 +                    }
                  #endif
                  }
@@ -528,8 +540,9 @@ new file mode 100644
 index 0000000..ac3e156
 --- /dev/null
 +++ b/XenosRecomp/shader_recompiler_check.cpp
-@@ -0,0 +1,181 @@
+@@ -0,0 +1,187 @@
 +// Synthetic fixtures only. No game shaders or generated game code.
++#include "shader_common.h"
 +#include "shader_recompiler.h"
 +#include <array>
 +#include <cstring>
@@ -651,9 +664,14 @@ index 0000000..ac3e156
 +    put32(72, (uint32_t(RegisterSet::Sampler) << 16) | first);
 +    put32(76, uint32_t(count) << 16);
 +    std::memcpy(data.data() + 88, "Array", 6);
++    put32(204, 12);
 +    put32(228, PIXEL_SHADER_OUTPUT_COLOR0);
++    put32(260, uint32_t(ControlFlowOpcode::ExecEnd) << 12);
 +    ShaderRecompiler recompiler;
 +    recompiler.recompile(data.data(), "");
++    require((recompiler.specConstantsMask & SPEC_CONSTANT_RT0_FIXED16) != 0 &&
++            recompiler.out.find("oC0 = encodeColorFixed16(oC0)") != std::string::npos,
++        "Fixed-point output specialization missing");
 +    require(recompiler.samplers.size() == count, "Sampler reflection range lost");
 +    for (uint32_t i = 0; i < count; i++)
 +    {

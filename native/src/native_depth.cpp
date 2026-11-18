@@ -439,4 +439,13 @@ uint64_t ColorRenderer::RenderResolved(const DepthDraw& draw, std::span<const ui
     const RenderTexture* texture = source.ResolvedTexture(impl_->gpu);
     return impl_->Render(draw, ps, std::span(&texture, 1));
 }
+uint64_t ColorRenderer::RenderResolved(const DepthDraw& draw, std::span<const uint8_t> ps,
+        const DepthRenderer& depth_source, const ColorTarget& color_source) {
+    const auto& depth = *depth_source.impl_;
+    Require(depth.gpu.get() == &impl_->gpu && depth.tile_resolve &&
+            depth.tile_resolve->CompletedRegion() == RenderRect(0,0,depth.width,depth.height),
+            "Native color pass requires the complete depth resolve on its device");
+    const RenderTexture* textures[] = {depth.tile_resolve->Output(), color_source.ResolvedTexture(impl_->gpu)};
+    return impl_->Render(draw, ps, textures);
+}
 }

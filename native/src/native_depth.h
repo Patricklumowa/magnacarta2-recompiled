@@ -65,6 +65,8 @@ class ColorRenderer {
     uint64_t Render(const DepthDraw& draw, std::span<const uint8_t> pixel_constants,
                     std::span<const SampledTexture* const> textures);
     uint64_t RenderResolved(const DepthDraw& draw, std::span<const uint8_t> pixel_constants, const ColorTarget& source);
+    uint64_t RenderResolved(const DepthDraw& draw, std::span<const uint8_t> pixel_constants,
+                            const DepthRenderer& depth_source, const ColorTarget& color_source);
  private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

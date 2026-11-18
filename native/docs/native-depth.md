@@ -324,5 +324,19 @@ The captured scene check verifies that every exported channel has the expected
 float16 value and the source survives the copy. A live boot without Xenos
 completed this resolve and cleared the 322 x 182 target for blur and bloom.
 Native storage for this single-sample target is RGBA16_SNORM. The color
-check verifies both signs and zero using GPU readback. The subsequent draw
-needs the signed fixed-point shader output conversion.
+check verifies both signs and zero using GPU readback.
+
+## Blur and bloom
+
+The first blur and bloom draw uses the native depth resolve and the graded
+HDR color texture. It runs over the 320 x 180 interior of the cleared target.
+The pixel shader uses specialization 8 of the repository's XenosRecomp
+patch to encode the signed fixed-point range into the native SNORM target.
+Put `vertex-shader.container`, `pixel-shader.container`, `vertex.dxil` and
+`pixel-fixed16.dxil` in the `bloom` subdirectory of the color shader directory.
+
+The D3D12 replay verified the one-pixel border and changed the input textures
+independently. The depth change altered 18,560 output alpha values and the
+color change altered all 57,600 interior red values in the diagnostic. A live
+boot without Xenos completed this draw with the original game parameters,
+then stopped at the resolve of the bloom target.
