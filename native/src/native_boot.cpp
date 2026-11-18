@@ -126,8 +126,9 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     std::optional<SceneSurface> fullscreen_surface;
     std::unique_ptr<ColorTarget> fullscreen_target;
     bool color_graded = false;
+    bool grade_resolved = false;
     bool scene_composited = false;
-    uint32_t fullscreen_copies = 0;
+    bool composition_resolved = false;
     std::optional<SceneSurface> bloom_surface;
     std::unique_ptr<ColorTarget> bloom_target;
     std::optional<SceneResolveTexture> bloom_texture;
@@ -268,7 +269,10 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             {
                 std::lock_guard lock(mutex);
                 if (!depth_surface) return false;
-                bloom = fullscreen_copies != 0;
+                Require(ctx.r3.u32 && ctx.r3.u32 == guest_device, "Color clear used an unknown device");
+                bloom = REX_LOAD_U32(ctx.r3.u32 + 10372) == 0x505a0;
+                Require(!bloom || (fullscreen_surface && depth_restored && (!color_graded || grade_resolved)),
+                        "Bloom clear requires the prepared scene color and depth");
             }
             const auto clear=bloom ? ReadBloomClear(ctx,base) : ReadSceneColorClear(ctx,base);
             Flush(base,ctx.r3.u32);
@@ -503,9 +507,9 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             std::lock_guard lock(mutex);
             Require(device && device == guest_device && depth_restored && !pending_up && !scanout_texture,
                     "Unexpected native indexed user-memory draw");
-            if (!fullscreen_copies) {
+            if (!fullscreen_surface) {
                 pass = SceneQuadPass::HdrCopy;
-                Require(fullscreen_shaders && !fullscreen_surface, "Indexed begin-UP draw requires the first fullscreen HDR shaders");
+                Require(bool(fullscreen_shaders), "Indexed begin-UP draw requires the first fullscreen HDR shaders");
                 scene = ReadSceneFullscreenDraw(ctx, base, *fullscreen_shaders, scene_textures[0], false);
             } else if (bloom_copies < 3) {
                 pass = SceneQuadPass::Bloom;
@@ -520,7 +524,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
                         three_tap_filter_shaders ? &*three_tap_filter_shaders : nullptr);
                 }
                 Require(*bloom_surface == scene.surface, "Bloom draw differs from its cleared surface");
-            } else if (fullscreen_copies == 1) {
+            } else if (!composition_resolved) {
                 pass = SceneQuadPass::Composition;
                 Require(composition_shaders && bloom_texture && !scene_composited,
                         "Fullscreen composition requires the three ready scene textures and translated shaders");
@@ -632,7 +636,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         Flush(base, ctx.r3.u32);
         std::lock_guard lock(mutex);
         auto scene = ReadSceneFullscreenDraw(ctx, base, *color_grade_shaders, scene_textures[0], true);
-        Require(fullscreen_target && fullscreen_surface && *fullscreen_surface == scene.surface && !color_graded,
+        Require(fullscreen_target && fullscreen_surface && *fullscreen_surface == scene.surface && !color_graded && !bloom_surface,
                 "Color grading requires the first fullscreen HDR target");
         const auto sampler = FullscreenColorSampler();
         auto blend = plume::RenderBlendDesc::Copy();
@@ -646,15 +650,18 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
 
     void ResolveFullscreen(const PPCContext& ctx, uint8_t* base) {
         std::lock_guard lock(mutex);
-        const bool ready = (fullscreen_copies == 0 && color_graded) || (fullscreen_copies == 1 && scene_composited);
-        Require(ctx.r3.u32 && ctx.r3.u32 == guest_device && ready && !fullscreen_resolve_shader.empty(),
+        const bool resolve_grade = color_graded && !grade_resolved && !bloom_surface;
+        const bool resolve_composition = scene_composited && !composition_resolved;
+        Require(ctx.r3.u32 && ctx.r3.u32 == guest_device && (resolve_grade || resolve_composition) &&
+                !fullscreen_resolve_shader.empty(),
                 "Fullscreen resolve requires the completed native pass and single-sample copy shader");
         const auto surface = ReadFullscreenResolve(ctx, base, scene_textures[0]);
         Require(*fullscreen_surface == surface, "Fullscreen resolve source differs from the drawn target");
         completed = color_target->OverwriteResolved(*fullscreen_target, -3, fullscreen_resolve_shader);
-        ++fullscreen_copies;
-        REXLOG_INFO("MC2 native scene: resolved fullscreen pass {} into scene texture {:#x}, exponent=-3, completed={}",
-                    fullscreen_copies, scene_textures[0].address, completed);
+        grade_resolved |= resolve_grade;
+        composition_resolved |= resolve_composition;
+        REXLOG_INFO("MC2 native scene: resolved {} HDR into scene texture {:#x}, exponent=-3, completed={}",
+                    resolve_composition ? "composed" : "graded", scene_textures[0].address, completed);
     }
 
     void ResolveBloom(const PPCContext& ctx, uint8_t* base) {
@@ -721,8 +728,9 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         scene_copies = 0;
         scene_tiles_retired = false;
         color_graded = false;
+        grade_resolved = false;
         scene_composited = false;
-        fullscreen_copies = 0;
+        composition_resolved = false;
         bloom_draws = bloom_copies = 0;
         overlay_draws = 0;
         scanout_texture = 0;
@@ -813,7 +821,7 @@ void TraceSceneResolve(const PPCContext& ctx, uint8_t* base) {
     if (!postprocess && ctx.lr != 0x826DA2D8 && ctx.lr != 0x826DA314) return;
     static std::atomic<uint32_t> tile_count = 0, postprocess_count = 0;
     auto& count = postprocess ? postprocess_count : tile_count;
-    constexpr uint32_t limit = 8;
+    const uint32_t limit = postprocess ? 16 : 8;
     if (count.load(std::memory_order_relaxed) >= limit || count.fetch_add(1, std::memory_order_relaxed) >= limit) return;
     using mc2::capture::ReadGuest;
     using mc2::capture::LoadBE32;

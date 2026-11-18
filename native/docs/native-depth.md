@@ -232,7 +232,7 @@ eight mip levels and starts from cleared depth. A live Start test completed
 both tiles and the depth restore for that scene.
 
 `--mc2_scene_resolve_trace=true` logs the first eight tiled resolve calls and
-the first eight untiled scene resolve calls on a native boot development build.
+the first sixteen untiled scene resolve calls on a native boot development build.
 The reference renderer observed two calls per
 tile, at masks `2` and `8`. Flags `0xf4000100` average color samples into a
 1280 x 720 RGBA16F texture and request a zero color clear. Flags `0x214` copy
@@ -352,6 +352,10 @@ with the bloom output and signed test values. Compile the shader into `bloom`:
 ```text
 dxc -T cs_6_0 -E main -HV 2021 -D MC2_SINGLE_SAMPLE=1 -D MC2_FIXED16_TO_UNORM=1 native/src/native_color_resolve.hlsl -Fo <color-shaders>/bloom/color-resolve.dxil
 ```
+
+When the game omits the RGB grade, bloom samples the HDR texture from the
+tiled resolve directly. A live Start test completed this route through the
+first bloom resolve.
 
 The two subsequent filter draws sample this texture with bilinear clamp
 sampling. Each writes to the retained signed target and resolves into the
