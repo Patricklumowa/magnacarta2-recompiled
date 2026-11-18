@@ -15,13 +15,13 @@ struct ColorTarget::Impl {
     std::unique_ptr<RenderFramebuffer> framebuffer;
     std::unique_ptr<RenderBuffer> readback;
     bool fully_initialized=false;
-    static constexpr auto format=RenderFormat::R16G16B16A16_FLOAT;
+    RenderRect cleared_rectangle;
 
     Impl(uint32_t w,uint32_t h,uint32_t count,std::shared_ptr<NativeDevice> context)
         : width(w),height(h),samples(count),gpu(std::move(context)) {
         Require(gpu && width && height && width<=8192 && height<=8192,"Invalid native color surface extent");
         Require(samples==1 || samples==2 || samples==4,"Unsupported native color sample count");
-        texture=gpu->device->createTexture(RenderTextureDesc::ColorTarget(width,height,format,RenderMultisampling(samples)));
+        texture=gpu->device->createTexture(RenderTextureDesc::ColorTarget(width,height,kFormat,RenderMultisampling(samples)));
         Require(bool(texture),"Native HDR surface allocation failed");
         const RenderTexture* attachment=texture.get();
         RenderFramebufferDesc desc;
@@ -46,13 +46,14 @@ struct ColorTarget::Impl {
         gpu->queue->executeCommandLists(commands.get(),gpu->fence.get());
         const auto completed=gpu->Complete();
         fully_initialized|=!rectangle || *rectangle==full;
+        cleared_rectangle=rectangle ? *rectangle : full;
         return completed;
     }
     std::vector<uint16_t> ReadPixels() {
         Require(fully_initialized,"Cannot read undefined pixels from a partially cleared native color target");
         const uint32_t pitch=(width*8+255)&~255u;
         if (!readback) readback=gpu->device->createBuffer(RenderBufferDesc::ReadbackBuffer(size_t(pitch)*height));
-        if (samples>1 && !resolved) resolved=gpu->device->createTexture(RenderTextureDesc::Texture2D(width,height,1,format));
+        if (samples>1 && !resolved) resolved=gpu->device->createTexture(RenderTextureDesc::Texture2D(width,height,1,kFormat));
         Require(readback && (samples==1 || resolved),"Native HDR readback allocation failed");
         auto& commands=gpu->commands;
         commands->begin();
@@ -64,7 +65,7 @@ struct ColorTarget::Impl {
             source=resolved.get();
         }
         commands->barriers(RenderBarrierStage::COPY,RenderTextureBarrier(source,RenderTextureLayout::COPY_SOURCE));
-        commands->copyTextureRegion(RenderTextureCopyLocation::PlacedFootprint(readback.get(),format,width,height,1,pitch/8),
+        commands->copyTextureRegion(RenderTextureCopyLocation::PlacedFootprint(readback.get(),kFormat,width,height,1,pitch/8),
                                     RenderTextureCopyLocation::Subresource(source));
         commands->end();
         gpu->queue->executeCommandLists(commands.get(),gpu->fence.get()); gpu->Complete();
@@ -82,4 +83,15 @@ ColorTarget::ColorTarget(uint32_t width,uint32_t height,uint32_t samples,std::sh
 ColorTarget::~ColorTarget()=default;
 uint64_t ColorTarget::Clear(RenderColor value,const RenderRect* rectangle) { return impl_->Clear(value,rectangle); }
 std::vector<uint16_t> ColorTarget::ReadPixels() { return impl_->ReadPixels(); }
+RenderTexture* ColorTarget::Attachment(const NativeDevice& gpu, uint32_t width, uint32_t height, uint32_t samples) {
+    Require(impl_->gpu.get() == &gpu && impl_->width == width && impl_->height == height && impl_->samples == samples,
+            "Native color and depth attachments must share a device, extent and sample count");
+    return impl_->texture.get();
+}
+void ColorTarget::RequireCleared(const RenderRect& rectangle) const {
+    const auto& cleared = impl_->cleared_rectangle;
+    Require(impl_->fully_initialized || (rectangle.left >= cleared.left && rectangle.top >= cleared.top &&
+            rectangle.right <= cleared.right && rectangle.bottom <= cleared.bottom),
+            "Native indexed draw touches an uninitialized color region");
+}
 }

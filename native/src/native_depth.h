@@ -4,6 +4,9 @@
 #include <vector>
 
 namespace mc2::native {
+class ColorTarget;
+class SampledTexture;
+class ColorRenderer;
 struct DepthConfiguration {
     uint32_t width = 0, height = 0;
     uint32_t sample_count = 1;
@@ -25,7 +28,7 @@ struct DepthResult {
     uint64_t completed_submission = 0;
     bool debug_layer = false;
 };
-// Native, single-stream float-input depth pass. Owns its target and pipeline,
+// Native, single-stream indexed depth pass. Owns its target and pipeline,
 // shares the actual device/queue with other pipelines. No implicit per-draw
 // clears. Stencil and 24-bit console depth quantization are not emulated.
 class DepthRenderer {
@@ -36,6 +39,22 @@ class DepthRenderer {
     // MSAA diagnostic readback resolves the greatest depth value per pixel.
     // This does not implement the game's surface resolve/copy contract.
     DepthResult Render(const DepthDraw& draw, bool read_pixels = false);
+ private:
+    friend class ColorRenderer;
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
+// Opaque indexed pass with one HDR color attachment and the retained depth
+// attachment. The targets must outlive the renderer. Each draw waits for its
+// GPU fence, so the caller may release its sampled textures when Render returns.
+class ColorRenderer {
+ public:
+    ColorRenderer(const DepthConfiguration& configuration, std::span<const uint8_t> pixel_shader,
+                  std::span<const plume::RenderSamplerDesc> samplers, DepthRenderer& depth, ColorTarget& color);
+    ~ColorRenderer();
+    uint64_t Render(const DepthDraw& draw, std::span<const uint8_t> pixel_constants,
+                    std::span<const SampledTexture* const> textures);
  private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

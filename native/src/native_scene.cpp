@@ -1,6 +1,7 @@
 #include "generated/default/magnacarta2_init.h"
 #include "native_scene.h"
 #include "native_shader_input.h"
+#include "native_sampled_texture.h"
 #include "guest_graphics_read.h"
 #include "draw_capture.h"
 #include <bit>
@@ -19,10 +20,12 @@ struct DeviceState {
     }
     uint32_t Word(uint32_t offset) const { return LoadBE32(bytes.data()+offset); }
     float Float(uint32_t offset) const { return std::bit_cast<float>(Word(offset)); }
-    SceneSurface Surface(uint8_t* base) const {
-        SceneSurface result;
+    void NoColorAttachments() const {
         for (uint32_t i = 0; i < 4; ++i)
-            Require(Word(12448+i*4) == 0, "Color-target scene passes are not implemented");
+            Require(Word(12448+i*4) == 0, "This native depth pass requires no color attachments");
+    }
+    SceneSurface DepthSurface(uint8_t* base, uint32_t height) const {
+        SceneSurface result;
         result.address = Word(12464);
         std::vector<uint8_t> descriptor;
         Require(ReadGuest(base,result.address,48,descriptor) && (LoadBE32(descriptor.data()) & 15) == 4,
@@ -30,8 +33,9 @@ struct DeviceState {
         const auto surface_info = LoadBE32(descriptor.data()+24), dimensions = LoadBE32(descriptor.data()+36);
         result.width = ((dimensions>>18)&16383)+1; result.height = ((dimensions>>3)&32767)+1;
         result.samples = 1u << ((surface_info>>16)&3);
-        Require(result.width == 1280 && result.height == 720 && result.samples == 2 &&
-                LoadBE32(descriptor.data()+32) == 17 && (surface_info & 16383) == 1280,
+        Require(result.width == 1280 && result.height == height && result.samples == 2 &&
+                LoadBE32(descriptor.data()+32) == 17 && (surface_info & 16383) == 1280 &&
+                Word(10376) == LoadBE32(descriptor.data()+28),
                 "Depth surface differs from the verified two-sample float format");
         result.description.assign(descriptor.begin()+24,descriptor.end());
         return result;
@@ -42,44 +46,17 @@ struct DeviceState {
                 "Scene viewport/scissor differs from the verified pass");
     }
 };
+
+SceneVertexShader LoadVertexShader(const std::filesystem::path& directory) {
+    auto reference = ReadNativeFile(directory / "vertex-shader.container");
+    auto inputs = ReadVertexInputs(reference);
+    return {std::move(reference), ReadNativeFile(directory / "vertex.dxil"), std::move(inputs)};
 }
-DepthShaders LoadDepthShaders(const std::filesystem::path& directory) {
-    DepthShaders shaders;
-    shaders.reference = ReadNativeFile(directory/"vertex-shader.container");
-    shaders.dxil = ReadNativeFile(directory/"vertex.dxil");
-    shaders.inputs = ReadVertexInputs(shaders.reference);
-    Require(shaders.inputs.size() == 3 && shaders.inputs[0].constant_only && shaders.inputs[0].usage == 0 &&
-            shaders.inputs[1] == VertexInput{10,0,95,40,0,3,false} &&
-            shaders.inputs[2] == VertexInput{5,0,95,40,24,2,false},
-            "Scene depth shader input layout differs from the verified shader");
-    return shaders;
-}
-DepthConfiguration ConfigureDepth(const SceneSurface& surface, const DepthShaders& shaders) {
-    DepthConfiguration configuration;
-    configuration.width=surface.width; configuration.height=surface.height; configuration.sample_count=surface.samples;
-    configuration.vertex_shader=shaders.dxil; configuration.inputs=shaders.inputs;
-    configuration.cull=plume::RenderCullMode::FRONT;
-    return configuration;
-}
-DepthClear ReadDepthClear(const PPCContext& ctx, uint8_t* base) {
-    Require(ctx.r4.u32 == 0x30, "Only the verified full depth/stencil clear is supported");
-    DeviceState state(base,ctx.r3.u32);
-    DepthClear clear; clear.surface=state.Surface(base); state.FullViewport(clear.surface);
-    std::vector<uint8_t> rect;
-    Require(ReadGuest(base,ctx.r5.u32,16,rect) && LoadBE32(rect.data()) == 0 && LoadBE32(rect.data()+4) == 0 &&
-            LoadBE32(rect.data()+8) == clear.surface.width && LoadBE32(rect.data()+12) == clear.surface.height,
-            "Only the verified full surface clear is supported");
-    Require(std::isfinite(ctx.f1.f64) && ctx.f1.f64 == 0, "Scene clear value differs from the verified zero depth/stencil clear");
-    clear.value=0;
-    return clear;
-}
-SceneColorClear ReadSceneColorClear(const PPCContext& ctx,uint8_t* base) {
-    Require(ctx.r4.u32==0xf,"Only the verified scene color clear is supported");
-    DeviceState state(base,ctx.r3.u32);
+
+SceneSurface ReadTiledColorSurface(const DeviceState& state, uint8_t* base) {
     Require(state.Word(12448)!=0 && state.Word(12452)==0 && state.Word(12456)==0 && state.Word(12460)==0,
-            "Native color clear requires the verified single attachment");
-    SceneColorClear clear;
-    auto& surface=clear.surface;
+            "Native scene requires the verified single color attachment");
+    SceneSurface surface;
     surface.address=state.Word(12448);
     std::vector<uint8_t> descriptor;
     Require(ReadGuest(base,surface.address,48,descriptor) && (LoadBE32(descriptor.data())&15)==4,
@@ -95,39 +72,24 @@ SceneColorClear ReadSceneColorClear(const PPCContext& ctx,uint8_t* base) {
             state.Word(12732)==surface.address && state.Word(12736)==surface.address &&
             state.Word(12740)==0 && state.Word(12744)==0 && state.Word(12748)==0 &&
             state.Word(12464)!=0 && state.Word(12752)==state.Word(12464),
-            "Scene color clear has an unsupported tiling configuration");
+            "Native scene has an unsupported tiling configuration");
     constexpr uint32_t tiles[]={0,0,1280,512,0,512,1280,720};
     for (uint32_t i=0;i<std::size(tiles);++i)
         Require(state.Word(12760+i*4)==tiles[i],"Scene tile rectangles changed");
-    // Engine begin-frame sets predicate bit 1 for the first tile before this
-    // clear. Other tiles are resolved/cleared later; never clear them early.
-    Require(state.Word(12724)==1 && state.Word(12716)==2 && state.Word(10932)==2,
-            "Scene color clear uses an unsupported tile predicate");
     surface.width=1280; surface.height=720; surface.samples=2;
     surface.description.assign(descriptor.begin()+24,descriptor.end());
     state.FullViewport(surface);
-    std::vector<uint8_t> rect,color;
-    Require(ReadGuest(base,ctx.r5.u32,16,rect) && LoadBE32(rect.data())==0 && LoadBE32(rect.data()+4)==0 &&
-            LoadBE32(rect.data()+8)==1280 && LoadBE32(rect.data()+12)==720,"Scene color clear rectangle changed");
-    Require(ReadGuest(base,ctx.r6.u32 ? ctx.r6.u32 : 0x82247720,16,color),"Unreadable scene clear color");
-    for (uint32_t i=0;i<4;++i) {
-        clear.value.rgba[i]=std::bit_cast<float>(LoadBE32(color.data()+i*4));
-        // Zero is exact in both the original 7e3/2-bit-alpha format and native
-        // float16 storage. General HDR quantization/blending is still pending.
-        Require(clear.value.rgba[i]==0,"Only the verified zero HDR clear is supported");
-    }
-    clear.rectangle=plume::RenderRect(0,0,1280,512);
-    return clear;
+    return surface;
 }
-SceneDepthDraw ReadSceneDepthDraw(const PPCContext& ctx, uint8_t* base, const DepthShaders& shaders) {
-    Require(ctx.r4.u32 == 4, "Only native triangle-list depth draws are supported");
-    DeviceState state(base,ctx.r3.u32);
-    SceneDepthDraw snapshot; snapshot.surface=state.Surface(base); state.FullViewport(snapshot.surface);
-    Require(state.Word(12700) == 0 && state.Word(11824) == 0, "Pixel shaders or declared scene inputs are not implemented");
+
+DepthDraw ReadGeometry(const PPCContext& ctx, uint8_t* base, const DeviceState& state,
+                       const SceneSurface& surface, const SceneVertexShader& shader) {
+    Require(ctx.r4.u32 == 4 && state.Word(11824) == 0,
+            "Native scene requires the verified triangle-list vertex inputs");
     Require(state.Word(10548) == 0x00700766 && state.Word(10568) == 0x00018002 && state.Word(10572) == 0x43f &&
             state.Word(10564) == 0x80000 && state.Word(10452) == 0 && state.Float(12672) == 1 && state.Float(12676) == 0,
             "Depth/stencil, culling, clipping, vertex base or viewport state differs from the verified pass");
-    Require(ReadBoundShader(base,state.Word(12704),true) == shaders.reference, "Untranslated native scene vertex shader");
+    Require(ReadBoundShader(base,state.Word(12704),true) == shader.reference, "Untranslated native scene vertex shader");
     Require(uint32_t(state.bytes[12536])*4 == 40, "Native scene vertex stride changed");
     std::vector<uint8_t> vertex_descriptor, index_descriptor, raw;
     uint32_t address=0,size=0;
@@ -138,7 +100,7 @@ SceneDepthDraw ReadSceneDepthDraw(const PPCContext& ctx, uint8_t* base, const De
     const auto physical_fetch=(vertex_address & 0x1fffffff) + (((vertex_address>>20)+512)&0x1000);
     Require(state.Word(1912) == physical_fetch && state.Word(1916) == LoadBE32(vertex_descriptor.data()+28),
             "Bound vertex fetch differs from its resource descriptor");
-    auto& draw=snapshot.draw;
+    DepthDraw draw;
     draw.vertices=NativeVertexBytes(raw,LoadBE32(vertex_descriptor.data()+28)&3);
     Require(ReadGuest(base,state.Word(12444),32,index_descriptor) &&
             (LoadBE32(index_descriptor.data()) & 0xf000000f) == 0xc0000002 &&
@@ -150,10 +112,116 @@ SceneDepthDraw ReadSceneDepthDraw(const PPCContext& ctx, uint8_t* base, const De
     draw.first_index=ctx.r5.u32; draw.index_count=ctx.r6.u32;
     draw.vertex_constants=NativeVertexBytes(std::span(state.bytes).subspan(1920,4096),2);
     draw.shared_constants.resize(512);
-    const float half_pixel[] = {1.0f/snapshot.surface.width,-1.0f/snapshot.surface.height};
+    const float half_pixel[] = {1.0f/surface.width,-1.0f/surface.height};
     std::memcpy(draw.shared_constants.data()+264,half_pixel,sizeof(half_pixel));
-    draw.viewport=plume::RenderViewport(0,0,float(snapshot.surface.width),float(snapshot.surface.height),1,0);
-    draw.scissor=plume::RenderRect(0,0,snapshot.surface.width,snapshot.surface.height);
+    const float x_scale = state.Float(10504), y_scale = state.Float(10512);
+    const float x = state.Float(10508) - x_scale, y = state.Float(10516) + y_scale;
+    Require(x_scale == float(surface.width) / 2 && y_scale == -float(surface.height) / 2 &&
+            std::abs(x) <= 0.5f && std::abs(y) <= 0.5f && state.Float(10520) == -1 && state.Float(10524) == 1,
+            "Native scene cached viewport transform differs");
+    draw.viewport=plume::RenderViewport(x,y,float(surface.width),float(surface.height),1,0);
+    draw.scissor=plume::RenderRect(0,0,surface.width,surface.height);
+    return draw;
+}
+}
+
+SceneVertexShader LoadDepthShaders(const std::filesystem::path& directory) {
+    auto shader = LoadVertexShader(directory);
+    const std::vector<VertexInput> expected = {{0,0,95,40,0,4,true}, {10,0,95,40,0,3}, {5,0,95,40,24,2}};
+    Require(shader.inputs == expected, "Scene depth shader input layout differs from the verified shader");
+    return shader;
+}
+SceneColorShaders LoadColorShaders(const std::filesystem::path& directory) {
+    auto vertex = LoadVertexShader(directory);
+    const std::vector<VertexInput> expected = {
+        {0,0,95,40,0,4,true}, {6,0,95,40,0,3}, {7,0,95,40,12,4,false,VertexStorage::UInt8},
+        {3,0,95,40,16,4,false,VertexStorage::UInt8}, {10,0,95,40,20,4,false,VertexStorage::UInt8}, {5,0,95,40,24,2}
+    };
+    Require(vertex.inputs == expected, "Scene color shader input layout differs from the verified shader");
+    return {std::move(vertex), ReadNativeFile(directory / "pixel-shader.container"), ReadNativeFile(directory / "pixel.dxil")};
+}
+DepthConfiguration ConfigureDepth(const SceneSurface& surface, const SceneVertexShader& shader) {
+    DepthConfiguration configuration;
+    configuration.width=surface.width; configuration.height=surface.height; configuration.sample_count=surface.samples;
+    configuration.vertex_shader=shader.dxil; configuration.inputs=shader.inputs;
+    configuration.cull=plume::RenderCullMode::FRONT;
+    return configuration;
+}
+DepthClear ReadDepthClear(const PPCContext& ctx, uint8_t* base) {
+    Require(ctx.r4.u32 == 0x30, "Only the verified full depth/stencil clear is supported");
+    DeviceState state(base,ctx.r3.u32);
+    state.NoColorAttachments();
+    DepthClear clear; clear.surface=state.DepthSurface(base,720); state.FullViewport(clear.surface);
+    std::vector<uint8_t> rect;
+    Require(ReadGuest(base,ctx.r5.u32,16,rect) && LoadBE32(rect.data()) == 0 && LoadBE32(rect.data()+4) == 0 &&
+            LoadBE32(rect.data()+8) == clear.surface.width && LoadBE32(rect.data()+12) == clear.surface.height,
+            "Only the verified full surface clear is supported");
+    Require(std::isfinite(ctx.f1.f64) && ctx.f1.f64 == 0, "Scene clear value differs from the verified zero depth/stencil clear");
+    return clear;
+}
+SceneColorClear ReadSceneColorClear(const PPCContext& ctx,uint8_t* base) {
+    Require(ctx.r4.u32==0xf,"Only the verified scene color clear is supported");
+    DeviceState state(base,ctx.r3.u32);
+    SceneColorClear clear;
+    clear.surface = ReadTiledColorSurface(state, base);
+    // Begin-frame selects the first tile explicitly before clearing it.
+    Require(state.Word(12724)==1 && state.Word(12716)==2 && state.Word(10932)==2,
+            "Scene color clear uses an unsupported tile predicate");
+    std::vector<uint8_t> rect,color;
+    Require(ReadGuest(base,ctx.r5.u32,16,rect) && LoadBE32(rect.data())==0 && LoadBE32(rect.data()+4)==0 &&
+            LoadBE32(rect.data()+8)==1280 && LoadBE32(rect.data()+12)==720,"Scene color clear rectangle changed");
+    Require(ReadGuest(base,ctx.r6.u32 ? ctx.r6.u32 : 0x82247720,16,color),"Unreadable scene clear color");
+    for (uint32_t i=0;i<4;++i) {
+        clear.value.rgba[i]=std::bit_cast<float>(LoadBE32(color.data()+i*4));
+        Require(clear.value.rgba[i]==0,"Only the verified zero HDR clear is supported");
+    }
+    clear.rectangle=plume::RenderRect(0,0,1280,512);
+    return clear;
+}
+SceneDepthDraw ReadSceneDepthDraw(const PPCContext& ctx, uint8_t* base, const SceneVertexShader& shader) {
+    DeviceState state(base, ctx.r3.u32);
+    state.NoColorAttachments();
+    const auto surface = state.DepthSurface(base,720);
+    state.FullViewport(surface);
+    Require(state.Word(12700) == 0, "Native depth pass has a bound pixel shader");
+    return {surface, ReadGeometry(ctx, base, state, surface, shader)};
+}
+SceneColorDraw ReadSceneColorDraw(const PPCContext& ctx, uint8_t* base, const SceneColorShaders& shaders) {
+    DeviceState state(base, ctx.r3.u32);
+    SceneColorDraw snapshot;
+    snapshot.color_surface = ReadTiledColorSurface(state, base);
+    snapshot.tile_depth = state.DepthSurface(base,512);
+    Require(state.Word(12724) == 0 && state.Word(12716) == UINT32_MAX && state.Word(10932) == 0 &&
+            state.Word(12728) == 2, "Native color draw requires the verified automatic tile predicate");
+    // Full color write, copy blend, and no alpha test or alpha-to-coverage.
+    Require(state.Word(10460) == 0xf && state.Word(10552) == 0x10001 && (state.Word(10556) & 0x1f) == 7,
+            "Native color draw has unsupported color write, blend or alpha state");
+    Require(ReadBoundShader(base, state.Word(12700), false) == shaders.pixel_reference,
+            "Untranslated native scene pixel shader");
+    snapshot.draw = ReadGeometry(ctx, base, state, snapshot.color_surface, shaders.vertex);
+    snapshot.pixel_constants = NativeVertexBytes(std::span(state.bytes).subspan(6016,4096),2);
+    for (uint32_t slot = 0; slot < snapshot.textures.size(); ++slot) {
+        auto& texture = snapshot.textures[slot];
+        std::string error;
+        if (!mc2::texture::DescribeBlockTexture(std::span(state.bytes).subspan(1152 + slot * 24, 24), texture, error))
+            throw std::runtime_error(error);
+        const auto& words = texture.fetch_words;
+        Require((words[0] & 0x0007fc00) == 0 && words[3] == 0x06280d10 && words[4] == 0x983 &&
+                (words[5] & 0x1ff) == 0 && texture.format == (slot ? 20u : 18u) &&
+                texture.mip_min_level == 0 && texture.mip_max_level == 6,
+                "Native scene block texture or sampler state changed");
+        // Both fetch instructions use the bound filter settings. The reference
+        // D3D12 sampler selects anisotropic filtering with a 4:1 limit for this state.
+        auto& sampler = snapshot.samplers[slot];
+        sampler.anisotropyEnabled = true;
+        sampler.maxAnisotropy = 4;
+        sampler.maxLOD = float(texture.mip_max_level);
+        auto* shared = snapshot.draw.shared_constants.data();
+        const auto mode = PackTextureFetchMode(texture.swizzle, texture.gamma_mask, texture.exp_adjust);
+        std::memcpy(shared + slot * 4, &slot, sizeof(slot));
+        std::memcpy(shared + 192 + slot * 4, &slot, sizeof(slot));
+        std::memcpy(shared + 288 + slot * 4, &mode, sizeof(mode));
+    }
     return snapshot;
 }
 }

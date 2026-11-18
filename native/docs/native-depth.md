@@ -134,8 +134,7 @@ tile early or infer the scene extent from viewport dimensions alone.
 The observed color format is 7e3 RGB with two-bit normalized alpha. Native
 storage uses RGBA16_FLOAT; currently only the observed zero clear is accepted,
 which is exact in both formats. General color quantization, blending, tiled
-draw replay, depth sharing and game resolves remain unfinished. No color draw
-is allowed to proceed using these unimplemented operations.
+draw ordering, depth sharing across tile aliases and game resolves remain unfinished.
 
 `ColorTarget` retains its two-sample allocation on the shared native device and
 completes its real fence after the clear. Diagnostic readback is optional and
@@ -181,3 +180,36 @@ native color pass. No game-derived texture payload is included in the repository
 
 Transfer alignment follows Microsoft's
 [texture upload documentation](https://learn.microsoft.com/en-us/windows/win32/direct3d12/upload-and-readback-of-texture-data).
+
+## Indexed color replay
+
+The offline check submits the first color draw with its captured indexed
+geometry, shaders, constants and two block-compressed textures. It runs on
+the same device, queue and depth attachment as the preceding prepass. Both
+passes preserve the observed viewport offset of (-0.25, +0.25) pixels. The
+color pass maps the observed copy blend, full color write, disabled alpha test
+and two-sample HDR target. It selects the first tile's cleared rectangle for
+this diagnostic replay.
+
+Put the first color draw's `vertex-shader.container` and `pixel-shader.container`
+in a local directory with `vertex.dxil` and `pixel.dxil`, compiled with the
+patched XenosRecomp converter and pixel specialization flags zero. Use the
+schema 4 draw capture so the two textures include every raw mip.
+
+```text
+mc2_native_scene_check <depth-capture> <depth-shaders> <color-capture> <color-shaders> out/color-diagnostic.rgba16f
+```
+
+In the first tile, 29,417 pixels receive the color pass, matching the retained
+depth coverage. The recorded lighting constants yield zero RGB and finite
+alpha on covered pixels. A second pass with diagnostic lighting produces HDR
+color from the captured textures, and toggling the diffuse gamma interpretation
+changes the red channel in all 29,417 covered pixels. The check also verifies
+that writes stay within the tile, uncleared attachments reject draws and a closer
+depth clear rejects the geometry. The output file is the diagnostic lighting
+readback. The D3D12 debug layer was unavailable during validation.
+
+The replay uses the native float16 attachment and D3D12 sample positions.
+Console 7e3 color, two-bit alpha storage, float24 depth and sample locations
+still need validation against the original backend. Native boot currently
+stops before this color draw while its tile lifetime and resolves are mapped.

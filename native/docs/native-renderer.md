@@ -42,8 +42,10 @@ Full live scene composition is not implemented.
 
 Native BC1/BC3 texture uploads also preserve all captured mip levels. GPU
 readback of the first color draw's two textures matches every compressed byte.
-This is storage validation; native color drawing and texture sampling remain
-unfinished. See [compressed scene textures](native-depth.md#compressed-scene-textures).
+An offline D3D12 replay now uses those textures and the actual shaders for the
+first indexed color draw. Its upper tile agrees with the prepass coverage and
+the diagnostic lighting check exercises texture sampling and gamma. Live tile
+ordering and resolves remain unfinished. See [indexed color replay](native-depth.md#indexed-color-replay).
 
 The optional bounded live movie comparison uses the same native drawing code
 on live guest inputs. Two movie draws passed the CPU comparison during a clean

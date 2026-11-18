@@ -33,7 +33,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     std::mutex mutex;
     std::shared_ptr<NativeDevice> gpu;
     std::unique_ptr<QuadRenderer> renderer;
-    std::optional<DepthShaders> depth_shaders;
+    std::optional<SceneVertexShader> depth_shaders;
     std::optional<SceneSurface> depth_surface,color_surface;
     std::unique_ptr<DepthRenderer> depth_renderer;
     std::unique_ptr<ColorTarget> color_target;

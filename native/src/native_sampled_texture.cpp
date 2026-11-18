@@ -109,5 +109,6 @@ SampledTexture::SampledTexture(RenderFormat format,uint32_t width,uint32_t heigh
     : impl_(std::make_unique<Impl>(format,width,height,mips,std::move(gpu))) {}
 SampledTexture::~SampledTexture()=default;
 const RenderTexture* SampledTexture::Texture() const { return impl_->texture.get(); }
+const NativeDevice& SampledTexture::Device() const { return *impl_->gpu; }
 std::vector<std::vector<uint8_t>> SampledTexture::ReadBlocks() { return impl_->ReadBlocks(); }
 }

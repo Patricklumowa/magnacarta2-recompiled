@@ -16,6 +16,7 @@ class SampledTexture {
                    std::span<const std::vector<uint8_t>> mips, std::shared_ptr<NativeDevice> gpu);
     ~SampledTexture();
     const plume::RenderTexture* Texture() const;
+    const NativeDevice& Device() const;
     std::vector<std::vector<uint8_t>> ReadBlocks(); // Diagnostic GPU readback only.
  private:
     struct Impl;
