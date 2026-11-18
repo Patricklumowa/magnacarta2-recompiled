@@ -712,7 +712,8 @@ ScenePassShaders LoadMenuFanShaders(const std::filesystem::path& directory) {
     return {std::move(vertex), ReadNativeFile(directory / "pixel-shader.container"), ReadNativeFile(directory / "pixel.dxil")};
 }
 
-SceneMenuFan ReadMenuFan(const PPCContext& ctx, uint8_t* base, const ScenePassShaders& shaders) {
+SceneMenuFan ReadMenuFan(const PPCContext& ctx, uint8_t* base, const ScenePassShaders& base_shaders,
+                         const ScenePassShaders* additive_shaders) {
     Require(ctx.lr == 0x826D9A60 && ctx.r4.u32 == 5 && ctx.r5.u32 == 4 && ctx.r6.u32 == 32,
             "Unsupported menu triangle fan");
     const DeviceState state(base, ctx.r3.u32);
@@ -720,13 +721,22 @@ SceneMenuFan ReadMenuFan(const PPCContext& ctx, uint8_t* base, const ScenePassSh
     auto& pass = menu.pass;
     pass.surface = ReadFullscreenColorSurface(state, base, 0x2d0);
     Require(state.Word(12464) == 0, "Menu fan needs only the back buffer");
-    RequireFullscreenDrawState(state, pass.surface, false, 15, 0x18002);
-    Require(ReadBoundShader(base, state.Word(12704), true) == shaders.vertex.reference &&
-            ReadBoundShader(base, state.Word(12700), false) == shaders.pixel_reference, "Untranslated menu fan shaders");
+    constexpr uint32_t additive_blend = 0x01000106;
+    const bool additive = state.Word(10552) == additive_blend;
+    RequireFullscreenDrawState(state, pass.surface, false, 15, 0x18002, additive ? additive_blend : 0x10001);
+    pass.shaders = additive ? additive_shaders : &base_shaders;
+    Require(pass.shaders && ReadBoundShader(base, state.Word(12704), true) == pass.shaders->vertex.reference &&
+            ReadBoundShader(base, state.Word(12700), false) == pass.shaders->pixel_reference, "Untranslated menu fan shaders");
     ReadFullscreenConstants(state, pass.surface, pass.draw, pass.pixel_constants, false);
-    for (uint32_t slot = 0; slot < menu.textures.size(); ++slot)
-        ReadBlockSceneTexture(state, slot, slot ? 18u : 20u, pass.draw, menu.textures[slot], menu.samplers[slot]);
-    Require(menu.textures[1].mip_max_level == 0 && menu.textures[2].mip_max_level == 0,
+    menu.texture_count = additive ? 1 : 3;
+    menu.blend = plume::RenderBlendDesc::Copy();
+    if (additive) {
+        menu.blend = OverlayBlend();
+        menu.blend.dstBlend = plume::RenderBlend::ONE;
+    }
+    for (uint32_t slot = 0; slot < menu.texture_count; ++slot)
+        ReadBlockSceneTexture(state, slot, slot || additive ? 18u : 20u, pass.draw, menu.textures[slot], menu.samplers[slot]);
+    Require(additive || (menu.textures[1].mip_max_level == 0 && menu.textures[2].mip_max_level == 0),
             "Menu fan detail textures require base-level sampling");
     return menu;
 }

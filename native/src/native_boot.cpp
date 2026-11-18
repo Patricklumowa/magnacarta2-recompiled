@@ -119,7 +119,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     std::optional<ScenePassShaders> fullscreen_shaders, color_grade_shaders;
     std::optional<ScenePassShaders> bloom_shaders, composition_shaders, back_buffer_shaders;
     std::vector<ScenePassShaders> filter_shaders;
-    std::optional<ScenePassShaders> overlay_shaders, menu_fan_shaders;
+    std::optional<ScenePassShaders> overlay_shaders, menu_fan_shaders, menu_fan_additive_shaders;
     std::vector<uint8_t> fullscreen_resolve_shader, bloom_resolve_shader;
     std::vector<uint8_t> present_vertex_shader, present_pixel_shader;
     std::optional<SceneSurface> depth_surface,color_surface;
@@ -184,6 +184,9 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             if (std::filesystem::is_directory(overlay_directory)) overlay_shaders = LoadFullscreenColorShaders(overlay_directory, false, "pixel.dxil");
             const auto menu_fan_directory = fullscreen_directory / "menu-fan";
             if (std::filesystem::is_directory(menu_fan_directory)) menu_fan_shaders = LoadMenuFanShaders(menu_fan_directory);
+            const auto menu_additive_directory = menu_fan_directory / "additive";
+            if (std::filesystem::is_directory(menu_additive_directory))
+                menu_fan_additive_shaders = LoadMenuFanShaders(menu_additive_directory);
             const auto present_directory = fullscreen_directory / "present";
             if (std::filesystem::is_directory(present_directory)) {
                 present_vertex_shader = ReadNativeFile(present_directory / "vertex.dxil");
@@ -587,7 +590,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             std::lock_guard lock(mutex);
             Require(device && device == guest_device && back_buffer_surface && menu_fan_shaders &&
                     !pending_up && !pending_menu_fan && !scanout_texture, "Menu fan requires the ready back buffer and shaders");
-            scene = ReadMenuFan(ctx, base, *menu_fan_shaders);
+            scene = ReadMenuFan(ctx, base, *menu_fan_shaders, menu_fan_additive_shaders ? &*menu_fan_additive_shaders : nullptr);
             Require(*back_buffer_surface == scene.pass.surface, "Menu fan target differs from the back buffer");
         }
         __imp__sub_828648A8(ctx, base);
@@ -609,16 +612,19 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         ReadMenuFanVertices(scene.pass.draw, base, up.vertices);
         std::array<std::unique_ptr<SampledTexture>, 3> textures;
         std::array<const SampledTexture*, 3> bindings;
-        for (size_t i = 0; i < textures.size(); ++i) {
+        for (size_t i = 0; i < scene.texture_count; ++i) {
             textures[i] = UploadSceneTexture(base, scene.textures[i], gpu);
             bindings[i] = textures[i].get();
         }
-        auto& renderer = QuadRendererFor(scene.pass.surface, *menu_fan_shaders, scene.samplers, *back_buffer,
-            plume::RenderBlendDesc::Copy(), plume::RenderCullMode::FRONT);
-        completed = renderer.Render(scene.pass.draw, scene.pass.pixel_constants, bindings);
+        auto& renderer = QuadRendererFor(scene.pass.surface, *scene.pass.shaders,
+            std::span(scene.samplers).first(scene.texture_count), *back_buffer, scene.blend, plume::RenderCullMode::FRONT);
+        completed = renderer.Render(scene.pass.draw, scene.pass.pixel_constants, std::span(bindings).first(scene.texture_count));
+        const auto texture_count = scene.texture_count;
+        const bool additive = scene.blend.blendEnabled;
         ++overlay_draws;
         pending_menu_fan.reset();
-        REXLOG_INFO("MC2 native scene: drew menu triangle fan with three textures, completed={}", completed);
+        REXLOG_INFO("MC2 native scene: drew {} menu triangle fan, bindings={}, completed={}",
+                    additive ? "additive" : "base", texture_count, completed);
     }
 
     void CompleteIndexedUp(uint8_t* base) {

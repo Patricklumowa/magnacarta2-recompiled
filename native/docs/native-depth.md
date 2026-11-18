@@ -408,8 +408,10 @@ in the guest, and D3D12 renders the fan as two triangles in the same RGBA8
 target. Put its shader containers and `vertex.dxil` and `pixel.dxil` in
 `fullscreen/menu-fan`.
 
-A live test completed this first fan, then reached a second fan with
-different raster state.
+The second fan adds source color scaled by source alpha and retains the
+destination alpha. Its shader reads one BC1 texture. Put this shader pair
+in `fullscreen/menu-fan/additive`. A live Start test completed both fans
+and presented four frames before reaching another shader pair.
 
 ## Scene presentation
 
