@@ -652,9 +652,13 @@ SceneFullscreenDraw ReadBackBufferOverlay(const PPCContext& ctx, uint8_t* base,
     Require(ReadBoundShader(base, state.Word(12704), true) == shaders.vertex.reference &&
             ReadBoundShader(base, state.Word(12700), false) == shaders.pixel_reference, "Untranslated overlay shaders");
     const auto fetch = std::span(state.bytes).subspan(1152, 24);
-    Require(state.Word(12552) && !(state.Word(1152) & 0x0007fc00) &&
-            (state.Word(1164) & 0xffffe000) == 0x06280000 && state.Word(1168) == 0x803 &&
-            !(state.Word(1172) & 0x1ff), "Unsupported overlay texture sampler");
+    const auto word0 = state.Word(1152), word3 = state.Word(1164), word4 = state.Word(1168), word5 = state.Word(1172);
+    constexpr uint32_t mip_max_mask = 15u << 6;
+    if (!state.Word(12552) || (word0 & 0x0007fc00) || (word3 & 0xffffe000) != 0x06280000 ||
+        (word4 & ~mip_max_mask) != 0x803 || (word5 & 0x1ff)) {
+        throw std::runtime_error(std::format("Unsupported overlay texture format {} sampler {:#x}/{:#x}/{:#x}/{:#x}",
+                                            state.Word(1156) & 63, word0, word3, word4, word5));
+    }
     ReadFullscreenConstants(state, pass.surface, pass.draw, pass.pixel_constants, false);
     std::string error;
     uint32_t mode;
@@ -668,7 +672,8 @@ SceneFullscreenDraw ReadBackBufferOverlay(const PPCContext& ctx, uint8_t* base,
     } else {
         mc2::texture::BlockTexture texture;
         if (!mc2::texture::DescribeBlockTexture(fetch, texture, error)) throw std::runtime_error(error);
-        Require(texture.mip_min_level == 0 && texture.mip_max_level == 0, "Overlay atlas needs its base level");
+        Require(texture.mip_min_level == 0, "Overlay atlas needs its base level");
+        binding.max_mip_level = texture.mip_max_level;
         mode = PackTextureFetchMode(texture.swizzle, texture.gamma_mask, texture.exp_adjust);
         binding.texture = std::move(texture);
     }
@@ -697,11 +702,11 @@ plume::RenderBlendDesc OverlayBlend() {
     return blend;
 }
 
-plume::RenderSamplerDesc OverlaySampler() {
+plume::RenderSamplerDesc OverlaySampler(uint32_t max_mip_level) {
     plume::RenderSamplerDesc sampler;
     sampler.anisotropyEnabled = true;
     sampler.maxAnisotropy = 4;
-    sampler.maxLOD = 0;
+    sampler.maxLOD = float(max_mip_level);
     return sampler;
 }
 

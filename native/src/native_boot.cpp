@@ -18,7 +18,6 @@
 #include <optional>
 #include <bit>
 #include <stdexcept>
-#include <unordered_map>
 
 REXCVAR_DEFINE_BOOL(mc2_native_boot, false, "Development", "Experimental native movie boot; unsupported operations fail");
 REXCVAR_DEFINE_STRING(mc2_native_boot_shader_dir, "", "Development", "Verified first-draw movie shader inputs for native boot");
@@ -98,6 +97,11 @@ struct PendingUpDraw {
     SceneQuadPass pass;
     std::optional<SceneOverlayBinding> overlay;
 };
+struct CachedQuadRenderer {
+    const ScenePassShaders* program;
+    float max_lod;
+    std::unique_ptr<ColorRenderer> renderer;
+};
 
 class NativeGraphics final : public rex::system::IGraphicsSystem {
  public:
@@ -135,7 +139,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     uint32_t bloom_draws = 0, bloom_copies = 0;
     std::unique_ptr<ColorTarget> back_buffer;
     std::optional<SceneSurface> back_buffer_surface;
-    std::unordered_map<const ScenePassShaders*, std::unique_ptr<ColorRenderer>> quad_renderers;
+    std::vector<CachedQuadRenderer> quad_renderers;
     uint32_t overlay_draws = 0;
     uint32_t scanout_texture = 0;
     plume::RenderRect cleared_tile;
@@ -555,15 +559,17 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             std::span<const plume::RenderSamplerDesc> samplers, ColorTarget& target,
             plume::RenderBlendDesc blend = plume::RenderBlendDesc::Copy(),
             plume::RenderCullMode cull = plume::RenderCullMode::NONE) {
-        // Each program belongs to one pass with a stable attachment and
-        // sampler layout. The draw updates its texture descriptors and bytes.
-        if (const auto existing = quad_renderers.find(&program); existing != quad_renderers.end())
-            return *existing->second;
+        // Only the first sampler's upper mip level varies within a pass.
+        const float max_lod = samplers.front().maxLOD;
+        const auto existing = std::find_if(quad_renderers.begin(), quad_renderers.end(), [&](const CachedQuadRenderer& cache) {
+            return cache.program == &program && cache.max_lod == max_lod;
+        });
+        if (existing != quad_renderers.end()) return *existing->renderer;
         auto configuration = ConfigureDepth(surface, program.vertex);
         configuration.cull = cull;
         auto pipeline = std::make_unique<ColorRenderer>(configuration, program.pixel_dxil, samplers, target, blend);
         auto* result = pipeline.get();
-        quad_renderers.emplace(&program, std::move(pipeline));
+        quad_renderers.push_back({&program, max_lod, std::move(pipeline)});
         return *result;
     }
 
@@ -611,7 +617,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             back_buffer_surface = surface;
             REXLOG_INFO("MC2 native scene: drew gamma and overlay into RGBA8 back buffer {:#x}, completed={}", surface.address, completed);
         } else if (up.pass == SceneQuadPass::Overlay) {
-            const auto overlay_sampler = OverlaySampler();
+            const auto overlay_sampler = OverlaySampler(up.overlay->max_mip_level);
             auto& renderer = QuadRendererFor(surface, *overlay_shaders, std::span(&overlay_sampler,1), *back_buffer, OverlayBlend());
             auto texture = std::visit([&](const auto& source) { return UploadSceneTexture(base, source, gpu); }, up.overlay->texture);
             const auto* sampled = texture.get();

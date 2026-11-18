@@ -67,6 +67,7 @@ struct SceneFullscreenDraw {
 struct SceneOverlayBinding {
     std::variant<mc2::texture::BaseRGBA8, mc2::texture::BlockTexture> texture;
     uint32_t vertex_count = 0, index_count = 0;
+    uint32_t max_mip_level = 0;
 };
 struct SceneTileResolve {
     SceneSurface color, depth;
@@ -113,7 +114,7 @@ SceneFullscreenDraw ReadBackBufferOverlay(const PPCContext& context, uint8_t* ba
 void ReadOverlayUpVertices(DepthDraw& draw, uint8_t* base, uint32_t address, uint32_t index_address,
     const SceneOverlayBinding& binding);
 plume::RenderBlendDesc OverlayBlend();
-plume::RenderSamplerDesc OverlaySampler();
+plume::RenderSamplerDesc OverlaySampler(uint32_t max_mip_level = 0);
 uint32_t ReadScanoutResolve(const PPCContext& context, uint8_t* base, const SceneSurface& back_buffer);
 std::pair<SceneSurface, SceneResolveTexture> ReadBloomResolve(const PPCContext& context, uint8_t* base);
 }
