@@ -84,6 +84,9 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     std::optional<SceneSurface> depth_surface,color_surface;
     std::unique_ptr<DepthRenderer> depth_renderer;
     std::unique_ptr<ColorTarget> color_target;
+    std::optional<SceneSurface> stencil_surface;
+    std::unique_ptr<plume::RenderTexture> stencil_target;
+    std::unique_ptr<plume::RenderFramebuffer> stencil_framebuffer;
     plume::RenderRect cleared_tile;
     std::optional<DepthDraw> prepass_draw;
     std::optional<TiledSceneDraw> scene_draw;
@@ -122,6 +125,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     void Shutdown() override {
         std::lock_guard lock(mutex);
         prepass_draw.reset(); scene_draw.reset();
+        stencil_framebuffer.reset(); stencil_target.reset();
         pending.reset(); renderer.reset(); depth_renderer.reset(); color_target.reset(); gpu.reset();
     }
     void SetInterruptCallback(uint32_t callback, uint32_t user_data) override {
@@ -133,8 +137,38 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     }
     void EnableReadPointerWriteBack(uint32_t, uint32_t) override {}
 
+    void ClearStencil(const PPCContext& ctx, uint8_t* base) {
+        using namespace plume;
+        const auto surface = ReadSceneStencilClear(ctx, base);
+        Flush(base, ctx.r3.u32);
+        std::lock_guard lock(mutex);
+        Require(scene_tiles_retired && !stencil_surface, "Unexpected native stencil clear outside the first postprocess pass");
+        stencil_target = gpu->device->createTexture(RenderTextureDesc::DepthTarget(
+            surface.width, surface.height, RenderFormat::D32_FLOAT_S8_UINT));
+        Require(bool(stencil_target), "Native stencil allocation failed");
+        RenderFramebufferDesc desc;
+        desc.depthAttachment = stencil_target.get();
+        stencil_framebuffer = gpu->device->createFramebuffer(desc);
+        Require(bool(stencil_framebuffer), "Native stencil framebuffer creation failed");
+        auto& commands = gpu->commands;
+        commands->begin();
+        commands->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(stencil_target.get(), RenderTextureLayout::DEPTH_WRITE));
+        commands->setFramebuffer(stencil_framebuffer.get());
+        commands->clearDepthStencil(false, true, 0, 0, nullptr, 0);
+        commands->end();
+        gpu->queue->executeCommandLists(commands.get(), gpu->fence.get());
+        completed = gpu->Complete();
+        stencil_surface = surface;
+        REXLOG_INFO("MC2 native scene: cleared {}x{} single-sample stencil surface {:#x}, completed={}",
+                    surface.width, surface.height, surface.address, completed);
+    }
+
     bool Clear(const PPCContext& ctx, uint8_t* base) {
         if (!depth_shaders) return false;
+        if (ctx.r4.u32 == 0x20) {
+            ClearStencil(ctx, base);
+            return true;
+        }
         if (!(ctx.r4.u32 & 0x30)) {
             {
                 std::lock_guard lock(mutex);

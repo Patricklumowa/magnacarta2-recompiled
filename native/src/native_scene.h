@@ -58,6 +58,7 @@ SceneVertexShader LoadDepthShaders(const std::filesystem::path& directory);
 SceneColorShaders LoadColorShaders(const std::filesystem::path& directory);
 DepthConfiguration ConfigureDepth(const SceneSurface& surface, const SceneVertexShader& shader);
 DepthClear ReadDepthClear(const PPCContext& context, uint8_t* base);
+SceneSurface ReadSceneStencilClear(const PPCContext& context, uint8_t* base);
 SceneColorClear ReadSceneColorClear(const PPCContext& context, uint8_t* base);
 SceneDepthDraw ReadSceneDepthDraw(const PPCContext& context, uint8_t* base, const SceneVertexShader& shader);
 SceneColorDraw ReadSceneColorDraw(const PPCContext& context, uint8_t* base, const SceneColorShaders& shaders);

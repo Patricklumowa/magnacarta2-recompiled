@@ -25,7 +25,7 @@ struct DeviceState {
         for (uint32_t i = 0; i < 4; ++i)
             Require(Word(12448+i*4) == 0, "This native depth pass requires no color attachments");
     }
-    SceneSurface DepthSurface(uint8_t* base, uint32_t height) const {
+    SceneSurface DepthSurface(uint8_t* base, uint32_t height, uint32_t samples = 2) const {
         SceneSurface result;
         result.address = Word(12464);
         std::vector<uint8_t> descriptor;
@@ -34,10 +34,10 @@ struct DeviceState {
         const auto surface_info = LoadBE32(descriptor.data()+24), dimensions = LoadBE32(descriptor.data()+36);
         result.width = ((dimensions>>18)&16383)+1; result.height = ((dimensions>>3)&32767)+1;
         result.samples = 1u << ((surface_info>>16)&3);
-        Require(result.width == 1280 && result.height == height && result.samples == 2 &&
+        Require(result.width == 1280 && result.height == height && result.samples == samples &&
                 LoadBE32(descriptor.data()+32) == 17 && (surface_info & 16383) == 1280 &&
                 Word(10376) == LoadBE32(descriptor.data()+28),
-                "Depth surface differs from the verified two-sample float format");
+                "Depth surface differs from the verified float depth/stencil layout");
         result.description.assign(descriptor.begin()+24,descriptor.end());
         return result;
     }
@@ -47,6 +47,13 @@ struct DeviceState {
                 "Scene viewport/scissor differs from the verified pass");
     }
 };
+
+void RequireFullClearRect(const PPCContext& ctx, uint8_t* base, const SceneSurface& surface) {
+    std::vector<uint8_t> rectangle;
+    Require(ReadGuest(base, ctx.r5.u32, 16, rectangle) && LoadBE32(rectangle.data()) == 0 &&
+            LoadBE32(rectangle.data() + 4) == 0 && LoadBE32(rectangle.data() + 8) == surface.width &&
+            LoadBE32(rectangle.data() + 12) == surface.height, "Only the verified full surface clear rectangle is supported");
+}
 
 SceneVertexShader LoadVertexShader(const std::filesystem::path& directory) {
     auto reference = ReadNativeFile(directory / "vertex-shader.container");
@@ -159,12 +166,21 @@ DepthClear ReadDepthClear(const PPCContext& ctx, uint8_t* base) {
     DeviceState state(base,ctx.r3.u32);
     state.NoColorAttachments();
     DepthClear clear; clear.surface=state.DepthSurface(base,720); state.FullViewport(clear.surface);
-    std::vector<uint8_t> rect;
-    Require(ReadGuest(base,ctx.r5.u32,16,rect) && LoadBE32(rect.data()) == 0 && LoadBE32(rect.data()+4) == 0 &&
-            LoadBE32(rect.data()+8) == clear.surface.width && LoadBE32(rect.data()+12) == clear.surface.height,
-            "Only the verified full surface clear is supported");
+    RequireFullClearRect(ctx, base, clear.surface);
     Require(std::isfinite(ctx.f1.f64) && ctx.f1.f64 == 0, "Scene clear value differs from the verified zero depth/stencil clear");
     return clear;
+}
+SceneSurface ReadSceneStencilClear(const PPCContext& ctx, uint8_t* base) {
+    Require(ctx.lr == 0x8238B590 && ctx.r4.u32 == 0x20, "Unsupported native stencil clear");
+    const DeviceState state(base, ctx.r3.u32);
+    const auto surface = state.DepthSurface(base, 720, 1);
+    Require((state.bytes[10940] & 0x30) == 0 && state.Word(12724) == 0 && state.Word(12716) == UINT32_MAX,
+            "Native stencil clear requires the untiled surface");
+    state.FullViewport(surface);
+    RequireFullClearRect(ctx, base, surface);
+    // At exactly flag 0x20 the guest clear draw uses stencil replace, ref 0,
+    // write mask 0xff, and disables depth writes. It takes no stencil argument.
+    return surface;
 }
 SceneColorClear ReadSceneColorClear(const PPCContext& ctx,uint8_t* base) {
     Require(ctx.r4.u32==0xf,"Only the verified scene color clear is supported");
@@ -174,9 +190,8 @@ SceneColorClear ReadSceneColorClear(const PPCContext& ctx,uint8_t* base) {
     // Begin-frame selects the first tile explicitly before clearing it.
     Require(state.Word(12724)==1 && state.Word(12716)==2 && state.Word(10932)==2,
             "Scene color clear uses an unsupported tile predicate");
-    std::vector<uint8_t> rect,color;
-    Require(ReadGuest(base,ctx.r5.u32,16,rect) && LoadBE32(rect.data())==0 && LoadBE32(rect.data()+4)==0 &&
-            LoadBE32(rect.data()+8)==1280 && LoadBE32(rect.data()+12)==720,"Scene color clear rectangle changed");
+    RequireFullClearRect(ctx, base, clear.surface);
+    std::vector<uint8_t> color;
     Require(ReadGuest(base,ctx.r6.u32 ? ctx.r6.u32 : 0x82247720,16,color),"Unreadable scene clear color");
     for (uint32_t i=0;i<4;++i) {
         clear.value.rgba[i]=std::bit_cast<float>(LoadBE32(color.data()+i*4));

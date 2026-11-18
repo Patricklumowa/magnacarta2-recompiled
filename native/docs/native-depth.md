@@ -273,5 +273,6 @@ that the lower tile contributes 266,032 nonzero depth pixels and that both
 resolved textures retain the upper tile unchanged. A live run with the Xenos
 DLL physically absent completed all four copies and cleared their sources.
 The guest then retired its staging chunks and wrote the completion marker on
-the CPU after the final native fence. The next operation is a single-sample
-stencil clear before the fullscreen pass that samples the HDR texture.
+the CPU after the final native fence. The separate single-sample surface
+then receives a native zero stencil clear with depth writes disabled. The
+following direct user-memory draw is the next unsupported operation.
