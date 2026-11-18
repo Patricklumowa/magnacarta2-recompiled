@@ -312,10 +312,15 @@ SceneColorDraw ReadSceneColorDraw(const PPCContext& ctx, uint8_t* base, const Sc
         if (!mc2::texture::DescribeBlockTexture(std::span(state.bytes).subspan(1152 + slot * 24, 24), texture, error))
             throw std::runtime_error(error);
         const auto& words = texture.fetch_words;
-        Require((words[0] & 0x0007fc00) == 0 && words[3] == 0x06280d10 && words[4] == 0x983 &&
-                (words[5] & 0x1ff) == 0 && texture.format == (slot ? 20u : 18u) &&
-                texture.mip_min_level == 0 && texture.mip_max_level == 6,
-                "Native scene block texture or sampler state changed");
+        constexpr uint32_t mip_max_mask = 15u << 6;
+        if ((words[0] & 0x0007fc00) != 0 || words[3] != 0x06280d10 || (words[4] & ~mip_max_mask) != 0x803 ||
+            (words[5] & 0x1ff) != 0 || texture.format != (slot ? 20u : 18u) ||
+            texture.mip_min_level != 0) {
+            throw std::runtime_error(std::format(
+                "Native scene texture {} format {}, levels {}-{}, sampler {:#x}/{:#x}/{:#x}/{:#x} differs",
+                slot, texture.format, texture.mip_min_level, texture.mip_max_level,
+                words[0], words[3], words[4], words[5]));
+        }
         // Both fetch instructions use the bound filter settings. The reference
         // D3D12 sampler selects anisotropic filtering with a 4:1 limit for this state.
         auto& sampler = snapshot.samplers[slot];

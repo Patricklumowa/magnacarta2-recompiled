@@ -338,14 +338,16 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         auto snapshot = ReadSceneColorDraw(ctx, base, *color_shaders);
         Flush(base, ctx.r3.u32);
         std::lock_guard lock(mutex);
-        Require(!scene_draw && scene_copies == 0 && depth_draws == 1 && prepass_draw && depth_renderer && color_target && depth_surface &&
+        Require(!scene_draw && scene_copies == 0 && depth_renderer && color_target && depth_surface &&
                 color_surface && *color_surface == snapshot.color_surface &&
-                cleared_tile == plume::RenderRect(0,0,1280,512), "Native color draw has no matching first prepass and color clear");
+                cleared_tile == plume::RenderRect(0,0,1280,512), "Native color draw requires cleared depth and color attachments");
         // The first tile starts at (0,0), with the same depth base, format and
         // pitch as the full prepass. Keep the lower region of that logical
         // attachment for the matching opaque draw when the second tile runs.
         RequireFirstTileDepth(*depth_surface, snapshot.tile_depth);
-        Require(SameScenePositionInputs(*prepass_draw, snapshot.draw), "Tiled scene draw differs from the verified depth prepass geometry");
+        if (depth_draws != 0)
+            Require(depth_draws == 1 && prepass_draw && SameScenePositionInputs(*prepass_draw, snapshot.draw),
+                    "Tiled scene draw differs from the depth prepass geometry");
         TiledSceneDraw draw;
         draw.draw = std::move(snapshot.draw);
         draw.pixel_constants = std::move(snapshot.pixel_constants);

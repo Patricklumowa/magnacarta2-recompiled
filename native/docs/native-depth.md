@@ -227,6 +227,10 @@ position transforms, geometry and viewport. The captured lower replay produces
 identical color and maximum depth values with either retained or freshly
 cleared depth.
 
+The first scene after the long movie uses the same opaque shaders with
+eight mip levels and starts from cleared depth. A live Start test completed
+both tiles and the depth restore for that scene.
+
 `--mc2_scene_resolve_trace=true` logs the first eight tiled resolve calls and
 the first eight untiled scene resolve calls on a native boot development build.
 The reference renderer observed two calls per
