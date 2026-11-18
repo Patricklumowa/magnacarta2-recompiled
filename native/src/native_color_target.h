@@ -23,6 +23,7 @@ class ColorTarget {
     std::vector<uint8_t> ReadRgba8();
  private:
     friend class ColorRenderer;
+    friend class QuadRenderer;
     NativeDevice& Device() const;
     plume::RenderFormat Format() const;
     plume::RenderTexture* Attachment(const NativeDevice& gpu, uint32_t width, uint32_t height, uint32_t samples);

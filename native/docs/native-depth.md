@@ -391,3 +391,22 @@ in `fullscreen/overlay`.
 The GPU check verifies the RGBA8 upload and blend result. The live run
 completed all seven overlay draws before the display resolve, including
 both 108-index atlas batches.
+
+## Scene presentation
+
+The display resolve validates a full, same-size RGBA8 source and destination.
+The native renderer retains the completed attachment until the guest swaps
+that destination. A D3D12 draw samples it directly into the same DXGI
+swapchain used by the startup movies and preserves the source aspect ratio
+at the window's client size.
+
+Compile the presentation shaders into the color shader directory:
+
+```text
+dxc -T vs_6_0 -E main -HV 2021 -D MC2_PRESENT_VERTEX=1 native/src/native_present.hlsl -Fo <color-shaders>/fullscreen/present/vertex.dxil
+dxc -T ps_6_0 -E main -HV 2021 native/src/native_present.hlsl -Fo <color-shaders>/fullscreen/present/pixel.dxil
+```
+
+A live run with the Xenos DLL absent completed the first post-movie scene
+swap at a 2560 x 1600 window extent. It reached the second scene's depth
+clear, which still requires per-frame state reset.

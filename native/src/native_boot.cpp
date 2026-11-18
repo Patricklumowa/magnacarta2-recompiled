@@ -111,6 +111,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     std::optional<ScenePassShaders> bloom_shaders, filter_shaders, composition_shaders, back_buffer_shaders;
     std::optional<ScenePassShaders> overlay_shaders;
     std::vector<uint8_t> fullscreen_resolve_shader, bloom_resolve_shader;
+    std::vector<uint8_t> present_vertex_shader, present_pixel_shader;
     std::optional<SceneSurface> depth_surface,color_surface;
     std::unique_ptr<DepthRenderer> depth_renderer;
     std::unique_ptr<ColorTarget> color_target;
@@ -133,6 +134,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     std::optional<SceneSurface> back_buffer_surface;
     std::unique_ptr<ColorRenderer> overlay_renderer;
     uint32_t overlay_draws = 0;
+    uint32_t scanout_texture = 0;
     plume::RenderRect cleared_tile;
     std::optional<DepthDraw> prepass_draw;
     std::optional<TiledSceneDraw> scene_draw;
@@ -167,6 +169,11 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             if (std::filesystem::is_directory(back_buffer_directory)) back_buffer_shaders = LoadQuadShaders(back_buffer_directory, "pixel.dxil");
             const auto overlay_directory = fullscreen_directory / "overlay";
             if (std::filesystem::is_directory(overlay_directory)) overlay_shaders = LoadFullscreenColorShaders(overlay_directory, false, "pixel.dxil");
+            const auto present_directory = fullscreen_directory / "present";
+            if (std::filesystem::is_directory(present_directory)) {
+                present_vertex_shader = ReadNativeFile(present_directory / "vertex.dxil");
+                present_pixel_shader = ReadNativeFile(present_directory / "pixel.dxil");
+            }
             const auto grade_directory = std::filesystem::path(color_directory) / "color-grade";
             if (std::filesystem::is_directory(grade_directory)) color_grade_shaders = LoadFullscreenColorShaders(grade_directory, true);
             const auto bloom_directory = std::filesystem::path(color_directory) / "bloom";
@@ -482,7 +489,8 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         SceneQuadPass pass;
         {
             std::lock_guard lock(mutex);
-            Require(device && device == guest_device && depth_restored && !pending_up, "Unexpected native indexed user-memory draw");
+            Require(device && device == guest_device && depth_restored && !pending_up && !scanout_texture,
+                    "Unexpected native indexed user-memory draw");
             if (!fullscreen_copies) {
                 pass = SceneQuadPass::HdrCopy;
                 Require(fullscreen_shaders && !fullscreen_target, "Indexed begin-UP draw requires the first fullscreen HDR shaders");
@@ -642,6 +650,33 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         ++bloom_copies;
         REXLOG_INFO("MC2 native scene: resolved bloom pass {} to UNORM texture {:#x}, completed={}",
                     bloom_copies, destination.address, completed);
+    }
+
+    void ResolveScanout(const PPCContext& ctx, uint8_t* base) {
+        std::lock_guard lock(mutex);
+        Require(ctx.r3.u32 && ctx.r3.u32 == guest_device && back_buffer && back_buffer_surface &&
+                !pending_up && !scanout_texture && completed == gpu->completed,
+                "Display resolve needs the completed native back buffer");
+        // A full same-format single-sample resolve can retain the native
+        // attachment until Swap consumes it. No guest texture upload is needed.
+        scanout_texture = ReadScanoutResolve(ctx, base, *back_buffer_surface);
+        REXLOG_INFO("MC2 native scene: ready for display resolve to guest texture {:#x}", scanout_texture);
+    }
+
+    void PresentScene(const PPCContext& ctx) {
+        std::lock_guard lock(mutex);
+        if (!scanout_texture) return;
+        Require(ctx.lr == 0x8248B7BC && ctx.r3.u32 == guest_device && ctx.r4.u32 == scanout_texture && !ctx.r5.u32 &&
+                !pending && renderer && window && !present_vertex_shader.empty() && !present_pixel_shader.empty(),
+                "Scene swap requires the resolved back buffer, window and presentation shaders");
+        renderer->SetWindow(window);
+        const auto result = renderer->PresentColor(*back_buffer, back_buffer_surface->width, back_buffer_surface->height,
+            present_vertex_shader, present_pixel_shader, REXCVAR_QUERY(std::string, mc2_framerate) != "unlocked");
+        completed = result.completed_submission;
+        scanout_texture = 0;
+        if (result.present_submitted)
+            REXLOG_INFO("MC2 native scene: presented {}x{} with {} overlays, completed={}",
+                        result.width, result.height, overlay_draws, completed);
     }
 
     // Record bounded changes at the clear boundary while surface support grows.
@@ -842,6 +877,7 @@ REX_HOOK_RAW(sub_823893A0) {
         try {
             if (ctx.lr == 0x827B3694 && ctx.r4.u32 == 0) Graphics().ResolveBloom(ctx, base);
             else if (ctx.lr == 0x827B3694) Graphics().ResolveFullscreen(ctx, base);
+            else if (ctx.lr == 0x8248B7AC) Graphics().ResolveScanout(ctx, base);
             else Graphics().ResolveTile(ctx, base);
         }
         catch (const std::exception& error) { UnsupportedNativeOperation(error.what(), ctx); }
@@ -901,6 +937,8 @@ REX_HOOK_RAW(sub_8236C9E0) {
 REX_HOOK_RAW(sub_8237CA28) {
     if (!NativeBootActive()) { __imp__sub_8237CA28(ctx, base); return; }
     const auto device = ctx.r3.u32;
+    try { Graphics().PresentScene(ctx); }
+    catch (const std::exception& error) { UnsupportedNativeOperation(error.what(), ctx); }
     Graphics().Flush(base, device);
     ResetStaging(base, device);
     REX_STORE_U32(device + 16560, REX_LOAD_U32(device + 16560) + 1);

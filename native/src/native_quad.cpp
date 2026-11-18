@@ -1,4 +1,5 @@
 #include "native_quad.h"
+#include "native_color_target.h"
 #include "native_device.h"
 #include <array>
 #include <algorithm>
@@ -13,6 +14,55 @@ namespace {
 void Require(bool value, const std::string& message) {
     if (!value) throw std::runtime_error(message);
 }
+
+RenderViewport AspectViewport(uint32_t source_width, uint32_t source_height, uint32_t width, uint32_t height) {
+    const double scale = std::min(double(width) / source_width, double(height) / source_height);
+    const auto viewport_width = std::min(width, uint32_t(std::lround(source_width * scale)));
+    const auto viewport_height = std::min(height, uint32_t(std::lround(source_height * scale)));
+    return RenderViewport(float((width - viewport_width) / 2), float((height - viewport_height) / 2),
+                          float(viewport_width), float(viewport_height));
+}
+
+struct PresentPipeline {
+    std::unique_ptr<RenderShader> vs, ps;
+    std::unique_ptr<RenderSampler> sampler;
+    std::unique_ptr<RenderDescriptorSet> texture_set, sampler_set;
+    std::unique_ptr<RenderPipelineLayout> layout;
+    std::unique_ptr<RenderPipeline> pipeline;
+
+    PresentPipeline(RenderDevice& device, RenderFormat format, std::span<const uint8_t> vertex,
+                    std::span<const uint8_t> pixel) {
+        Require(!vertex.empty() && !pixel.empty(), "Missing native presentation shaders");
+        vs = device.createShader(vertex.data(), vertex.size(), "main", RenderShaderFormat::DXIL);
+        ps = device.createShader(pixel.data(), pixel.size(), "main", RenderShaderFormat::DXIL);
+        RenderSamplerDesc sampler_desc;
+        sampler_desc.addressU = sampler_desc.addressV = RenderTextureAddressMode::CLAMP;
+        sampler_desc.minFilter = sampler_desc.magFilter = RenderFilter::LINEAR;
+        sampler_desc.maxLOD = 0;
+        sampler = device.createSampler(sampler_desc);
+        const RenderDescriptorRange texture_range(RenderDescriptorRangeType::TEXTURE, 0, 1);
+        const RenderDescriptorRange sampler_range(RenderDescriptorRangeType::SAMPLER, 0, 1);
+        const RenderDescriptorSetDesc sets[] = {{&texture_range, 1}, {&sampler_range, 1}};
+        texture_set = device.createDescriptorSet(sets[0]);
+        sampler_set = device.createDescriptorSet(sets[1]);
+        RenderPipelineLayoutDesc layout_desc;
+        layout_desc.descriptorSetDescs = sets;
+        layout_desc.descriptorSetDescsCount = std::size(sets);
+        layout = device.createPipelineLayout(layout_desc);
+        Require(vs && ps && sampler && texture_set && sampler_set && layout, "Native presentation pipeline allocation failed");
+        sampler_set->setSampler(0, sampler.get());
+        RenderGraphicsPipelineDesc desc;
+        desc.pipelineLayout = layout.get();
+        desc.vertexShader = vs.get();
+        desc.pixelShader = ps.get();
+        desc.renderTargetFormat[0] = format;
+        desc.renderTargetBlend[0] = RenderBlendDesc::Copy();
+        desc.renderTargetCount = 1;
+        desc.primitiveTopology = RenderPrimitiveTopology::TRIANGLE_LIST;
+        pipeline = device.createGraphicsPipeline(desc);
+        Require(bool(pipeline), "Native presentation pipeline creation failed");
+    }
+};
 }  // namespace
 
 static void ValidateDraw(const QuadDraw& draw) {
@@ -64,6 +114,7 @@ struct QuadRenderer::Impl {
     std::unique_ptr<RenderSwapChain> swapChain;
     std::vector<std::unique_ptr<RenderFramebuffer>> swapFramebuffers;
     std::unique_ptr<RenderBuffer> presentReadback;
+    std::unique_ptr<PresentPipeline> presentPipeline;
     uint32_t presentReadWidth = 0, presentReadHeight = 0;
     RenderInputSlot inputSlot{0, 0};
     uint32_t readPitch = 0;
@@ -191,17 +242,11 @@ struct QuadRenderer::Impl {
         window = handle;
     }
 
-    QuadResult Present(const QuadDraw& draw, bool vsync, bool read_pixels) {
-        ValidateConfiguration(draw);
+    bool PrepareWindow() {
         Require(window && IsWindow(window), "Native presentation window is not available");
         RECT client{};
         Require(GetClientRect(window, &client), "Cannot query native window size");
-        if (IsIconic(window) || client.right <= 0 || client.bottom <= 0) {
-            QuadResult skipped;
-            skipped.completed_submission = completed;
-            skipped.debug_layer = debugEnabled;
-            return skipped;
-        }
+        if (IsIconic(window) || client.right <= 0 || client.bottom <= 0) return false;
         Require(client.right <= 8192 && client.bottom <= 8192, "Native window exceeds supported dimensions");
         if (!swapChain) {
             swapChain = queue->createSwapChain(window, 2, configuration.target_format, 1);
@@ -220,19 +265,62 @@ struct QuadRenderer::Impl {
                 Require(bool(swapFramebuffers.back()), "Swapchain framebuffer creation failed");
             }
         }
+        return true;
+    }
+
+    RenderBuffer* PresentReadback(bool read_pixels) {
+        if (!read_pixels) return nullptr;
         const auto width = swapChain->getWidth(), height = swapChain->getHeight();
-        if (read_pixels && (!presentReadback || presentReadWidth != width || presentReadHeight != height)) {
+        if (!presentReadback || presentReadWidth != width || presentReadHeight != height) {
             presentReadWidth = width; presentReadHeight = height;
             presentReadback = device->createBuffer(RenderBufferDesc::ReadbackBuffer(
                 size_t((width * 4 + 255) & ~255u) * height));
             Require(bool(presentReadback), "Presentation readback allocation failed");
         }
+        return presentReadback.get();
+    }
+
+    uint32_t Acquire(bool vsync) {
         uint32_t index = 0;
         Require(swapChain->acquireTexture(nullptr, &index) && index < swapFramebuffers.size(),
                 "Native backbuffer acquisition failed");
         swapChain->setVsyncEnabled(vsync);
-        return Draw(draw, swapChain->getTexture(index), swapFramebuffers[index].get(),
-                    read_pixels ? presentReadback.get() : nullptr, true, index);
+        return index;
+    }
+
+    QuadResult Present(const QuadDraw& draw, bool vsync, bool read_pixels) {
+        ValidateConfiguration(draw);
+        if (!PrepareWindow()) return {.debug_layer = debugEnabled, .completed_submission = completed};
+        auto* buffer = PresentReadback(read_pixels);
+        const auto index = Acquire(vsync);
+        return Draw(draw, swapChain->getTexture(index), swapFramebuffers[index].get(), buffer, true, index);
+    }
+
+    QuadResult PresentColor(RenderTexture& source, uint32_t source_width, uint32_t source_height,
+                            std::span<const uint8_t> vertex, std::span<const uint8_t> pixel,
+                            bool vsync, bool read_pixels) {
+        if (!PrepareWindow()) return {.debug_layer = debugEnabled, .completed_submission = completed};
+        if (!presentPipeline) presentPipeline = std::make_unique<PresentPipeline>(*device, configuration.target_format, vertex, pixel);
+        auto* buffer = PresentReadback(read_pixels);
+        const auto index = Acquire(vsync);
+        auto* target = swapChain->getTexture(index);
+        auto& blit = *presentPipeline;
+        const auto width = swapChain->getWidth(), height = swapChain->getHeight();
+        blit.texture_set->setTexture(0, &source, RenderTextureLayout::SHADER_READ);
+        commands->begin();
+        const RenderTextureBarrier barriers[] = {{&source, RenderTextureLayout::SHADER_READ},
+                                                {target, RenderTextureLayout::COLOR_WRITE}};
+        commands->barriers(RenderBarrierStage::GRAPHICS, barriers, std::size(barriers));
+        commands->setFramebuffer(swapFramebuffers[index].get());
+        commands->setScissors(RenderRect(0,0,width,height));
+        commands->clearColor(0, RenderColor(0,0,0,1));
+        commands->setViewports(AspectViewport(source_width, source_height, width, height));
+        commands->setGraphicsPipelineLayout(blit.layout.get());
+        commands->setPipeline(blit.pipeline.get());
+        commands->setGraphicsDescriptorSet(blit.texture_set.get(), 0);
+        commands->setGraphicsDescriptorSet(blit.sampler_set.get(), 1);
+        commands->drawInstanced(3,1,0,0);
+        return FinishDraw(target, width, height, buffer, true, index);
     }
 
     QuadResult Render(const QuadDraw& draw) {
@@ -258,9 +346,8 @@ struct QuadRenderer::Impl {
             t.upload->unmap();
         }
         const auto width = outputFramebuffer->getWidth(), height = outputFramebuffer->getHeight();
-        const auto outputPitch = (width * 4 + 255) & ~255u;
         const auto& vertices = draw.vertices;
-        const auto textureFormat = draw.texture_format, targetFormat = draw.target_format;
+        const auto textureFormat = draw.texture_format;
         commands->begin();
         for (auto& t : textures) {
             commands->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(t.texture.get(), RenderTextureLayout::COPY_DEST));
@@ -272,11 +359,7 @@ struct QuadRenderer::Impl {
         commands->setFramebuffer(outputFramebuffer);
         commands->setScissors(RenderRect(0, 0, width, height));
         commands->clearColor(0, present ? RenderColor(0, 0, 0, 1) : RenderColor(1, 0, 1, 1));
-        const double scale = std::min(double(width) / draw.width, double(height) / draw.height);
-        const auto viewWidth = std::min(width, uint32_t(std::lround(draw.width * scale)));
-        const auto viewHeight = std::min(height, uint32_t(std::lround(draw.height * scale)));
-        commands->setViewports(RenderViewport(float((width - viewWidth) / 2), float((height - viewHeight) / 2),
-                                             float(viewWidth), float(viewHeight)));
+        commands->setViewports(AspectViewport(draw.width, draw.height, width, height));
         commands->setGraphicsPipelineLayout(layout.get());
         commands->setPipeline(pipeline.get());
         commands->setGraphicsDescriptorSet(textureSet.get(), 0);
@@ -292,9 +375,15 @@ struct QuadRenderer::Impl {
         } else {
             commands->drawInstanced(4, 1, 0, 0);
         }
+        return FinishDraw(outputTarget, width, height, outputReadback, present, backbufferIndex);
+    }
+
+    QuadResult FinishDraw(RenderTexture* outputTarget, uint32_t width, uint32_t height,
+                          RenderBuffer* outputReadback, bool present, uint32_t backbufferIndex) {
+        const auto outputPitch = (width * 4 + 255) & ~255u;
         if (outputReadback) {
             commands->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(outputTarget, RenderTextureLayout::COPY_SOURCE));
-            commands->copyTextureRegion(RenderTextureCopyLocation::PlacedFootprint(outputReadback, targetFormat, width, height, 1, outputPitch / 4),
+            commands->copyTextureRegion(RenderTextureCopyLocation::PlacedFootprint(outputReadback, configuration.target_format, width, height, 1, outputPitch / 4),
                 RenderTextureCopyLocation::Subresource(outputTarget));
         }
         if (present)
@@ -330,6 +419,14 @@ QuadResult QuadRenderer::Render(const QuadDraw& draw) { return impl_->Render(dra
 void QuadRenderer::SetWindow(RenderWindow window) { impl_->SetWindow(window); }
 QuadResult QuadRenderer::Present(const QuadDraw& draw, bool vsync, bool read_pixels) {
     return impl_->Present(draw, vsync, read_pixels);
+}
+QuadResult QuadRenderer::PresentColor(ColorTarget& color, uint32_t width, uint32_t height,
+                                      std::span<const uint8_t> vertex, std::span<const uint8_t> pixel,
+                                      bool vsync, bool read_pixels) {
+    Require(color.Format() == impl_->configuration.target_format, "Native scene and swapchain color formats differ");
+    auto* texture = color.Attachment(*impl_->gpu, width, height, 1);
+    color.RequireCleared(RenderRect(0,0,width,height));
+    return impl_->PresentColor(*texture, width, height, vertex, pixel, vsync, read_pixels);
 }
 
 QuadResult RenderQuad(const QuadDraw& draw, bool enable_debug) {

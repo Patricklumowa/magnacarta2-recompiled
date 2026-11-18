@@ -112,5 +112,6 @@ void ReadOverlayUpVertices(DepthDraw& draw, uint8_t* base, uint32_t address, uin
     const SceneOverlayBinding& binding);
 plume::RenderBlendDesc OverlayBlend();
 plume::RenderSamplerDesc OverlaySampler();
+uint32_t ReadScanoutResolve(const PPCContext& context, uint8_t* base, const SceneSurface& back_buffer);
 std::pair<SceneSurface, SceneResolveTexture> ReadBloomResolve(const PPCContext& context, uint8_t* base);
 }

@@ -672,6 +672,21 @@ plume::RenderSamplerDesc OverlaySampler() {
     return sampler;
 }
 
+uint32_t ReadScanoutResolve(const PPCContext& ctx, uint8_t* base, const SceneSurface& back_buffer) {
+    Require(ctx.lr == 0x8248B7AC && !ctx.r4.u32 && !ctx.r5.u32 && !ctx.r7.u32 && !ctx.r8.u32 && !ctx.r9.u32,
+            "Unsupported display resolve flags or region");
+    const DeviceState state(base, ctx.r3.u32);
+    Require(ReadFullscreenColorSurface(state, base, 0x2d0) == back_buffer, "Display resolve source differs from the back buffer");
+    std::vector<uint8_t> descriptor;
+    Require(ReadGuest(base, ctx.r6.u32, 52, descriptor) && (LoadBE32(descriptor.data()) & 15) == 3,
+            "Invalid display resolve destination");
+    const auto word = [&](uint32_t offset) { return LoadBE32(descriptor.data() + offset); };
+    Require(word(28) == 0x8a000002 && (word(32) & 4095) == 6 && (word(32) >> 12) != 0 &&
+            word(36) == 0x59e4ff && word(40) == 0x1414 && word(44) == 0 && word(48) == 0x200,
+            "Display resolve requires the verified full RGBA8 texture");
+    return ctx.r6.u32;
+}
+
 void ReadQuadUpVertices(DepthDraw& draw, uint8_t* base, uint32_t address, uint32_t index_address) {
     std::vector<uint8_t> vertices, indices;
     Require(ReadGuest(base,address,128,vertices) && ReadGuest(base,index_address,12,indices), "Unreadable scene quad vertices or indices");

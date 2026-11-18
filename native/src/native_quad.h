@@ -3,9 +3,11 @@
 #include <plume_render_interface.h>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <vector>
 
 namespace mc2::native {
+class ColorTarget;
 class NativeDevice;
 struct QuadTexture {
     uint32_t width = 0, height = 0;
@@ -46,6 +48,9 @@ class QuadRenderer {
     // Draw directly at the window's current resolution, preserving aspect.
     // Minimized windows submit no work. Readback is optional diagnostics only.
     QuadResult Present(const QuadDraw& draw, bool vsync = true, bool read_pixels = false);
+    QuadResult PresentColor(ColorTarget& color, uint32_t width, uint32_t height,
+                            std::span<const uint8_t> vertex_shader, std::span<const uint8_t> pixel_shader,
+                            bool vsync = true, bool read_pixels = false);
  private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
