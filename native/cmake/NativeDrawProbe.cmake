@@ -35,6 +35,7 @@ add_library(mc2_native_quad STATIC "${MC2_PROBE_NATIVE_DIR}/src/native_quad.cpp"
     "${MC2_PROBE_NATIVE_DIR}/src/native_device.cpp"
     "${MC2_PROBE_NATIVE_DIR}/src/native_vertex_layout.cpp"
     "${MC2_PROBE_NATIVE_DIR}/src/native_color_target.cpp"
+    "${MC2_PROBE_NATIVE_DIR}/src/native_tile_resolve.cpp"
     "${MC2_PROBE_NATIVE_DIR}/src/native_sampled_texture.cpp"
     "${MC2_PROBE_NATIVE_DIR}/src/native_depth.cpp")
 target_include_directories(mc2_native_quad PUBLIC "${MC2_PROBE_NATIVE_DIR}/src")

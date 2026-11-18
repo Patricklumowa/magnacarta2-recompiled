@@ -5,6 +5,7 @@
 #include "native_shader_input.h"
 #include "shader_capture.h"
 #include <array>
+#include <cmath>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -25,7 +26,7 @@ void ReplayColor(const mc2::native::SceneDepthDraw& prepass, const mc2::native::
     using namespace plume;
     auto gpu = std::make_shared<NativeDevice>(true);
     const auto& surface = draw.color_surface;
-    DepthRenderer depth(ConfigureDepth(prepass.surface, depth_shader), gpu);
+    DepthRenderer depth(ConfigureDepth(prepass.surface, depth_shader), gpu, shaders.depth_resolve_dxil);
     ColorTarget color(surface.width, surface.height, surface.samples, gpu, shaders.resolve_dxil);
     ColorRenderer renderer(ConfigureDepth(surface, shaders.vertex), shaders.pixel_dxil, draw.samplers, depth, color);
     std::array<std::unique_ptr<SampledTexture>, 2> textures;
@@ -122,6 +123,36 @@ void ReplayColor(const mc2::native::SceneDepthDraw& prepass, const mc2::native::
         for (size_t i = resolved.size(); i < source_after.size(); ++i)
             Check(source_after[i] == without_gamma[i], "Resolve cleared outside the selected tile");
         std::cout << "PASS: captured tile resolve matches the D3D12 average scaled by 1/8, with a scoped source clear\n";
+    }
+    if (!shaders.depth_resolve_dxil.empty()) {
+        Reject([&] { depth.ReadResolvedPixels(); });
+        auto diagnostic = prepass.draw;
+        // Read back the retained depth using a scissor with no covered geometry.
+        diagnostic.scissor = RenderRect(0,0,1,1);
+        const auto max_before = depth.Render(diagnostic, true).pixels;
+        const auto before_resolve = gpu->completed;
+        Reject([&] { depth.ResolveAndClear(RenderRect(0,0,1280,721)); });
+        Check(depth.ResolveAndClear(clear.rectangle) == before_resolve + 1,
+              "Native depth copy and clear did not share one completed submission");
+        const auto sample_zero = depth.ReadResolvedPixels();
+        const auto max_after = depth.Render(diagnostic, true).pixels;
+        Check(sample_zero.size() == size_t(surface.width) * clear.rectangle.bottom, "Resolved depth tile extent differs");
+        size_t nonzero = 0, maximum_only = 0;
+        for (size_t i = 0; i < sample_zero.size(); ++i) {
+            const float value = sample_zero[i], maximum = max_before[i];
+            Check(std::isfinite(value) && value >= 0 && max_after[i] == 0, "Invalid resolved value or missing source depth clear");
+            const auto step = [](float x) { return std::ldexp(1.0, (x > 0 ? std::max(std::ilogb(x), -14) : -14) - 20); };
+            const double spacing = step(value), upper_spacing = step(maximum);
+            Check(value / spacing == std::floor(value / spacing) && value <= maximum + 0.5 * upper_spacing,
+                  "Resolved value is outside float24 storage or exceeds the largest sample");
+            nonzero += value > 0;
+            maximum_only += value == 0 && maximum > 0;
+        }
+        Check(nonzero > 1000, "Depth resolve did not preserve nonzero coverage");
+        for (size_t i = sample_zero.size(); i < max_after.size(); ++i)
+            Check(max_after[i] == max_before[i], "Depth resolve cleared outside the selected tile");
+        std::cout << "PASS: captured depth sample zero and float24 storage, covered=" << nonzero
+                  << ", max-only edge pixels=" << maximum_only << '\n';
     }
     draw.draw.shared_constants[0] = uint8_t(bindings.size());
     const auto before_rejection = gpu->completed;

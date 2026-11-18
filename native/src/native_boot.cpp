@@ -50,6 +50,15 @@ std::unique_ptr<SampledTexture> UploadSceneTexture(uint8_t* base, const mc2::tex
     return std::make_unique<SampledTexture>(format, top.width, top.height, levels, gpu);
 }
 
+void RequireFirstTileDepth(const SceneSurface& prepass, const SceneSurface& tile) {
+    const auto& full_depth = prepass.description;
+    const auto& tile_depth = tile.description;
+    Require(full_depth.size() == 24 && tile_depth.size() == 24 &&
+            std::equal(full_depth.begin(), full_depth.begin() + 12, tile_depth.begin()) &&
+            std::equal(full_depth.begin() + 16, full_depth.begin() + 20, tile_depth.begin() + 16),
+            "Native first tile depth does not alias the retained prepass");
+}
+
 class NativeGraphics final : public rex::system::IGraphicsSystem {
  public:
     MovieShaders shaders;
@@ -64,6 +73,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     plume::RenderRect cleared_tile;
     bool color_draw_submitted = false;
     std::optional<uint32_t> resolved_color_destination;
+    std::optional<uint32_t> resolved_depth_destination;
     uint64_t depth_draws = 0;
     std::optional<QuadDraw> pending;
     HWND window = nullptr;
@@ -133,7 +143,8 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         std::lock_guard lock(mutex);
         if (!gpu) gpu=std::make_shared<NativeDevice>();
         if (!depth_renderer) {
-            depth_renderer=std::make_unique<DepthRenderer>(ConfigureDepth(clear.surface,*depth_shaders),gpu);
+            const auto resolve_shader = color_shaders ? std::span<const uint8_t>(color_shaders->depth_resolve_dxil) : std::span<const uint8_t>{};
+            depth_renderer=std::make_unique<DepthRenderer>(ConfigureDepth(clear.surface,*depth_shaders),gpu,resolve_shader);
             depth_surface=clear.surface;
         }
         Require(*depth_surface == clear.surface, "Native depth surface allocation changed");
@@ -172,11 +183,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         // The first tile starts at (0,0), with the same depth base, format and
         // pitch as the full prepass. The lower tile needs its own replay after
         // the resolve/clear boundary.
-        const auto& full_depth = depth_surface->description;
-        const auto& tile_depth = snapshot.tile_depth.description;
-        Require(std::equal(full_depth.begin(), full_depth.begin() + 12, tile_depth.begin()) &&
-                std::equal(full_depth.begin() + 16, full_depth.begin() + 20, tile_depth.begin() + 16),
-                "Native first tile depth does not alias the retained prepass");
+        RequireFirstTileDepth(*depth_surface, snapshot.tile_depth);
         auto first = UploadSceneTexture(base, snapshot.textures[0], gpu);
         auto second = UploadSceneTexture(base, snapshot.textures[1], gpu);
         const std::array<const SampledTexture*, 2> bindings{first.get(), second.get()};
@@ -194,17 +201,29 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         return color_draw_submitted;
     }
 
-    void ResolveColor(const PPCContext& ctx, uint8_t* base) {
+    void ResolveTile(const PPCContext& ctx, uint8_t* base) {
         std::lock_guard lock(mutex);
         Require(color_shaders && !color_shaders->resolve_dxil.empty(), "Tiled scene resolve shader is not configured");
-        Require(!resolved_color_destination, "Tiled depth resolve and lower tile replay are unsupported");
-        const auto resolve = ReadSceneColorResolve(ctx, base);
-        Require(color_target && color_surface && *color_surface == resolve.source && cleared_tile == resolve.rectangle,
-                "Native color resolve has no matching rendered tile");
-        completed = color_target->ResolveAndClear(resolve.rectangle, resolve.exponent);
-        resolved_color_destination = resolve.destination;
-        REXLOG_INFO("MC2 native scene: resolved and cleared first HDR tile into texture {:#x}, exponent={}, completed={}",
-                    resolve.destination, resolve.exponent, completed);
+        Require(!resolved_depth_destination, "Lower scene tile replay is unsupported");
+        const auto resolve = ReadSceneTileResolve(ctx, base);
+        Require(color_target && color_surface && *color_surface == resolve.color && cleared_tile == resolve.rectangle,
+                "Native resolve has no matching rendered tile");
+        if (resolve.copy_depth) {
+            Require(!color_shaders->depth_resolve_dxil.empty(), "Tiled depth resolve shader is not configured");
+            Require(resolved_color_destination && *resolved_color_destination != resolve.destination && depth_renderer &&
+                    depth_surface, "Native tile depth resolve must follow its color resolve");
+            RequireFirstTileDepth(*depth_surface, resolve.depth);
+            completed = depth_renderer->ResolveAndClear(resolve.rectangle);
+            resolved_depth_destination = resolve.destination;
+            REXLOG_INFO("MC2 native scene: resolved and cleared first depth tile into texture {:#x}, sample=0, completed={}",
+                        resolve.destination, completed);
+        } else {
+            Require(!resolved_color_destination, "Native first color tile was already resolved");
+            completed = color_target->ResolveAndClear(resolve.rectangle, resolve.exponent);
+            resolved_color_destination = resolve.destination;
+            REXLOG_INFO("MC2 native scene: resolved and cleared first HDR tile into texture {:#x}, exponent={}, completed={}",
+                        resolve.destination, resolve.exponent, completed);
+        }
     }
 
     // Record bounded changes at the clear boundary while surface support grows.
@@ -380,7 +399,7 @@ REX_HOOK_RAW(sub_8238AD80) {
 REX_HOOK_RAW(sub_823893A0) {
     if (REXCVAR_GET(mc2_scene_resolve_trace)) TraceSceneResolve(ctx, base);
     if (NativeBootActive() && Graphics().HasColorDraw()) {
-        try { Graphics().ResolveColor(ctx, base); }
+        try { Graphics().ResolveTile(ctx, base); }
         catch (const std::exception& error) { UnsupportedNativeOperation(error.what(), ctx); }
         // Preserve the guest's CPU resource bookkeeping. The original GPU
         // commands go only to staging; the native copy has already completed.

@@ -36,7 +36,8 @@ void Pixels(const mc2::native::DepthResult& result, float expected, uint64_t seq
 }
 }
 int main(int argc, char** argv) try {
-    Check(argc == 3 || argc == 5 || argc == 7, "Usage: mc2_native_depth_check <VS.container> <VS.dxil> [capture-directory output.f32 [color-VS.container color-VS.dxil]]");
+    Check(argc == 3 || argc == 4 || argc == 5 || argc == 7,
+          "Usage: mc2_native_depth_check <VS.container> <VS.dxil> [depth-resolve.dxil | capture-directory output.f32 [color-VS.container color-VS.dxil]]");
     using namespace mc2::native;
     auto container = Read(argv[1]);
     const auto inputs = ReadVertexInputs(container);
@@ -123,6 +124,22 @@ int main(int argc, char** argv) try {
     for (size_t i = 0; i < edge_pixels.pixels.size(); ++i)
         Check(std::abs(edge_pixels.pixels[i] - (i/4 + i%4 <= 3 ? .75f : 0)) < 1e-6f,
               "Two-sample diagonal coverage differs");
+    if (argc == 4) {
+        DepthRenderer sample_zero(config, gpu, Read(argv[3]));
+        sample_zero.Clear(0);
+        sample_zero.Render(draw);
+        const auto prior = gpu->completed;
+        Check(sample_zero.ResolveAndClear(draw.scissor) == prior + 1, "Depth sample copy did not complete its fence");
+        const auto pixels = sample_zero.ReadResolvedPixels();
+        Check(pixels.size() == 16, "Depth sample copy extent differs");
+        for (size_t i = 0; i < pixels.size(); ++i) {
+            // Standard 2x MSAA sample zero lies at (+1/4,+1/4) from the
+            // pixel center. On the diagonal only sample one is inside.
+            const float expected = i / 4 + i % 4 <= 2 ? .75f : 0;
+            Check(pixels[i] == expected, "Depth copy did not select sample zero on the diagonal");
+        }
+        std::cout << "PASS: sample-zero resolve rejected the diagonal's sample-one coverage\n";
+    }
     std::cout << "PASS: mini-fetch layout, byte order, indexed range, reversed/ordinary depth, retained target, scissor, two-sample coverage, partial clears, rejection and shared native queue; debug_layer=" << gpu->debug_enabled << '\n';
     if (argc >= 5) {
         const std::filesystem::path capture(argv[3]);

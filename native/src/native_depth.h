@@ -33,12 +33,16 @@ struct DepthResult {
 // clears. Stencil and 24-bit console depth quantization are not emulated.
 class DepthRenderer {
  public:
-    DepthRenderer(const DepthConfiguration& configuration, std::shared_ptr<NativeDevice> device);
+    DepthRenderer(const DepthConfiguration& configuration, std::shared_ptr<NativeDevice> device,
+                  std::span<const uint8_t> resolve_shader = {});
     ~DepthRenderer();
     void Clear(float depth, const plume::RenderRect* rectangle = nullptr);
     // MSAA diagnostic readback resolves the greatest depth value per pixel.
     // This does not implement the game's surface resolve/copy contract.
     DepthResult Render(const DepthDraw& draw, bool read_pixels = false);
+    // Export sample zero as decoded 20e4 values and clear that depth region.
+    uint64_t ResolveAndClear(const plume::RenderRect& rectangle);
+    std::vector<float> ReadResolvedPixels();
  private:
     friend class ColorRenderer;
     struct Impl;

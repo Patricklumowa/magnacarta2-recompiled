@@ -1,4 +1,5 @@
 #include "native_color_target.h"
+#include "native_tile_resolve.h"
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
@@ -11,10 +12,6 @@ bool Covers(const RenderRect& outer, const RenderRect& inner) {
     return !inner.isEmpty() && inner.left >= outer.left && inner.top >= outer.top &&
         inner.right <= outer.right && inner.bottom <= outer.bottom;
 }
-struct ResolveParameters {
-    uint32_t x, y, width, height;
-    float scale;
-};
 }
 struct ColorTarget::Impl {
     uint32_t width,height,samples;
@@ -22,11 +19,7 @@ struct ColorTarget::Impl {
     std::unique_ptr<RenderTexture> texture,resolved;
     std::unique_ptr<RenderFramebuffer> framebuffer;
     std::unique_ptr<RenderBuffer> readback;
-    std::unique_ptr<RenderTexture> resolve_output;
-    std::unique_ptr<RenderDescriptorSet> resolve_set;
-    std::unique_ptr<RenderShader> resolve_shader;
-    std::unique_ptr<RenderPipelineLayout> resolve_layout;
-    std::unique_ptr<RenderPipeline> resolve_pipeline;
+    std::unique_ptr<TileResolve> tile_resolve;
     bool fully_initialized=false;
     RenderRect cleared_rectangle, resolved_rectangle;
 
@@ -43,26 +36,7 @@ struct ColorTarget::Impl {
         Require(bool(framebuffer),"Native HDR framebuffer creation failed");
         if (!shader.empty()) {
             Require(samples == 2, "Native scene color resolve requires two samples");
-            auto& device = gpu->device;
-            resolve_output = device->createTexture(RenderTextureDesc::Texture2D(width, height, 1, kFormat,
-                RenderTextureFlag::UNORDERED_ACCESS));
-            resolve_shader = device->createShader(shader.data(), shader.size(), "main", RenderShaderFormat::DXIL);
-            const RenderDescriptorRange ranges[] = {
-                {RenderDescriptorRangeType::TEXTURE, 0, 1}, {RenderDescriptorRangeType::READ_WRITE_TEXTURE, 0, 1}
-            };
-            const RenderDescriptorSetDesc set_desc(ranges, uint32_t(std::size(ranges)));
-            resolve_set = device->createDescriptorSet(set_desc);
-            Require(resolve_output && resolve_shader && resolve_set, "Native color resolve resource creation failed");
-            resolve_set->setTexture(0, texture.get(), RenderTextureLayout::SHADER_READ);
-            resolve_set->setTexture(1, resolve_output.get(), RenderTextureLayout::GENERAL);
-            const RenderPushConstantRange parameters(0, 0, 0, sizeof(ResolveParameters), RenderShaderStageFlag::COMPUTE);
-            RenderPipelineLayoutDesc layout;
-            layout.descriptorSetDescs = &set_desc; layout.descriptorSetDescsCount = 1;
-            layout.pushConstantRanges = &parameters; layout.pushConstantRangesCount = 1;
-            resolve_layout = device->createPipelineLayout(layout);
-            Require(bool(resolve_layout), "Native color resolve layout creation failed");
-            resolve_pipeline = device->createComputePipeline(RenderComputePipelineDesc(resolve_layout.get(), resolve_shader.get(), 8, 8, 1));
-            Require(bool(resolve_pipeline), "Native color resolve pipeline creation failed");
+            tile_resolve = std::make_unique<TileResolve>(*gpu, *texture, width, height, kFormat, shader);
         }
     }
     void RequireCleared(const RenderRect& rectangle) const {
@@ -90,27 +64,13 @@ struct ColorTarget::Impl {
         return completed;
     }
     uint64_t ResolveAndClear(const RenderRect& rectangle, int32_t exponent) {
-        Require(bool(resolve_pipeline), "Native color resolve shader is unavailable");
+        Require(bool(tile_resolve), "Native color resolve shader is unavailable");
         Require(exponent >= -32 && exponent <= 31, "Native color resolve exponent is out of range");
         RequireCleared(rectangle);
-        const ResolveParameters parameters = {uint32_t(rectangle.left), uint32_t(rectangle.top),
-            uint32_t(rectangle.right - rectangle.left), uint32_t(rectangle.bottom - rectangle.top),
-            std::ldexp(1.0f, exponent)};
         auto& commands = gpu->commands;
         commands->begin();
-        const RenderTextureBarrier barriers[] = {
-            {texture.get(), RenderTextureLayout::SHADER_READ}, {resolve_output.get(), RenderTextureLayout::GENERAL}
-        };
-        commands->barriers(RenderBarrierStage::COMPUTE, barriers, uint32_t(std::size(barriers)));
-        commands->setComputePipelineLayout(resolve_layout.get());
-        commands->setPipeline(resolve_pipeline.get());
-        commands->setComputeDescriptorSet(resolve_set.get(), 0);
-        commands->setComputePushConstants(0, &parameters);
-        commands->dispatch((parameters.width + 7) / 8, (parameters.height + 7) / 8, 1);
-        const RenderTextureBarrier after[] = {
-            {texture.get(), RenderTextureLayout::COLOR_WRITE}, {resolve_output.get(), RenderTextureLayout::SHADER_READ}
-        };
-        commands->barriers(RenderBarrierStage::GRAPHICS, after, uint32_t(std::size(after)));
+        tile_resolve->Record(rectangle, std::ldexp(1.0f, exponent));
+        commands->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(texture.get(), RenderTextureLayout::COLOR_WRITE));
         commands->setFramebuffer(framebuffer.get());
         commands->clearColor(0, RenderColor(0,0,0,0), &rectangle, 1);
         commands->end();
@@ -131,7 +91,7 @@ struct ColorTarget::Impl {
         Require(readback && (!resolve_for_read || resolved),"Native HDR readback allocation failed");
         auto& commands=gpu->commands;
         commands->begin();
-        auto* source = scene_resolve ? resolve_output.get() : texture.get();
+        auto* source = scene_resolve ? tile_resolve->Output() : texture.get();
         if (resolve_for_read) {
             commands->barriers(RenderBarrierStage::COPY,RenderTextureBarrier(texture.get(),RenderTextureLayout::RESOLVE_SOURCE));
             commands->barriers(RenderBarrierStage::COPY,RenderTextureBarrier(resolved.get(),RenderTextureLayout::RESOLVE_DEST));

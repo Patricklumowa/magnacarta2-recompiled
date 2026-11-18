@@ -3,8 +3,8 @@
 The standalone native renderer can execute the first captured indexed scene
 draw through D3D12. An opt-in live path now executes that draw and its preceding
 two-sample depth clear on the same device as the movies, without loading Xenos.
-The following HDR clear and first tile's indexed color draw and color resolve
-also run natively. The path stops at the depth resolve. Native menu and gameplay rendering,
+The following HDR clear, first tile's indexed color draw and both of its resolves
+also run natively. The path stops at the lower tile. Native menu and gameplay rendering,
 general surface lifetime, and scene composition remain unfinished.
 
 `NativeDevice` owns one device, queue, allocator/list and fence. Movie and depth
@@ -146,7 +146,7 @@ Passing an optional third directory (the captured first color draw) to
 the layout, predicate, scissor, clear color and cached attachment state.
 
 A live run with the Xenos DLL physically unavailable completed the depth draw,
-the HDR tile clear, and the first tile's color draw and resolve. Frame
+the HDR tile clear, and the first tile's color draw and both resolves. Frame
 composition remains unfinished.
 
 ## Compressed scene textures
@@ -247,6 +247,24 @@ CPU resource bookkeeping after the native fence.
 
 The offline replay compares every resolved channel with the D3D12 hardware
 average scaled by 1/8, and checks that the source clear stays within the tile.
-With the Xenos DLL physically absent, a live run completed that resolve and
-stopped at the following depth copy (`0x826DA314`). The lower tile and the
-passes that sample the resolved textures remain unfinished.
+To enable the first depth resolve as well, compile this file next to
+`color-resolve.dxil`:
+
+```text
+dxc -T cs_6_0 -E main -HV 2021 native/src/native_depth_resolve.hlsl -Fo <color-shaders>/depth-resolve.dxil
+mc2_native_depth_check <depth-VS.container> <depth-VS.dxil> <color-shaders>/depth-resolve.dxil
+```
+
+The native depth target uses distinct depth and shader views of its R32
+storage. The depth resolve reads sample zero and stores the decoded 20e4
+value in an R32_FLOAT texture, then clears the selected source rectangle.
+The game requests a zero stencil clear and the verified draw has stencil
+disabled. Native draw-time depth testing still uses D32_FLOAT.
+
+The diagonal test verifies that sample-one-only pixels stay clear in this
+copy, while the diagnostic maximum includes them. The captured scene check
+also verifies float24-representable output, scoped depth clear and retention
+outside the selected rectangle. A live run with the Xenos DLL physically
+absent completed both upper-tile copies and clears. It stopped at the color
+resolve for predicate `8`. Replay of that lower tile and the passes that
+sample these textures remain unfinished.

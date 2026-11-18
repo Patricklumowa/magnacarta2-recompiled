@@ -1,6 +1,7 @@
 #include "native_depth.h"
 #include "native_color_target.h"
 #include "native_sampled_texture.h"
+#include "native_tile_resolve.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -202,17 +203,31 @@ struct DepthRenderer::Impl {
     std::shared_ptr<NativeDevice> gpu;
     IndexedPipeline draw_pipeline;
     std::unique_ptr<RenderTexture> target, resolved;
+    std::unique_ptr<RenderTextureView> depth_view, sample_view;
     std::unique_ptr<RenderFramebuffer> framebuffer;
     std::unique_ptr<RenderBuffer> readback;
+    std::unique_ptr<TileResolve> tile_resolve;
+    RenderRect resolved_rectangle;
     bool initialized = false;
 
-    Impl(const DepthConfiguration& c, std::shared_ptr<NativeDevice> context)
+    Impl(const DepthConfiguration& c, std::shared_ptr<NativeDevice> context, std::span<const uint8_t> resolve_shader)
         : width(c.width), height(c.height), samples(c.sample_count), gpu(std::move(context)), draw_pipeline(c, gpu.get()) {
-        target = gpu->device->createTexture(RenderTextureDesc::DepthTarget(width, height, RenderFormat::D32_FLOAT,
+        const bool sample_depth = !resolve_shader.empty();
+        Require(!sample_depth || samples == 2, "Native scene depth resolve requires two samples");
+        const auto storage = sample_depth ? RenderFormat::R32_TYPELESS : RenderFormat::D32_FLOAT;
+        target = gpu->device->createTexture(RenderTextureDesc::DepthTarget(width, height, storage,
                                                                           RenderMultisampling(samples)));
         Require(bool(target), "Native depth allocation failed");
+        if (sample_depth) {
+            depth_view = target->createTextureView(RenderTextureViewDesc::Texture2D(RenderFormat::D32_FLOAT));
+            sample_view = target->createTextureView(RenderTextureViewDesc::Texture2D(RenderFormat::R32_FLOAT));
+            Require(depth_view && sample_view, "Native depth view creation failed");
+            tile_resolve = std::make_unique<TileResolve>(*gpu, *target, width, height, RenderFormat::R32_FLOAT,
+                                                        resolve_shader, sample_view.get());
+        }
         RenderFramebufferDesc framebuffer_desc;
         framebuffer_desc.depthAttachment = target.get();
+        framebuffer_desc.depthAttachmentView = depth_view.get();
         framebuffer = gpu->device->createFramebuffer(framebuffer_desc);
         Require(bool(framebuffer), "Native depth framebuffer creation failed");
     }
@@ -235,13 +250,64 @@ struct DepthRenderer::Impl {
         gpu->Complete();
         initialized = true;
     }
+    void EnsureReadback() {
+        if (!readback)
+            readback = gpu->device->createBuffer(RenderBufferDesc::ReadbackBuffer(size_t((width * 4 + 255) & ~255u) * height));
+        Require(bool(readback), "Native depth readback allocation failed");
+    }
+    void RecordReadback(RenderTexture* source, const RenderRect& rectangle) {
+        const uint32_t w = rectangle.right - rectangle.left, h = rectangle.bottom - rectangle.top;
+        const auto pitch = (w * 4 + 255) & ~255u;
+        const RenderBox box(rectangle.left, rectangle.top, rectangle.right, rectangle.bottom);
+        auto& commands = gpu->commands;
+        commands->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(source, RenderTextureLayout::COPY_SOURCE));
+        commands->copyTextureRegion(RenderTextureCopyLocation::PlacedFootprint(readback.get(), RenderFormat::R32_FLOAT,
+            w, h, 1, pitch / 4), RenderTextureCopyLocation::Subresource(source), 0, 0, 0, &box);
+    }
+    std::vector<float> MappedDepth(uint32_t w, uint32_t h) {
+        const auto pitch = (w * 4 + 255) & ~255u;
+        std::vector<float> pixels(size_t(w) * h);
+        const auto* bytes = static_cast<const uint8_t*>(readback->map());
+        Require(bytes != nullptr, "Native depth readback mapping failed");
+        for (uint32_t y = 0; y < h; ++y)
+            std::memcpy(pixels.data() + size_t(y) * w, bytes + size_t(y) * pitch, w * 4);
+        readback->unmap();
+        return pixels;
+    }
+    uint64_t ResolveAndClear(const RenderRect& rectangle) {
+        Require(tile_resolve && initialized, "Native depth resolve requires a configured and initialized target");
+        Require(!rectangle.isEmpty() && rectangle.left >= 0 && rectangle.top >= 0 &&
+                uint32_t(rectangle.right) <= width && uint32_t(rectangle.bottom) <= height,
+                "Native depth resolve rectangle is out of bounds");
+        auto& commands = gpu->commands;
+        commands->begin();
+        tile_resolve->Record(rectangle, 1);
+        commands->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(target.get(), RenderTextureLayout::DEPTH_WRITE));
+        commands->setFramebuffer(framebuffer.get());
+        commands->clearDepth(true, 0, &rectangle, 1);
+        commands->end();
+        gpu->queue->executeCommandLists(commands.get(), gpu->fence.get());
+        const auto completed = gpu->Complete();
+        resolved_rectangle = rectangle;
+        return completed;
+    }
+    std::vector<float> ReadResolvedPixels() {
+        Require(!resolved_rectangle.isEmpty(), "Native depth resolve has not completed");
+        EnsureReadback();
+        auto& commands = gpu->commands;
+        auto* source = tile_resolve->Output();
+        commands->begin();
+        RecordReadback(source, resolved_rectangle);
+        commands->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(source, RenderTextureLayout::SHADER_READ));
+        commands->end();
+        gpu->queue->executeCommandLists(commands.get(), gpu->fence.get());
+        gpu->Complete();
+        return MappedDepth(resolved_rectangle.right - resolved_rectangle.left, resolved_rectangle.bottom - resolved_rectangle.top);
+    }
     DepthResult Render(const DepthDraw& draw, bool read_pixels) {
         Require(initialized, "Native depth target has not been cleared");
         draw_pipeline.Prepare(draw);
-        const auto pitch = (width * 4 + 255) & ~255u;
-        if (read_pixels && !readback)
-            readback = gpu->device->createBuffer(RenderBufferDesc::ReadbackBuffer(size_t(pitch) * height));
-        Require(!read_pixels || bool(readback), "Native depth readback allocation failed");
+        if (read_pixels) EnsureReadback();
         if (read_pixels && samples > 1 && !resolved)
             resolved = gpu->device->createTexture(RenderTextureDesc::Texture2D(width, height, 1, RenderFormat::R32_FLOAT));
         Require(!read_pixels || samples == 1 || bool(resolved), "Native depth resolve allocation failed");
@@ -258,30 +324,24 @@ struct DepthRenderer::Impl {
                 commands->resolveTextureRegion(resolved.get(), 0, 0, target.get(), nullptr, RenderResolveMode::MAX);
                 read_target = resolved.get();
             }
-            commands->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(read_target, RenderTextureLayout::COPY_SOURCE));
-            commands->copyTextureRegion(RenderTextureCopyLocation::PlacedFootprint(readback.get(), RenderFormat::R32_FLOAT,
-                width, height, 1, pitch / 4), RenderTextureCopyLocation::Subresource(read_target));
+            RecordReadback(read_target, RenderRect(0,0,width,height));
         }
         commands->end();
         gpu->queue->executeCommandLists(commands.get(), gpu->fence.get());
         DepthResult result;
         result.completed_submission = gpu->Complete(); result.debug_layer = gpu->debug_enabled;
-        if (read_pixels) {
-            result.pixels.resize(size_t(width) * height);
-            const auto* bytes = static_cast<const uint8_t*>(readback->map());
-            Require(bytes != nullptr, "Native depth readback mapping failed");
-            for (uint32_t y = 0; y < height; ++y)
-                std::memcpy(result.pixels.data() + size_t(y) * width, bytes + size_t(y) * pitch, width * 4);
-            readback->unmap();
-        }
+        if (read_pixels) result.pixels = MappedDepth(width, height);
         return result;
     }
 };
-DepthRenderer::DepthRenderer(const DepthConfiguration& configuration, std::shared_ptr<NativeDevice> device)
-    : impl_(std::make_unique<Impl>(configuration, std::move(device))) {}
+DepthRenderer::DepthRenderer(const DepthConfiguration& configuration, std::shared_ptr<NativeDevice> device,
+                             std::span<const uint8_t> resolve_shader)
+    : impl_(std::make_unique<Impl>(configuration, std::move(device), resolve_shader)) {}
 DepthRenderer::~DepthRenderer() = default;
 void DepthRenderer::Clear(float depth, const RenderRect* rectangle) { impl_->Clear(depth, rectangle); }
 DepthResult DepthRenderer::Render(const DepthDraw& draw, bool read_pixels) { return impl_->Render(draw, read_pixels); }
+uint64_t DepthRenderer::ResolveAndClear(const RenderRect& rectangle) { return impl_->ResolveAndClear(rectangle); }
+std::vector<float> DepthRenderer::ReadResolvedPixels() { return impl_->ReadResolvedPixels(); }
 
 struct ColorRenderer::Impl {
     DepthRenderer::Impl& depth;
@@ -301,6 +361,7 @@ struct ColorRenderer::Impl {
         const RenderTexture* target = attachment;
         desc.colorAttachments = &target; desc.colorAttachmentsCount = 1;
         desc.depthAttachment = depth.target.get();
+        desc.depthAttachmentView = depth.depth_view.get();
         framebuffer = depth.gpu->device->createFramebuffer(desc);
         Require(bool(framebuffer), "Native color/depth framebuffer creation failed");
     }

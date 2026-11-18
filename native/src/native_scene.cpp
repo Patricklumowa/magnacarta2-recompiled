@@ -140,9 +140,11 @@ SceneColorShaders LoadColorShaders(const std::filesystem::path& directory) {
     };
     Require(vertex.inputs == expected, "Scene color shader input layout differs from the verified shader");
     SceneColorShaders shaders{std::move(vertex), ReadNativeFile(directory / "pixel-shader.container"),
-                              ReadNativeFile(directory / "pixel-7e3.dxil"), {}};
+                              ReadNativeFile(directory / "pixel-7e3.dxil"), {}, {}};
     const auto resolve_path = directory / "color-resolve.dxil";
     if (std::filesystem::exists(resolve_path)) shaders.resolve_dxil = ReadNativeFile(resolve_path);
+    const auto depth_resolve_path = directory / "depth-resolve.dxil";
+    if (std::filesystem::exists(depth_resolve_path)) shaders.depth_resolve_dxil = ReadNativeFile(depth_resolve_path);
     return shaders;
 }
 DepthConfiguration ConfigureDepth(const SceneSurface& surface, const SceneVertexShader& shader) {
@@ -230,34 +232,45 @@ SceneColorDraw ReadSceneColorDraw(const PPCContext& ctx, uint8_t* base, const Sc
     return snapshot;
 }
 
-SceneColorResolve ReadSceneColorResolve(const PPCContext& ctx, uint8_t* base) {
+SceneTileResolve ReadSceneTileResolve(const PPCContext& ctx, uint8_t* base) {
     // Color 0, default sample selection (both samples), exponent -3, and
-    // clear color after copy. The depth resolve has a different contract.
-    Require(ctx.lr == 0x826DA2D8 && ctx.r4.u32 == 0xF4000100 && ctx.r8.u32 == 0 && ctx.r9.u32 == 0,
+    // clear color after copy. The depth copy selects sample zero and clears depth/stencil.
+    const bool color = ctx.lr == 0x826DA2D8 && ctx.r4.u32 == 0xF4000100;
+    const bool depth = ctx.lr == 0x826DA314 && ctx.r4.u32 == 0x214;
+    Require((color || depth) && ctx.r8.u32 == 0 && ctx.r9.u32 == 0,
             "Unsupported native tiled resolve flags or caller");
     DeviceState state(base, ctx.r3.u32);
-    SceneColorResolve resolve;
-    resolve.source = ReadTiledColorSurface(state, base);
+    SceneTileResolve resolve;
+    resolve.color = ReadTiledColorSurface(state, base);
+    resolve.depth = state.DepthSurface(base, 512);
+    resolve.copy_depth = depth;
     Require(state.Word(12724) == 1 && state.Word(12716) == 2 && state.Word(10932) == 2,
-            "Native color resolve requires the first tile predicate");
+            "Native scene resolve requires the first tile predicate");
     std::vector<uint8_t> rectangle, origin, clear, destination;
     Require(ReadGuest(base, ctx.r5.u32, 16, rectangle) && LoadBE32(rectangle.data()) == 0 &&
             LoadBE32(rectangle.data() + 4) == 0 && LoadBE32(rectangle.data() + 8) == 1280 &&
-            LoadBE32(rectangle.data() + 12) == 512, "Native color resolve rectangle differs");
+            LoadBE32(rectangle.data() + 12) == 512, "Native resolve rectangle differs");
     Require(ReadGuest(base, ctx.r7.u32, 8, origin) && LoadBE32(origin.data()) == 0 && LoadBE32(origin.data() + 4) == 0,
-            "Native color resolve destination origin differs");
-    Require(ReadGuest(base, 0x82247720, 16, clear) &&
-            std::all_of(clear.begin(), clear.end(), [](uint8_t byte) { return byte == 0; }),
-            "Native color resolve requires the verified zero clear");
+            "Native resolve destination origin differs");
+    if (depth) {
+        Require(ctx.f1.f64 == 0 && mc2::capture::GuestRange(ctx.r1.u32, 88) &&
+                ReadGuest(base, ctx.r1.u32 + 84, 4, clear) && LoadBE32(clear.data()) == 0,
+                "Native depth resolve requires a zero depth and stencil clear");
+    } else {
+        Require(ReadGuest(base, 0x82247720, 16, clear) &&
+                std::all_of(clear.begin(), clear.end(), [](uint8_t byte) { return byte == 0; }),
+                "Native color resolve requires the verified zero clear");
+    }
     Require(ReadGuest(base, ctx.r6.u32, 52, destination) && (LoadBE32(destination.data()) & 15) == 3,
-            "Invalid native color resolve destination texture");
+            "Invalid native resolve destination texture");
     const auto word = [&](uint32_t offset) { return LoadBE32(destination.data() + offset); };
-    Require(word(28) == 0x8a000156 && (word(32) & 4095) == 0x60 && (word(32) >> 12) != 0 &&
+    Require(word(28) == (depth ? 0x8a000002 : 0x8a000156) &&
+            (word(32) & 4095) == (depth ? 0x97u : 0x60u) && (word(32) >> 12) != 0 &&
             word(36) == 0x59e4ff && word(40) == 0xd11 && word(44) == 0 && word(48) == 0xa00,
-            "Native color resolve requires the verified full-size tiled RGBA16F destination");
+            "Native resolve requires the verified full-size tiled texture destination");
     resolve.destination = ctx.r6.u32;
     resolve.rectangle = plume::RenderRect(0,0,1280,512);
-    resolve.exponent = -3;
+    resolve.exponent = depth ? 0 : -3;
     return resolve;
 }
 }

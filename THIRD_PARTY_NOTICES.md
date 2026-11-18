@@ -11,6 +11,9 @@ inspection tools reference Xenia's documented XEX layout and conventions.
 The piecewise texture-gamma helper in the XenosRecomp patch is adapted from
 ReXGlue/Xenia's `PWLGammaToLinear` and retains BSD-3-Clause terms, including
 Copyright (c) 2018 Ben Vanik and Copyright (c) 2026 Tom Clay.
+The float24 depth resolve helper in `native/src/native_depth_resolve.hlsl`
+adapts `Float32To20e4` and `Float20e4To32` under the same terms, including
+Copyright (c) 2020 Ben Vanik and Copyright (c) 2026 Tom Clay.
 
 ReXGlue v0.10.1 is pinned to revision
 `bd833a2ab69d305f99ddf57418fc38ffec8af93d`:
