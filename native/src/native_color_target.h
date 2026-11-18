@@ -20,7 +20,9 @@ class ColorTarget {
  private:
     friend class ColorRenderer;
     static constexpr auto kFormat = plume::RenderFormat::R16G16B16A16_FLOAT;
+    NativeDevice& Device() const;
     plume::RenderTexture* Attachment(const NativeDevice& gpu, uint32_t width, uint32_t height, uint32_t samples);
+    const plume::RenderTexture* ResolvedTexture(const NativeDevice& gpu) const;
     void RequireCleared(const plume::RenderRect& rectangle) const;
     struct Impl;
     std::unique_ptr<Impl> impl_;

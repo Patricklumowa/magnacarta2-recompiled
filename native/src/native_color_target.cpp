@@ -121,10 +121,17 @@ uint64_t ColorTarget::Clear(RenderColor value,const RenderRect* rectangle) { ret
 uint64_t ColorTarget::ResolveAndClear(const RenderRect& rectangle, int32_t exponent) { return impl_->ResolveAndClear(rectangle, exponent); }
 std::vector<uint16_t> ColorTarget::ReadPixels() { return impl_->ReadPixels(false); }
 std::vector<uint16_t> ColorTarget::ReadResolvedPixels() { return impl_->ReadPixels(true); }
+NativeDevice& ColorTarget::Device() const { return *impl_->gpu; }
 RenderTexture* ColorTarget::Attachment(const NativeDevice& gpu, uint32_t width, uint32_t height, uint32_t samples) {
     Require(impl_->gpu.get() == &gpu && impl_->width == width && impl_->height == height && impl_->samples == samples,
             "Native color and depth attachments must share a device, extent and sample count");
     return impl_->texture.get();
+}
+const RenderTexture* ColorTarget::ResolvedTexture(const NativeDevice& gpu) const {
+    Require(impl_->gpu.get() == &gpu && impl_->tile_resolve &&
+            impl_->tile_resolve->CompletedRegion() == RenderRect(0,0,impl_->width,impl_->height),
+            "Native color sampling requires a fully resolved texture on the draw device");
+    return impl_->tile_resolve->Output();
 }
 void ColorTarget::RequireCleared(const RenderRect& rectangle) const {
     impl_->RequireCleared(rectangle);

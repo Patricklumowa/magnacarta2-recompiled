@@ -361,10 +361,10 @@ void Capture(PPCContext& ctx, uint8_t* base, const char* hook, uint32_t guest_ho
 }  // namespace
 
 REX_HOOK_RAW(sub_828652A0) {
-#ifdef MC2_ENABLE_NATIVE_BOOT
-  if (mc2::native::NativeBootActive()) mc2::native::UnsupportedNativeOperation("nonindexed draw", ctx);
-#endif
   Capture(ctx, base, "nonindexed", 0x828652A0);
+#ifdef MC2_ENABLE_NATIVE_BOOT
+  if (mc2::native::NativeBootActive()) { mc2::native::DrawNativeSceneNonIndexed(ctx,base); return; }
+#endif
   __imp__sub_828652A0(ctx, base);
 }
 REX_HOOK_RAW(sub_82865690) {

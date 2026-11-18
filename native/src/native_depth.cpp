@@ -42,7 +42,7 @@ struct IndexedPipeline {
 
     IndexedPipeline(const DepthConfiguration& c, NativeDevice* device_context, std::span<const uint8_t> ps = {},
                     std::span<const RenderSamplerDesc> sampler_descs = {}, RenderFormat color_format = RenderFormat::UNKNOWN,
-                    RenderFormat depth_format = RenderFormat::D32_FLOAT)
+                    RenderFormat depth_format = RenderFormat::D32_FLOAT, uint8_t color_write_mask = 0xf)
         : gpu(device_context), width(c.width), height(c.height) {
         Require(gpu && c.width && c.height && c.width <= 8192 && c.height <= 8192,
                 "Invalid native indexed target");
@@ -109,11 +109,13 @@ struct IndexedPipeline {
             desc.renderTargetCount = 1;
             desc.renderTargetFormat[0] = color_format;
             desc.renderTargetBlend[0] = RenderBlendDesc::Copy();
+            desc.renderTargetBlend[0].renderTargetWriteMask = color_write_mask;
         }
         const RenderInputSlot slots[] = {slot, dummy_slot};
         desc.inputSlots = slots; desc.inputSlotsCount = 2;
         desc.inputElements = elements.data(); desc.inputElementsCount = uint32_t(elements.size());
-        desc.depthEnabled = true; desc.depthWriteEnabled = c.write; desc.depthClipEnabled = c.clip;
+        desc.depthEnabled = depth_format != RenderFormat::UNKNOWN;
+        desc.depthWriteEnabled = desc.depthEnabled && c.write; desc.depthClipEnabled = c.clip;
         desc.depthFunction = c.comparison; desc.cullMode = c.cull;
         desc.multisampling = RenderMultisampling(c.sample_count);
         desc.depthTargetFormat = depth_format;
@@ -372,45 +374,43 @@ uint64_t DepthRenderer::RestoreResolvedDepth(const DepthConfiguration& config, c
 }
 
 struct ColorRenderer::Impl {
-    DepthRenderer::Impl& depth;
+    DepthRenderer::Impl* depth;
     ColorTarget& color;
+    NativeDevice& gpu;
     RenderTexture* attachment;
     IndexedPipeline pipeline;
     std::unique_ptr<RenderFramebuffer> framebuffer;
 
     Impl(const DepthConfiguration& configuration, std::span<const uint8_t> pixel_shader,
-         std::span<const RenderSamplerDesc> samplers, DepthRenderer& depth_renderer, ColorTarget& color_target)
-        : depth(*depth_renderer.impl_), color(color_target),
-          attachment(color.Attachment(*depth.gpu, depth.width, depth.height, depth.samples)),
-          pipeline(configuration, depth.gpu.get(), pixel_shader, samplers, ColorTarget::kFormat) {
-        Require(configuration.width == depth.width && configuration.height == depth.height &&
-                configuration.sample_count == depth.samples, "Native color pipeline differs from its attachments");
+         std::span<const RenderSamplerDesc> samplers, DepthRenderer* depth_renderer, ColorTarget& color_target, uint8_t write_mask)
+        : depth(depth_renderer ? depth_renderer->impl_.get() : nullptr), color(color_target), gpu(color.Device()),
+          attachment(color.Attachment(gpu, configuration.width, configuration.height, configuration.sample_count)),
+          pipeline(configuration, &gpu, pixel_shader, samplers, ColorTarget::kFormat,
+                   depth ? RenderFormat::D32_FLOAT : RenderFormat::UNKNOWN, write_mask) {
+        Require(!depth || (configuration.width == depth->width && configuration.height == depth->height &&
+                configuration.sample_count == depth->samples && depth->gpu.get() == &gpu),
+                "Native color pipeline differs from its depth attachment");
         RenderFramebufferDesc desc;
         const RenderTexture* target = attachment;
         desc.colorAttachments = &target; desc.colorAttachmentsCount = 1;
-        desc.depthAttachment = depth.target.get();
-        desc.depthAttachmentView = depth.depth_view.get();
-        framebuffer = depth.gpu->device->createFramebuffer(desc);
-        Require(bool(framebuffer), "Native color/depth framebuffer creation failed");
+        if (depth) {
+            desc.depthAttachment = depth->target.get();
+            desc.depthAttachmentView = depth->depth_view.get();
+        }
+        framebuffer = gpu.device->createFramebuffer(desc);
+        Require(bool(framebuffer), "Native color framebuffer creation failed");
     }
     uint64_t Render(const DepthDraw& draw, std::span<const uint8_t> pixel_constants,
-                    std::span<const SampledTexture* const> textures) {
-        Require(depth.initialized, "Native depth target has not been cleared");
+                    std::span<const RenderTexture* const> textures) {
+        Require(!depth || depth->initialized, "Native depth target has not been cleared");
         color.RequireCleared(draw.scissor);
-        std::array<const RenderTexture*, 16> views{};
-        Require(textures.size() <= views.size(), "Too many native sampled textures");
-        for (size_t i = 0; i < textures.size(); ++i) {
-            Require(textures[i] && &textures[i]->Device() == depth.gpu.get(), "Native sampled texture belongs to a different device or is missing");
-            views[i] = textures[i]->Texture();
-        }
-        pipeline.Prepare(draw, pixel_constants, std::span(views).first(textures.size()));
-        auto& gpu = *depth.gpu;
+        pipeline.Prepare(draw, pixel_constants, textures);
         auto& commands = gpu.commands;
         const RenderTextureBarrier barriers[] = {
-            {attachment, RenderTextureLayout::COLOR_WRITE}, {depth.target.get(), RenderTextureLayout::DEPTH_WRITE}
+            {attachment, RenderTextureLayout::COLOR_WRITE}, {depth ? depth->target.get() : nullptr, RenderTextureLayout::DEPTH_WRITE}
         };
         commands->begin();
-        commands->barriers(RenderBarrierStage::GRAPHICS, barriers, uint32_t(std::size(barriers)));
+        commands->barriers(RenderBarrierStage::GRAPHICS, barriers, depth ? 2 : 1);
         commands->setFramebuffer(framebuffer.get());
         pipeline.Record(draw);
         commands->end();
@@ -420,10 +420,23 @@ struct ColorRenderer::Impl {
 };
 ColorRenderer::ColorRenderer(const DepthConfiguration& c, std::span<const uint8_t> ps,
                              std::span<const RenderSamplerDesc> samplers, DepthRenderer& depth, ColorTarget& color)
-    : impl_(std::make_unique<Impl>(c, ps, samplers, depth, color)) {}
+    : impl_(std::make_unique<Impl>(c, ps, samplers, &depth, color, 0xf)) {}
+ColorRenderer::ColorRenderer(const DepthConfiguration& c, std::span<const uint8_t> ps,
+                             std::span<const RenderSamplerDesc> samplers, ColorTarget& color, uint8_t write_mask)
+    : impl_(std::make_unique<Impl>(c, ps, samplers, nullptr, color, write_mask)) {}
 ColorRenderer::~ColorRenderer() = default;
 uint64_t ColorRenderer::Render(const DepthDraw& draw, std::span<const uint8_t> ps,
                                std::span<const SampledTexture* const> textures) {
-    return impl_->Render(draw, ps, textures);
+    std::array<const RenderTexture*, 16> views{};
+    Require(textures.size() <= views.size(), "Too many native sampled textures");
+    for (size_t i = 0; i < textures.size(); ++i) {
+        Require(textures[i] && &textures[i]->Device() == &impl_->gpu, "Native sampled texture belongs to a different device or is missing");
+        views[i] = textures[i]->Texture();
+    }
+    return impl_->Render(draw, ps, std::span(views).first(textures.size()));
+}
+uint64_t ColorRenderer::RenderResolved(const DepthDraw& draw, std::span<const uint8_t> ps, const ColorTarget& source) {
+    const RenderTexture* texture = source.ResolvedTexture(impl_->gpu);
+    return impl_->Render(draw, ps, std::span(&texture, 1));
 }
 }

@@ -22,7 +22,7 @@ REXCVAR_DEFINE_BOOL(mc2_native_boot, false, "Development", "Experimental native 
 REXCVAR_DEFINE_STRING(mc2_native_boot_shader_dir, "", "Development", "Verified first-draw movie shader inputs for native boot");
 REXCVAR_DEFINE_STRING(mc2_native_boot_depth_shader_dir, "", "Development", "Optional verified indexed depth shader inputs for native boot");
 REXCVAR_DEFINE_STRING(mc2_native_boot_color_shader_dir, "", "Development", "Optional verified indexed color shader inputs for native boot");
-REXCVAR_DEFINE_BOOL(mc2_scene_resolve_trace, false, "Development", "Log the first tiled scene resolve arguments on the reference renderer");
+REXCVAR_DEFINE_BOOL(mc2_scene_resolve_trace, false, "Development", "Log the first scene and postprocess resolve arguments");
 
 namespace mc2::native {
 namespace {
@@ -77,6 +77,10 @@ struct PendingDepthRestore {
     SceneDepthRestore scene;
     uint32_t vertices, endpoint;
 };
+struct PendingFullscreenDraw {
+    SceneFullscreenDraw scene;
+    uint32_t vertices, indices, endpoint;
+};
 
 class NativeGraphics final : public rex::system::IGraphicsSystem {
  public:
@@ -86,7 +90,8 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     std::unique_ptr<QuadRenderer> renderer;
     std::optional<SceneVertexShader> depth_shaders;
     std::optional<SceneColorShaders> color_shaders;
-    std::optional<SceneDepthRestoreShaders> depth_restore_shaders;
+    std::optional<ScenePassShaders> depth_restore_shaders;
+    std::optional<ScenePassShaders> fullscreen_shaders, color_grade_shaders;
     std::optional<SceneSurface> depth_surface,color_surface;
     std::unique_ptr<DepthRenderer> depth_renderer;
     std::unique_ptr<ColorTarget> color_target;
@@ -95,6 +100,10 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     std::unique_ptr<plume::RenderFramebuffer> stencil_framebuffer;
     std::optional<PendingDepthRestore> pending_restore;
     bool depth_restored = false;
+    std::optional<PendingFullscreenDraw> pending_fullscreen;
+    std::optional<SceneSurface> fullscreen_surface;
+    std::unique_ptr<ColorTarget> fullscreen_target;
+    bool color_graded = false;
     plume::RenderRect cleared_tile;
     std::optional<DepthDraw> prepass_draw;
     std::optional<TiledSceneDraw> scene_draw;
@@ -119,6 +128,10 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             color_shaders = LoadColorShaders(color_directory);
             const auto restore_directory = std::filesystem::path(color_directory) / "depth-restore";
             if (std::filesystem::is_directory(restore_directory)) depth_restore_shaders = LoadDepthRestoreShaders(restore_directory);
+            const auto fullscreen_directory = std::filesystem::path(color_directory) / "fullscreen";
+            if (std::filesystem::is_directory(fullscreen_directory)) fullscreen_shaders = LoadFullscreenColorShaders(fullscreen_directory, false);
+            const auto grade_directory = std::filesystem::path(color_directory) / "color-grade";
+            if (std::filesystem::is_directory(grade_directory)) color_grade_shaders = LoadFullscreenColorShaders(grade_directory, true);
         }
         NativeGraphics* expected = nullptr;
         Require(active.compare_exchange_strong(expected, this), "Only one native graphics system is supported");
@@ -135,6 +148,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     void Shutdown() override {
         std::lock_guard lock(mutex);
         prepass_draw.reset(); scene_draw.reset(); pending_restore.reset();
+        pending_fullscreen.reset(); fullscreen_target.reset();
         stencil_framebuffer.reset(); stencil_target.reset();
         pending.reset(); renderer.reset(); depth_renderer.reset(); color_target.reset(); gpu.reset();
     }
@@ -147,36 +161,45 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     }
     void EnableReadPointerWriteBack(uint32_t, uint32_t) override {}
 
-    void ClearStencil(const PPCContext& ctx, uint8_t* base) {
+    void ClearPostprocessDepthStencil(const PPCContext& ctx, uint8_t* base) {
         using namespace plume;
-        const auto surface = ReadSceneStencilClear(ctx, base);
+        const auto surface = ReadPostprocessDepthStencilClear(ctx, base);
+        const bool clear_depth = ctx.r4.u32 == 0x30;
         Flush(base, ctx.r3.u32);
         std::lock_guard lock(mutex);
-        Require(scene_tiles_retired && !stencil_surface, "Unexpected native stencil clear outside the first postprocess pass");
-        stencil_target = gpu->device->createTexture(RenderTextureDesc::DepthTarget(
-            surface.width, surface.height, RenderFormat::D32_FLOAT_S8_UINT));
-        Require(bool(stencil_target), "Native stencil allocation failed");
-        RenderFramebufferDesc desc;
-        desc.depthAttachment = stencil_target.get();
-        stencil_framebuffer = gpu->device->createFramebuffer(desc);
-        Require(bool(stencil_framebuffer), "Native stencil framebuffer creation failed");
+        Require(scene_tiles_retired && (clear_depth ? (fullscreen_target && stencil_surface && *stencil_surface == surface) : !stencil_surface),
+                "Unexpected native depth/stencil clear outside the first postprocess pass");
+        if (!stencil_target) {
+            stencil_target = gpu->device->createTexture(RenderTextureDesc::DepthTarget(
+                surface.width, surface.height, RenderFormat::D32_FLOAT_S8_UINT));
+            Require(bool(stencil_target), "Native stencil allocation failed");
+            RenderFramebufferDesc desc;
+            desc.depthAttachment = stencil_target.get();
+            stencil_framebuffer = gpu->device->createFramebuffer(desc);
+            Require(bool(stencil_framebuffer), "Native stencil framebuffer creation failed");
+        }
         auto& commands = gpu->commands;
         commands->begin();
         commands->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(stencil_target.get(), RenderTextureLayout::DEPTH_WRITE));
         commands->setFramebuffer(stencil_framebuffer.get());
-        commands->clearDepthStencil(false, true, 0, 0, nullptr, 0);
+        commands->clearDepthStencil(clear_depth, true, 0, 0, nullptr, 0);
         commands->end();
         gpu->queue->executeCommandLists(commands.get(), gpu->fence.get());
         completed = gpu->Complete();
         stencil_surface = surface;
-        REXLOG_INFO("MC2 native scene: cleared {}x{} single-sample stencil surface {:#x}, completed={}",
-                    surface.width, surface.height, surface.address, completed);
+        REXLOG_INFO("MC2 native scene: cleared single-sample {} at {:#x}, completed={}",
+                    clear_depth ? "depth and stencil" : "stencil", surface.address, completed);
     }
 
     bool Clear(const PPCContext& ctx, uint8_t* base) {
         if (!depth_shaders) return false;
-        if (ctx.r4.u32 == 0x20) {
-            ClearStencil(ctx, base);
+        bool postprocess_clear = ctx.r4.u32 == 0x20;
+        if (ctx.r4.u32 == 0x30) {
+            std::lock_guard lock(mutex);
+            postprocess_clear = bool(fullscreen_target);
+        }
+        if (postprocess_clear) {
+            ClearPostprocessDepthStencil(ctx, base);
             return true;
         }
         if (!(ctx.r4.u32 & 0x30)) {
@@ -394,6 +417,60 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
                     scene_textures[1].address, completed);
     }
 
+    void BeginFullscreenDraw(PPCContext& ctx, uint8_t* base) {
+        const uint32_t device = ctx.r3.u32;
+        SceneFullscreenDraw scene;
+        {
+            std::lock_guard lock(mutex);
+            Require(device && device == guest_device && depth_restored && fullscreen_shaders && !pending_fullscreen && !fullscreen_target,
+                    "Indexed begin-UP draw requires the first fullscreen HDR shaders");
+            scene = ReadSceneFullscreenDraw(ctx, base, *fullscreen_shaders, scene_textures[0], false);
+        }
+        const auto vertex_out = REX_LOAD_U32(ctx.r1.u32 + 84), index_out = ctx.r10.u32;
+        __imp__sub_82864D88(ctx, base);
+        Require(ctx.r3.u32 == 0, "Fullscreen HDR staging allocation failed");
+        const auto vertices = REX_LOAD_U32(vertex_out), indices = REX_LOAD_U32(index_out);
+        const auto endpoint = REX_LOAD_U32(device + 13444);
+        Require(vertices && indices && endpoint && !(vertices & 15) && !(indices & 3) && !(endpoint & 3),
+                "Invalid fullscreen HDR staging addresses");
+        std::lock_guard lock(mutex);
+        pending_fullscreen = PendingFullscreenDraw{std::move(scene), vertices, indices, endpoint};
+    }
+
+    void CompleteFullscreenDraw(uint8_t* base) {
+        std::lock_guard lock(mutex);
+        if (!pending_fullscreen) return;
+        auto& copy = *pending_fullscreen;
+        Require(REX_LOAD_U32(guest_device + 48) == copy.endpoint, "Guest did not commit the fullscreen HDR geometry");
+        ReadFullscreenUpVertices(copy.scene.draw, base, copy.vertices, copy.indices);
+        const auto& surface = copy.scene.surface;
+        fullscreen_target = std::make_unique<ColorTarget>(surface.width, surface.height, surface.samples, gpu);
+        fullscreen_target->Clear(plume::RenderColor(0,0,0,0));
+        auto configuration = ConfigureDepth(surface, fullscreen_shaders->vertex);
+        configuration.cull = plume::RenderCullMode::NONE;
+        const auto sampler = FullscreenColorSampler();
+        ColorRenderer renderer(configuration, fullscreen_shaders->pixel_dxil, std::span(&sampler, 1), *fullscreen_target);
+        completed = renderer.RenderResolved(copy.scene.draw, copy.scene.pixel_constants, *color_target);
+        fullscreen_surface = surface;
+        pending_fullscreen.reset();
+        REXLOG_INFO("MC2 native scene: fullscreen HDR copy, completed={}", completed);
+    }
+
+    void DrawColorGrade(const PPCContext& ctx, uint8_t* base) {
+        Require(color_grade_shaders && ctx.r3.u32 && ctx.r3.u32 == guest_device, "Nonindexed draw requires the verified color grade shaders");
+        Flush(base, ctx.r3.u32);
+        std::lock_guard lock(mutex);
+        auto scene = ReadSceneFullscreenDraw(ctx, base, *color_grade_shaders, scene_textures[0], true);
+        Require(fullscreen_target && fullscreen_surface && *fullscreen_surface == scene.surface && !color_graded,
+                "Color grading requires the first fullscreen HDR target");
+        const auto sampler = FullscreenColorSampler();
+        ColorRenderer renderer(ConfigureDepth(scene.surface, color_grade_shaders->vertex), color_grade_shaders->pixel_dxil,
+            std::span(&sampler, 1), *fullscreen_target, 7);
+        completed = renderer.RenderResolved(scene.draw, scene.pixel_constants, *color_target);
+        color_graded = true;
+        REXLOG_INFO("MC2 native scene: fullscreen RGB color grading, completed={}", completed);
+    }
+
     // Record bounded changes at the clear boundary while surface support grows.
     // Logging itself never substitutes a clear or changes the PPC call.
     void TraceClear(const PPCContext& ctx, uint8_t* base) {
@@ -445,7 +522,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     void Flush(uint8_t* base, uint32_t device) {
         std::lock_guard lock(mutex);
         Require(device != 0 && device == guest_device, "Native operation used an unknown device");
-        Require(!pending_restore, "Legacy staging flushed during the pending native depth restore");
+        Require(!pending_restore && !pending_fullscreen, "Legacy staging flushed during a pending native user-memory draw");
         if (pending) {
             Require(window && IsWindow(window), "Native game window is unavailable");
             if (!renderer) {
@@ -475,19 +552,22 @@ NativeGraphics& Graphics() {
 }
 
 void TraceSceneResolve(const PPCContext& ctx, uint8_t* base) {
-    if (ctx.lr != 0x826DA2D8 && ctx.lr != 0x826DA314) return;
-    static std::atomic<uint32_t> count = 0;
-    if (count.load(std::memory_order_relaxed) >= 8 || count.fetch_add(1, std::memory_order_relaxed) >= 8) return;
+    const bool postprocess = ctx.lr == 0x827B3694;
+    if (!postprocess && ctx.lr != 0x826DA2D8 && ctx.lr != 0x826DA314) return;
+    static std::atomic<uint32_t> tile_count = 0, postprocess_count = 0;
+    auto& count = postprocess ? postprocess_count : tile_count;
+    const uint32_t limit = postprocess ? 2 : 8;
+    if (count.load(std::memory_order_relaxed) >= limit || count.fetch_add(1, std::memory_order_relaxed) >= limit) return;
     using mc2::capture::ReadGuest;
     using mc2::capture::LoadBE32;
-    std::vector<uint8_t> device, rect, destination, origin, color, stencil;
-    if (!ReadGuest(base, ctx.r3.u32, 13128, device) || !ReadGuest(base, ctx.r5.u32, 16, rect) ||
-        !ReadGuest(base, ctx.r6.u32, 52, destination) || !ReadGuest(base, ctx.r7.u32, 8, origin)) return;
+    std::vector<uint8_t> device, destination, color, stencil, rect(16), origin(8);
+    if (!ReadGuest(base, ctx.r3.u32, 13128, device) || (ctx.r5.u32 && !ReadGuest(base, ctx.r5.u32, 16, rect)) ||
+        !ReadGuest(base, ctx.r6.u32, 52, destination) || (ctx.r7.u32 && !ReadGuest(base, ctx.r7.u32, 8, origin))) return;
     const auto state = [&](uint32_t offset) { return LoadBE32(device.data() + offset); };
     const auto dest = [&](uint32_t offset) { return LoadBE32(destination.data() + offset); };
-    REXLOG_INFO("MC2 scene resolve: caller={:#x} flags={:#x} predicate={:#x} rect=[{},{},{},{}] destination={:#x} origin=[{},{}] depth_clear={} slice={} color_ptr={:#x}",
-        ctx.lr, ctx.r4.u32, state(12716), LoadBE32(rect.data()), LoadBE32(rect.data()+4),
-        LoadBE32(rect.data()+8), LoadBE32(rect.data()+12), ctx.r6.u32, LoadBE32(origin.data()),
+    REXLOG_INFO("MC2 scene resolve: caller={:#x} flags={:#x} predicate={:#x} rect_ptr={:#x} rect=[{},{},{},{}] destination={:#x} origin_ptr={:#x} origin=[{},{}] depth_clear={} slice={} color_ptr={:#x}",
+        ctx.lr, ctx.r4.u32, state(12716), ctx.r5.u32, LoadBE32(rect.data()), LoadBE32(rect.data()+4),
+        LoadBE32(rect.data()+8), LoadBE32(rect.data()+12), ctx.r6.u32, ctx.r7.u32, LoadBE32(origin.data()),
         LoadBE32(origin.data()+4), ctx.f1.f64, ctx.r8.u32, ctx.r9.u32);
     REXLOG_INFO("MC2 scene resolve surface: type={:#x} words=[{:#x},{:#x},{:#x},{:#x},{:#x},{:#x},{:#x}] color={:#x} depth={:#x} hiz=[{:#x},{:#x}]",
         dest(0), dest(24), dest(28), dest(32), dest(36), dest(40), dest(44), dest(48),
@@ -540,6 +620,10 @@ void DrawNativeSceneIndexed(const PPCContext& ctx, uint8_t* base) {
     }
     catch (const std::exception& error) { UnsupportedNativeOperation(error.what(),ctx); }
 }
+void DrawNativeSceneNonIndexed(const PPCContext& ctx, uint8_t* base) {
+    try { Graphics().DrawColorGrade(ctx, base); }
+    catch (const std::exception& error) { UnsupportedNativeOperation(error.what(),ctx); }
+}
 [[noreturn]] void UnsupportedNativeOperation(const char* operation, const PPCContext& ctx) {
     const auto message = fmt::format("MC2 native boot: unsupported {} at guest caller {:#x}", operation, ctx.lr);
     REXLOG_ERROR("{}", message);
@@ -549,6 +633,13 @@ void DrawNativeSceneIndexed(const PPCContext& ctx, uint8_t* base) {
 
 using namespace mc2::native;
 
+REX_HOOK_RAW(sub_826D9C10) {
+    __imp__sub_826D9C10(ctx, base);
+    if (NativeBootActive()) {
+        try { Graphics().CompleteFullscreenDraw(base); }
+        catch (const std::exception& error) { UnsupportedNativeOperation(error.what(), ctx); }
+    }
+}
 REX_HOOK_RAW(sub_826DA3A0) {
     __imp__sub_826DA3A0(ctx, base);
     if (NativeBootActive()) {
@@ -646,5 +737,6 @@ REX_HOOK_RAW(sub_828648A8) {
 }
 REX_HOOK_RAW(sub_82864D88) {
     if (!NativeBootActive()) { __imp__sub_82864D88(ctx, base); return; }
-    UnsupportedNativeOperation("indexed begin-UP draw", ctx);
+    try { Graphics().BeginFullscreenDraw(ctx, base); }
+    catch (const std::exception& error) { UnsupportedNativeOperation(error.what(), ctx); }
 }

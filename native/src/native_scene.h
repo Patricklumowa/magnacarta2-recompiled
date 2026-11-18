@@ -46,12 +46,17 @@ struct SceneResolveTexture {
     std::array<uint32_t, 6> fetch_words{};
     bool operator==(const SceneResolveTexture&) const = default;
 };
-struct SceneDepthRestoreShaders {
+struct ScenePassShaders {
     SceneVertexShader vertex;
     std::vector<uint8_t> pixel_reference, pixel_dxil;
 };
 struct SceneDepthRestore {
     SceneSurface depth;
+    DepthDraw draw;
+    std::vector<uint8_t> pixel_constants;
+};
+struct SceneFullscreenDraw {
+    SceneSurface surface;
     DepthDraw draw;
     std::vector<uint8_t> pixel_constants;
 };
@@ -67,14 +72,19 @@ SceneVertexShader LoadDepthShaders(const std::filesystem::path& directory);
 SceneColorShaders LoadColorShaders(const std::filesystem::path& directory);
 DepthConfiguration ConfigureDepth(const SceneSurface& surface, const SceneVertexShader& shader);
 DepthClear ReadDepthClear(const PPCContext& context, uint8_t* base);
-SceneSurface ReadSceneStencilClear(const PPCContext& context, uint8_t* base);
+SceneSurface ReadPostprocessDepthStencilClear(const PPCContext& context, uint8_t* base);
 SceneColorClear ReadSceneColorClear(const PPCContext& context, uint8_t* base);
 SceneDepthDraw ReadSceneDepthDraw(const PPCContext& context, uint8_t* base, const SceneVertexShader& shader);
 SceneColorDraw ReadSceneColorDraw(const PPCContext& context, uint8_t* base, const SceneColorShaders& shaders);
 bool SameScenePositionInputs(const DepthDraw& depth, const DepthDraw& color);
 SceneTileResolve ReadSceneTileResolve(const PPCContext& context, uint8_t* base);
-SceneDepthRestoreShaders LoadDepthRestoreShaders(const std::filesystem::path& directory);
+ScenePassShaders LoadDepthRestoreShaders(const std::filesystem::path& directory);
 SceneDepthRestore ReadSceneDepthRestore(const PPCContext& context, uint8_t* base,
-    const SceneDepthRestoreShaders& shaders, const SceneResolveTexture& source);
+    const ScenePassShaders& shaders, const SceneResolveTexture& source);
 void ReadDepthRestoreVertices(DepthDraw& draw, uint8_t* base, uint32_t address);
+ScenePassShaders LoadFullscreenColorShaders(const std::filesystem::path& directory, bool grade);
+SceneFullscreenDraw ReadSceneFullscreenDraw(const PPCContext& context, uint8_t* base,
+    const ScenePassShaders& shaders, const SceneResolveTexture& source, bool grade);
+void ReadFullscreenUpVertices(DepthDraw& draw, uint8_t* base, uint32_t address, uint32_t index_address);
+plume::RenderSamplerDesc FullscreenColorSampler();
 }

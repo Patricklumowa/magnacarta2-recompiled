@@ -55,6 +55,29 @@ void RequireFullClearRect(const PPCContext& ctx, uint8_t* base, const SceneSurfa
             LoadBE32(rectangle.data() + 12) == surface.height, "Only the verified full surface clear rectangle is supported");
 }
 
+void RequireSceneTexture(const DeviceState& state, const SceneResolveTexture& source, uint32_t clamp_bits) {
+    Require(source.address && state.Word(12552) == source.address, "Fullscreen pass did not bind the scene resolve");
+    for (uint32_t i = 0; i < source.fetch_words.size(); ++i) {
+        uint32_t expected = source.fetch_words[i];
+        if (i == 0) expected |= clamp_bits;
+        if (i == 1) expected &= 0x1fffffff;
+        Require(state.Word(1152 + i * 4) == expected, "Fullscreen scene texture fetch differs");
+    }
+}
+
+void ReadFullscreenConstants(const DeviceState& state, const SceneSurface& surface, DepthDraw& draw,
+                             std::vector<uint8_t>& pixel_constants, bool reverse_depth) {
+    draw.vertex_constants = NativeVertexBytes(std::span(state.bytes).subspan(1920,4096), 2);
+    pixel_constants = NativeVertexBytes(std::span(state.bytes).subspan(6016,4096), 2);
+    draw.shared_constants.resize(512);
+    const float half_pixel[] = {1.0f / surface.width, -1.0f / surface.height};
+    std::memcpy(draw.shared_constants.data() + 264, half_pixel, sizeof(half_pixel));
+    const auto mode = PackTextureFetchMode(0x688, 0, 0);
+    std::memcpy(draw.shared_constants.data() + 288, &mode, sizeof(mode));
+    draw.viewport = plume::RenderViewport(0,0,surface.width,surface.height,reverse_depth ? 1.f : 0.f,reverse_depth ? 0.f : 1.f);
+    draw.scissor = plume::RenderRect(0,0,surface.width,surface.height);
+}
+
 SceneVertexShader LoadVertexShader(const std::filesystem::path& directory) {
     auto reference = ReadNativeFile(directory / "vertex-shader.container");
     auto inputs = ReadVertexInputs(reference);
@@ -170,16 +193,17 @@ DepthClear ReadDepthClear(const PPCContext& ctx, uint8_t* base) {
     Require(std::isfinite(ctx.f1.f64) && ctx.f1.f64 == 0, "Scene clear value differs from the verified zero depth/stencil clear");
     return clear;
 }
-SceneSurface ReadSceneStencilClear(const PPCContext& ctx, uint8_t* base) {
-    Require(ctx.lr == 0x8238B590 && ctx.r4.u32 == 0x20, "Unsupported native stencil clear");
+SceneSurface ReadPostprocessDepthStencilClear(const PPCContext& ctx, uint8_t* base) {
+    Require(ctx.lr == 0x8238B590 && (ctx.r4.u32 == 0x20 || (ctx.r4.u32 == 0x30 && ctx.f1.f64 == 0)),
+            "Unsupported native postprocess depth/stencil clear");
     const DeviceState state(base, ctx.r3.u32);
     const auto surface = state.DepthSurface(base, 720, 1);
     Require((state.bytes[10940] & 0x30) == 0 && state.Word(12724) == 0 && state.Word(12716) == UINT32_MAX,
             "Native stencil clear requires the untiled surface");
     state.FullViewport(surface);
     RequireFullClearRect(ctx, base, surface);
-    // At exactly flag 0x20 the guest clear draw uses stencil replace, ref 0,
-    // write mask 0xff, and disables depth writes. It takes no stencil argument.
+    // Both flag combinations use stencil replace, ref 0, and write mask 0xff.
+    // Only flag 0x30 also writes depth.
     return surface;
 }
 SceneColorClear ReadSceneColorClear(const PPCContext& ctx,uint8_t* base) {
@@ -309,7 +333,7 @@ SceneTileResolve ReadSceneTileResolve(const PPCContext& ctx, uint8_t* base) {
     return resolve;
 }
 
-SceneDepthRestoreShaders LoadDepthRestoreShaders(const std::filesystem::path& directory) {
+ScenePassShaders LoadDepthRestoreShaders(const std::filesystem::path& directory) {
     // This shader uses the explicit UP declaration, which supplies the fetch
     // format and stride at draw time.
     return {{ReadNativeFile(directory / "vertex-shader.container"), ReadNativeFile(directory / "vertex.dxil"),
@@ -318,7 +342,7 @@ SceneDepthRestoreShaders LoadDepthRestoreShaders(const std::filesystem::path& di
 }
 
 SceneDepthRestore ReadSceneDepthRestore(const PPCContext& ctx, uint8_t* base,
-        const SceneDepthRestoreShaders& shaders, const SceneResolveTexture& source) {
+        const ScenePassShaders& shaders, const SceneResolveTexture& source) {
     Require(ctx.lr == 0x826DA868 && ctx.r4.u32 == 8 && ctx.r5.u32 == 3 && ctx.r6.u32 == 16,
             "Native depth restore requires the verified user-memory rectangle");
     const DeviceState state(base, ctx.r3.u32);
@@ -342,21 +366,8 @@ SceneDepthRestore ReadSceneDepthRestore(const PPCContext& ctx, uint8_t* base,
     constexpr uint32_t declaration_words[] = {1,0,0xff000000,0,0,0,0,0,0x001a23a6,0};
     for (uint32_t i = 0; i < std::size(declaration_words); ++i)
         Require(LoadBE32(declaration.data() + 24 + i * 4) == declaration_words[i], "Native restore declaration differs");
-    Require(source.address && state.Word(12552) == source.address, "Native depth restore did not bind the scene depth resolve");
-    for (uint32_t i = 0; i < source.fetch_words.size(); ++i) {
-        const uint32_t expected = i == 1 ? source.fetch_words[i] & 0x1fffffff : source.fetch_words[i];
-        Require(state.Word(1152 + i * 4) == expected, "Native restore depth texture fetch differs");
-    }
-    auto& draw = restore.draw;
-    draw.vertex_constants = NativeVertexBytes(std::span(state.bytes).subspan(1920,4096), 2);
-    restore.pixel_constants = NativeVertexBytes(std::span(state.bytes).subspan(6016,4096), 2);
-    draw.shared_constants.resize(512);
-    const float half_pixel[] = {1.0f / restore.depth.width, -1.0f / restore.depth.height};
-    std::memcpy(draw.shared_constants.data() + 264, half_pixel, sizeof(half_pixel));
-    const auto mode = PackTextureFetchMode(0x688, 0, 0);
-    std::memcpy(draw.shared_constants.data() + 288, &mode, sizeof(mode));
-    draw.viewport = plume::RenderViewport(0,0,restore.depth.width,restore.depth.height,1,0);
-    draw.scissor = plume::RenderRect(0,0,restore.depth.width,restore.depth.height);
+    RequireSceneTexture(state, source, 0);
+    ReadFullscreenConstants(state, restore.depth, restore.draw, restore.pixel_constants, true);
     return restore;
 }
 
@@ -371,5 +382,91 @@ void ReadDepthRestoreVertices(DepthDraw& draw, uint8_t* base, uint32_t address) 
     std::memcpy(draw.vertices.data() + raw.size(), corners[3], sizeof(corners[3]));
     draw.indices = {0,1,2,2,1,3};
     draw.index_count = uint32_t(draw.indices.size());
+}
+
+ScenePassShaders LoadFullscreenColorShaders(const std::filesystem::path& directory, bool grade) {
+    auto vertex = LoadVertexShader(directory);
+    const std::vector<VertexInput> copy_inputs = {{0,0,95,48,0,4}, {5,0,95,48,16,2}, {10,0,95,48,24,4},
+        {10,1,95,48,40,4,false,VertexStorage::UNorm8}};
+    const std::vector<VertexInput> grade_inputs = {{0,0,95,32,0,4,true}, {6,0,95,32,0,3},
+        {7,0,95,32,12,4,false,VertexStorage::UInt8}, {3,0,95,32,16,4,false,VertexStorage::UInt8},
+        {10,0,95,32,20,4,false,VertexStorage::UInt8}};
+    Require(vertex.inputs == (grade ? grade_inputs : copy_inputs), "Fullscreen HDR vertex inputs changed");
+    return {std::move(vertex), ReadNativeFile(directory / "pixel-shader.container"), ReadNativeFile(directory / "pixel-7e3.dxil")};
+}
+
+SceneFullscreenDraw ReadSceneFullscreenDraw(const PPCContext& ctx, uint8_t* base,
+        const ScenePassShaders& shaders, const SceneResolveTexture& source, bool grade) {
+    Require(grade ? (ctx.lr == 0x827B061C && ctx.r4.u32 == 5 && ctx.r5.u32 == 0 && ctx.r6.u32 == 4) :
+        (ctx.lr == 0x826D9CC0 && ctx.r4.u32 == 4 && ctx.r5.u32 == 0 && ctx.r6.u32 == 4 &&
+         ctx.r7.u32 == 6 && ctx.r8.u32 == 6 && ctx.r9.u32 == 48), "Unsupported fullscreen HDR draw arguments");
+    const DeviceState state(base, ctx.r3.u32);
+    SceneFullscreenDraw pass;
+    pass.surface = {state.Word(12448),1280,720,1,{}};
+    std::vector<uint8_t> descriptor;
+    Require(state.Word(12452) == 0 && state.Word(12456) == 0 && state.Word(12460) == 0 &&
+            ReadGuest(base, pass.surface.address, 48, descriptor), "Missing fullscreen HDR attachment");
+    Require((LoadBE32(descriptor.data()) & 15) == 4 && LoadBE32(descriptor.data() + 24) == 0x14000500 &&
+            LoadBE32(descriptor.data() + 28) == 0x302d0 && LoadBE32(descriptor.data() + 36) == 0x13fc1678 &&
+            state.Word(10372) == 0x302d0, "Fullscreen HDR attachment layout changed");
+    pass.surface.description.assign(descriptor.begin()+24,descriptor.end());
+    state.FullViewport(pass.surface);
+    Require((state.bytes[10940] & 0x30) == 0 && state.Word(12724) == 0 && state.Word(12716) == UINT32_MAX &&
+            state.Word(11824) == 0 && state.Word(10452) == 0 && state.Word(10460) == (grade ? 7 : 15) &&
+            state.Word(10548) == 0x00700770 && state.Word(10552) == 0x10001 && (state.Word(10556) & 0x1f) == 7 &&
+            state.Word(10564) == 0x80000 && state.Word(10568) == (grade ? 0x18002 : 0x18000) && state.Word(10572) == 0x43f &&
+            state.Float(12672) == (grade ? 1 : 0) && state.Float(12676) == (grade ? 0 : 1) &&
+            state.Float(10504) == 640 && state.Float(10508) == 640 && state.Float(10512) == -360 &&
+            state.Float(10516) == 360 && state.Float(10520) == (grade ? -1 : 1) && state.Float(10524) == (grade ? 1 : 0),
+            "Fullscreen HDR blend, mask, depth or viewport state changed");
+    Require(ReadBoundShader(base, state.Word(12704), true) == shaders.vertex.reference &&
+            ReadBoundShader(base, state.Word(12700), false) == shaders.pixel_reference, "Untranslated fullscreen HDR shaders");
+    RequireSceneTexture(state, source, 0x4800);
+    ReadFullscreenConstants(state, pass.surface, pass.draw, pass.pixel_constants, grade);
+    if (grade) {
+        std::vector<uint8_t> raw;
+        uint32_t address = 0, size = 0;
+        Require(state.bytes[12536] == 8 && ReadGuest(base,state.Word(12468),32,descriptor) &&
+                mc2::draw_capture::BufferBytes(descriptor.data(), descriptor.size(), true, address, size) &&
+                size == 128 && state.Word(1916) == LoadBE32(descriptor.data() + 28) &&
+                (state.Word(1916) & 3) == 2 && ReadGuest(base,address,size,raw), "Invalid color grade vertex buffer");
+        const auto vertex_address = LoadBE32(descriptor.data() + 24);
+        const auto physical_fetch = (vertex_address & 0x1fffffff) + (((vertex_address >> 20) + 512) & 0x1000);
+        Require(state.Word(1912) == physical_fetch, "Color grade vertex binding differs from its buffer");
+        pass.draw.vertices = NativeVertexBytes(raw, 2);
+        pass.draw.indices = {0,1,2,0,2,3};
+        pass.draw.index_count = 6;
+    } else {
+        for (uint32_t i = 0; i < 16; ++i)
+            Require(state.Float(1920 + (5 * 16) + 4 * i) == (i % 5 == 0 ? 1.f : 0.f), "Fullscreen HDR copy transform changed");
+    }
+    return pass;
+}
+
+void ReadFullscreenUpVertices(DepthDraw& draw, uint8_t* base, uint32_t address, uint32_t index_address) {
+    std::vector<uint8_t> vertices, indices;
+    Require(ReadGuest(base,address,192,vertices) && ReadGuest(base,index_address,24,indices), "Unreadable fullscreen HDR vertices or indices");
+    const float half_x = 1.f / draw.viewport.width, half_y = 1.f / draw.viewport.height;
+    for (uint32_t i = 0; i < 4; ++i) {
+        const auto* position = vertices.data() + i * 48;
+        const float x = std::bit_cast<float>(LoadBE32(position)), y = std::bit_cast<float>(LoadBE32(position + 4));
+        Require(std::abs(x - ((i & 1 ? 1.f : -1.f) - half_x)) < 1.0e-6f &&
+                std::abs(y - ((i & 2 ? -1.f : 1.f) + half_y)) < 1.0e-6f &&
+                LoadBE32(position + 8) == 0 && LoadBE32(position + 12) == 0x3f800000, "HDR copy does not cover the full viewport");
+    }
+    draw.vertices = NativeVertexBytes(vertices, 2);
+    draw.indices = {0,1,3,0,3,2};
+    for (size_t i = 0; i < draw.indices.size(); ++i)
+        Require(LoadBE32(indices.data() + i * 4) == draw.indices[i], "Fullscreen HDR copy indices changed");
+    draw.index_count = uint32_t(draw.indices.size());
+}
+
+plume::RenderSamplerDesc FullscreenColorSampler() {
+    plume::RenderSamplerDesc sampler;
+    sampler.minFilter = sampler.magFilter = plume::RenderFilter::NEAREST;
+    sampler.mipmapMode = plume::RenderMipmapMode::NEAREST;
+    sampler.addressU = sampler.addressV = plume::RenderTextureAddressMode::CLAMP;
+    sampler.maxLOD = 0;
+    return sampler;
 }
 }

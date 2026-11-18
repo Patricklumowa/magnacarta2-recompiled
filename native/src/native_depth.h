@@ -59,9 +59,12 @@ class ColorRenderer {
  public:
     ColorRenderer(const DepthConfiguration& configuration, std::span<const uint8_t> pixel_shader,
                   std::span<const plume::RenderSamplerDesc> samplers, DepthRenderer& depth, ColorTarget& color);
+    ColorRenderer(const DepthConfiguration& configuration, std::span<const uint8_t> pixel_shader,
+                  std::span<const plume::RenderSamplerDesc> samplers, ColorTarget& color, uint8_t write_mask = 0xf);
     ~ColorRenderer();
     uint64_t Render(const DepthDraw& draw, std::span<const uint8_t> pixel_constants,
                     std::span<const SampledTexture* const> textures);
+    uint64_t RenderResolved(const DepthDraw& draw, std::span<const uint8_t> pixel_constants, const ColorTarget& source);
  private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

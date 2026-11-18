@@ -227,8 +227,9 @@ position transforms, geometry and viewport. The captured lower replay produces
 identical color and maximum depth values with either retained or freshly
 cleared depth.
 
-`--mc2_scene_resolve_trace=true` logs the first eight tiled resolve calls on a
-native boot development build. The reference renderer observed two calls per
+`--mc2_scene_resolve_trace=true` logs the first eight tiled resolve calls and
+the first two fullscreen resolve calls on a native boot development build.
+The reference renderer observed two calls per
 tile, at masks `2` and `8`. Flags `0xf4000100` average color samples into a
 1280 x 720 RGBA16F texture and request a zero color clear. Flags `0x214` copy
 depth sample zero into a separate 24-bit float depth/stencil texture and
@@ -291,5 +292,23 @@ subdirectory of the color shader directory. Use the default specialization
 for the pixel shader. The captured scene check uses this subdirectory when
 available. Its D3D12 readback checked both planes across all 921,600 pixels
 and verified the sampled depth, bias and stencil preservation. The live run
-completed the restore without Xenos and reached indexed user-memory draw
-`0x826D9CC0`.
+completed the restore without Xenos and reached the indexed fullscreen draw.
+
+## Fullscreen HDR passes
+
+The indexed user-memory draw at `0x826D9CC0` samples the completed HDR
+resolve and writes all four channels into a single-sample 1280 x 720 HDR
+attachment. The bridge waits for the guest's vertex and index writes and
+validates the fullscreen geometry before replaying it. The game subsequently
+clears both planes of the single-sample depth/stencil attachment. The grading
+draw at `0x827B061C` expands its triangle fan to a triangle list and writes
+RGB while retaining the copy's alpha.
+
+Put the verified shader inputs in `fullscreen` and `color-grade` subdirectories
+of the color shader directory. Each has `vertex-shader.container`,
+`pixel-shader.container`, `vertex.dxil` and `pixel-7e3.dxil`. Both pixel shaders
+use specialization 4. The captured scene check can replay these passes with
+diagnostic grading constants and nonzero source alpha. It verifies coverage
+and exact alpha preservation across all 921,600 pixels. A live boot without
+Xenos completed both draws with the game's own constants, then stopped at the
+resolve at `0x827B3694`.

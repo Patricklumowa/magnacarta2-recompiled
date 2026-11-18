@@ -122,10 +122,89 @@ void CheckDepthRestore(mc2::native::DepthRenderer& depth, mc2::native::NativeDev
           "Restored depth differs from the sampled source or modified the stencil plane");
 }
 
+void CheckFullscreenColor(const mc2::native::ColorTarget& source, const mc2::native::SceneSurface& surface,
+                          const std::shared_ptr<mc2::native::NativeDevice>& gpu, const std::filesystem::path& directory) {
+    using namespace mc2::native;
+    using namespace plume;
+    auto output_surface = surface;
+    output_surface.samples = 1;
+    const auto shaders = LoadFullscreenColorShaders(directory / "fullscreen", false);
+    auto config = ConfigureDepth(output_surface, shaders.vertex);
+    config.cull = RenderCullMode::NONE;
+    const auto sampler = FullscreenColorSampler();
+    ColorTarget target(surface.width,surface.height,1,gpu);
+    ColorRenderer copy(config, shaders.pixel_dxil, std::span(&sampler,1), target);
+    DepthDraw draw;
+    const float half_pixel[] = {1.f / surface.width, -1.f / surface.height};
+    const float bias = 8, gamma = 1;
+    constexpr float identity[4][4] = {{1,0,0,0},{0,1,0,0},{0,0,1,0},{0,0,0,1}};
+    std::array<float,48> vertices{};
+    for (size_t i = 0; i < 4; ++i) {
+        const float u = i & 1 ? 1.f : 0.f, v = i & 2 ? 1.f : 0.f;
+        const float vertex[] = {2*u-1-half_pixel[0],1-2*v-half_pixel[1],0,1,u,v,1,1,1,8,0,0};
+        std::copy(std::begin(vertex), std::end(vertex), vertices.begin() + i * 12);
+    }
+    draw.vertices.resize(sizeof(vertices));
+    std::memcpy(draw.vertices.data(), vertices.data(), sizeof(vertices));
+    draw.indices = {0,1,3,0,3,2};
+    draw.index_count = uint32_t(draw.indices.size());
+    draw.viewport = RenderViewport(0,0,surface.width,surface.height);
+    draw.scissor = RenderRect(0,0,surface.width,surface.height);
+    draw.vertex_constants.resize(4096);
+    std::vector<uint8_t> pixel_constants(4096);
+    std::memcpy(draw.vertex_constants.data() + 5 * 16, identity, sizeof(identity));
+    std::memcpy(pixel_constants.data(), &bias, sizeof(bias));
+    std::memcpy(pixel_constants.data() + 3 * 16, &gamma, sizeof(gamma));
+    draw.shared_constants.resize(512);
+    const auto fetch_mode = PackTextureFetchMode(0x688,0,0);
+    std::memcpy(draw.shared_constants.data() + 264, half_pixel, sizeof(half_pixel));
+    std::memcpy(draw.shared_constants.data() + 288, &fetch_mode, sizeof(fetch_mode));
+    target.Clear(RenderColor(4,8,16,0.25f));
+    copy.RenderResolved(draw, pixel_constants, source);
+    const auto first = target.ReadPixels();
+    size_t colored = 0;
+    for (size_t i = 0; i < first.size(); i += 4) {
+        Check(first[i+3] != 0x3400, "Fullscreen HDR copy left a pixel unrendered");
+        colored += first[i] > 0 && first[i+3] > 0;
+    }
+    Check(colored > 1000 && first[0] == 0, "Fullscreen HDR copy did not sample both scene regions");
+    std::cout << "PASS: fullscreen HDR sampling and coverage, colored=" << colored << '\n';
+
+    if (!std::filesystem::is_directory(directory / "color-grade")) return;
+    const auto grade_shaders = LoadFullscreenColorShaders(directory / "color-grade", true);
+    ColorRenderer grade(ConfigureDepth(output_surface, grade_shaders.vertex), grade_shaders.pixel_dxil,
+                        std::span(&sampler,1), target, 7);
+    // Screen-space triangle fan uses the original packed vertex stride.
+    constexpr float grade_vertices[][8] = {{-1,1,0,0,0,0,0,0},{-1,-1,0,0,0,0,0,1},
+                                          {1,-1,0,0,0,0,1,1},{1,1,0,0,0,0,1,0}};
+    draw.vertices.resize(sizeof(grade_vertices));
+    std::memcpy(draw.vertices.data(), grade_vertices, sizeof(grade_vertices));
+    draw.indices = {0,1,2,0,2,3};
+    std::memcpy(draw.vertex_constants.data(), identity, sizeof(identity));
+    // Finite diagnostic scale/bias and a 1/8 additive grade. After the scene
+    // color bias of eight, the uncovered background should be exactly one.
+    constexpr float scale_bias[4] = {0.5f,-0.5f,0.5f,0.5f};
+    constexpr float ones[4] = {1,1,1,1}, lifted[4] = {0.125f,0.125f,0.125f,0};
+    std::memcpy(pixel_constants.data() + 16, scale_bias, sizeof(scale_bias));
+    std::memcpy(pixel_constants.data() + 4 * 16, &bias, sizeof(bias));
+    std::memcpy(pixel_constants.data() + 5 * 16, lifted, sizeof(lifted));
+    std::memcpy(pixel_constants.data() + 7 * 16, ones, sizeof(ones));
+    std::memcpy(pixel_constants.data() + 8 * 16, ones, sizeof(ones));
+    grade.RenderResolved(draw, pixel_constants, source);
+    const auto graded = target.ReadPixels();
+    size_t lifted_pixels = 0;
+    for (size_t i = 0; i < graded.size(); i += 4) {
+        Check(graded[i+3] == first[i+3], "Fullscreen grading changed alpha");
+        lifted_pixels += graded[i] >= 0x3c00;
+    }
+    Check(lifted_pixels == graded.size() / 4 && graded[0] == 0x3c00, "Fullscreen grade did not write the expected RGB range");
+    std::cout << "PASS: fullscreen RGB grading with alpha preserved, graded=" << lifted_pixels << '\n';
+}
+
 void ReplayColor(const mc2::native::SceneDepthDraw& prepass, const mc2::native::SceneVertexShader& depth_shader,
                  const mc2::native::SceneColorClear& clear, mc2::native::SceneColorDraw draw,
                  const mc2::native::SceneColorShaders& shaders, const std::filesystem::path& capture,
-                 const std::filesystem::path& output, const std::filesystem::path& restore_directory) {
+                 const std::filesystem::path& output, const std::filesystem::path& shader_directory) {
     using namespace mc2::native;
     using namespace plume;
     auto gpu = std::make_shared<NativeDevice>(true);
@@ -302,8 +381,10 @@ void ReplayColor(const mc2::native::SceneDepthDraw& prepass, const mc2::native::
               std::all_of(cleared_depth.begin(), cleared_depth.end(), [](float value) { return value == 0; }),
               "Retained tile source clears did not cover both regions");
         std::cout << "PASS: both captured tiles retained at the original resolve offsets, lower coverage=" << lower_coverage << '\n';
-        if (std::filesystem::is_directory(restore_directory))
-            CheckDepthRestore(depth, *gpu, prepass.surface, full_depth, restore_directory);
+        if (std::filesystem::is_directory(shader_directory / "depth-restore"))
+            CheckDepthRestore(depth, *gpu, prepass.surface, full_depth, shader_directory / "depth-restore");
+        if (std::filesystem::is_directory(shader_directory / "fullscreen"))
+            CheckFullscreenColor(color, surface, gpu, shader_directory);
     }
     draw.draw.shared_constants[0] = uint8_t(bindings.size());
     const auto before_rejection = gpu->completed;
@@ -433,8 +514,7 @@ int main(int argc,char** argv) try {
                 Reject([&] { ReadSceneColorDraw(context, base, color_shaders); });
                 memory = scene_bytes;
             }
-            ReplayColor(draw, shaders, hdr, color_draw, color_shaders, color_capture, argv[5],
-                        std::filesystem::path(argv[4]) / "depth-restore");
+            ReplayColor(draw, shaders, hdr, color_draw, color_shaders, color_capture, argv[5], argv[4]);
         }
     }
     std::cout<<"PASS: captured scene input reconstruction, unchanged guest state, clear-to-draw surface identity and unsupported-state rejection\n";

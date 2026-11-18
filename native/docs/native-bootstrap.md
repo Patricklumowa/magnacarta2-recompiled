@@ -143,10 +143,11 @@ fourteen mip levels. With local color and depth resolve shaders supplied, it
 replayed the lower tile and completed all four resolves into two full-size
 textures. After the last D3D12 fence, the guest's synchronous end-of-tiling path
 unlinked its staging chunks and published the completed marker and buffer
-cursor on the CPU. The single-sample stencil clear and the optional
-[depth restore](native-depth.md#single-sample-depth-restore) complete on the
-native queue. The next unsupported operation is an indexed user-memory draw
-at `0x826D9CC0`. An empty color shader directory setting keeps the depth-only
+cursor on the CPU. The single-sample clears, optional
+[depth restore](native-depth.md#single-sample-depth-restore), and
+[fullscreen HDR passes](native-depth.md#fullscreen-hdr-passes) complete on
+the native queue. The next unsupported operation is the postprocess resolve
+at `0x827B3694`. An empty color shader directory setting keeps the depth-only
 checkpoint.
 
 Other indexed and nonindexed scene draws, direct begin-UP draws and raw/indirect GPU
