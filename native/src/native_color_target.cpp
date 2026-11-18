@@ -15,6 +15,7 @@ bool Covers(const RenderRect& outer, const RenderRect& inner) {
 }
 struct ColorTarget::Impl {
     uint32_t width,height,samples;
+    RenderFormat format;
     std::shared_ptr<NativeDevice> gpu;
     std::unique_ptr<RenderTexture> texture,resolved;
     std::unique_ptr<RenderFramebuffer> framebuffer;
@@ -23,11 +24,14 @@ struct ColorTarget::Impl {
     bool fully_initialized=false;
     RenderRect cleared_rectangle;
 
-    Impl(uint32_t w,uint32_t h,uint32_t count,std::shared_ptr<NativeDevice> context, std::span<const uint8_t> shader)
-        : width(w),height(h),samples(count),gpu(std::move(context)) {
+    Impl(uint32_t w,uint32_t h,uint32_t count,std::shared_ptr<NativeDevice> context, std::span<const uint8_t> shader,
+         RenderFormat storage_format)
+        : width(w),height(h),samples(count),format(storage_format),gpu(std::move(context)) {
         Require(gpu && width && height && width<=8192 && height<=8192,"Invalid native color surface extent");
         Require(samples==1 || samples==2 || samples==4,"Unsupported native color sample count");
-        texture=gpu->device->createTexture(RenderTextureDesc::ColorTarget(width,height,kFormat,RenderMultisampling(samples)));
+        Require(format == RenderFormat::R16G16B16A16_FLOAT ||
+                (format == RenderFormat::R16G16B16A16_SNORM && samples == 1 && shader.empty()), "Unsupported native color storage");
+        texture=gpu->device->createTexture(RenderTextureDesc::ColorTarget(width,height,format,RenderMultisampling(samples)));
         Require(bool(texture),"Native HDR surface allocation failed");
         const RenderTexture* attachment=texture.get();
         RenderFramebufferDesc desc;
@@ -36,7 +40,7 @@ struct ColorTarget::Impl {
         Require(bool(framebuffer),"Native HDR framebuffer creation failed");
         if (!shader.empty()) {
             Require(samples == 2, "Native scene color resolve requires two samples");
-            tile_resolve = std::make_unique<TileResolve>(*gpu, *texture, width, height, kFormat, shader);
+            tile_resolve = std::make_unique<TileResolve>(*gpu, *texture, width, height, format, shader);
         }
     }
     void RequireCleared(const RenderRect& rectangle) const {
@@ -44,8 +48,9 @@ struct ColorTarget::Impl {
                 "Native color operation touches an uninitialized region");
     }
     uint64_t Clear(RenderColor value,const RenderRect* rectangle) {
+        const float limit = format == RenderFormat::R16G16B16A16_SNORM ? 1.f : 65504.f;
         for (float component:value.rgba)
-            Require(std::isfinite(component) && std::abs(component)<=65504,"Invalid native HDR clear value");
+            Require(std::isfinite(component) && std::abs(component)<=limit,"Invalid native color clear value");
         const RenderRect full(0,0,width,height);
         if (rectangle)
             Require(rectangle->left>=0 && rectangle->top>=0 && rectangle->right>rectangle->left &&
@@ -85,7 +90,7 @@ struct ColorTarget::Impl {
         const uint32_t pitch=(read_width*8+255)&~255u;
         const bool resolve_for_read = !scene_resolve && samples > 1;
         if (!readback) readback=gpu->device->createBuffer(RenderBufferDesc::ReadbackBuffer(size_t((width*8+255)&~255u)*height));
-        if (resolve_for_read && !resolved) resolved=gpu->device->createTexture(RenderTextureDesc::Texture2D(width,height,1,kFormat));
+        if (resolve_for_read && !resolved) resolved=gpu->device->createTexture(RenderTextureDesc::Texture2D(width,height,1,format));
         Require(readback && (!resolve_for_read || resolved),"Native HDR readback allocation failed");
         auto& commands=gpu->commands;
         commands->begin();
@@ -98,7 +103,7 @@ struct ColorTarget::Impl {
         }
         commands->barriers(RenderBarrierStage::COPY,RenderTextureBarrier(source,RenderTextureLayout::COPY_SOURCE));
         const RenderBox box(rectangle.left, rectangle.top, rectangle.right, rectangle.bottom);
-        commands->copyTextureRegion(RenderTextureCopyLocation::PlacedFootprint(readback.get(),kFormat,read_width,read_height,1,pitch/8),
+        commands->copyTextureRegion(RenderTextureCopyLocation::PlacedFootprint(readback.get(),format,read_width,read_height,1,pitch/8),
                                     RenderTextureCopyLocation::Subresource(source), 0, 0, 0, &box);
         if (scene_resolve)
             commands->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(source, RenderTextureLayout::SHADER_READ));
@@ -114,8 +119,8 @@ struct ColorTarget::Impl {
     }
 };
 ColorTarget::ColorTarget(uint32_t width,uint32_t height,uint32_t samples,std::shared_ptr<NativeDevice> gpu,
-                         std::span<const uint8_t> resolve_shader)
-    : impl_(std::make_unique<Impl>(width,height,samples,std::move(gpu),resolve_shader)) {}
+                         std::span<const uint8_t> resolve_shader, RenderFormat format)
+    : impl_(std::make_unique<Impl>(width,height,samples,std::move(gpu),resolve_shader,format)) {}
 ColorTarget::~ColorTarget()=default;
 uint64_t ColorTarget::Clear(RenderColor value,const RenderRect* rectangle) { return impl_->Clear(value,rectangle); }
 uint64_t ColorTarget::ResolveAndClear(const RenderRect& rectangle, int32_t exponent) { return impl_->ResolveAndClear(rectangle, exponent); }
@@ -123,7 +128,8 @@ uint64_t ColorTarget::OverwriteResolved(const ColorTarget& source, int32_t expon
     const auto& input = *source.impl_;
     auto& gpu = Device();
     const RenderRect full(0,0,impl_->width,impl_->height);
-    Require(input.gpu.get() == &gpu && input.samples == 1 && input.width == impl_->width && input.height == impl_->height &&
+    Require(input.gpu.get() == &gpu && input.samples == 1 && input.format == impl_->format &&
+            input.width == impl_->width && input.height == impl_->height &&
             impl_->tile_resolve && impl_->tile_resolve->CompletedRegion() == full,
             "Fullscreen HDR copy requires a matching single-sample source and complete scene resolve");
     Require(exponent >= -32 && exponent <= 31 && !shader.empty(), "Invalid fullscreen HDR resolve shader or exponent");
@@ -138,6 +144,7 @@ uint64_t ColorTarget::OverwriteResolved(const ColorTarget& source, int32_t expon
 std::vector<uint16_t> ColorTarget::ReadPixels() { return impl_->ReadPixels(false); }
 std::vector<uint16_t> ColorTarget::ReadResolvedPixels() { return impl_->ReadPixels(true); }
 NativeDevice& ColorTarget::Device() const { return *impl_->gpu; }
+RenderFormat ColorTarget::Format() const { return impl_->format; }
 RenderTexture* ColorTarget::Attachment(const NativeDevice& gpu, uint32_t width, uint32_t height, uint32_t samples) {
     Require(impl_->gpu.get() == &gpu && impl_->width == width && impl_->height == height && impl_->samples == samples,
             "Native color and depth attachments must share a device, extent and sample count");

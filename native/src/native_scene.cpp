@@ -489,4 +489,25 @@ SceneSurface ReadFullscreenResolve(const PPCContext& ctx, uint8_t* base, const S
         Require(LoadBE32(descriptor.data() + 28 + i * 4) == destination.fetch_words[i], "Fullscreen resolve texture layout changed");
     return surface;
 }
+
+SceneColorClear ReadBloomClear(const PPCContext& ctx, uint8_t* base) {
+    Require(ctx.lr == 0x8238B590 && ctx.r4.u32 == 0xf, "Unsupported bloom color clear arguments");
+    const DeviceState state(base, ctx.r3.u32);
+    SceneColorClear clear;
+    clear.surface = {state.Word(12448),322,182,1,{}};
+    state.FullViewport(clear.surface);
+    RequireFullClearRect(ctx, base, clear.surface);
+    std::vector<uint8_t> descriptor, value;
+    Require((state.bytes[10940] & 0x30) == 0 && state.Word(12724) == 0 && state.Word(12716) == UINT32_MAX &&
+            state.Word(12452) == 0 && state.Word(12456) == 0 && state.Word(12460) == 0 && state.Word(12464) == 0 &&
+            ReadGuest(base, clear.surface.address, 48, descriptor) && (LoadBE32(descriptor.data()) & 15) == 4 &&
+            LoadBE32(descriptor.data() + 24) == 0x05800190 && LoadBE32(descriptor.data() + 28) == 0x505a0 &&
+            LoadBE32(descriptor.data() + 36) == 0x050405a8 && state.Word(10372) == 0x505a0, "Unsupported bloom target layout");
+    Require(ReadGuest(base, ctx.r6.u32 ? ctx.r6.u32 : 0x82247720, 16, value) &&
+            std::all_of(value.begin(), value.end(), [](uint8_t byte) { return byte == 0; }), "Bloom target clear requires zero");
+    clear.surface.description.assign(descriptor.begin()+24,descriptor.end());
+    clear.value = plume::RenderColor(0,0,0,0);
+    clear.rectangle = plume::RenderRect(0,0,clear.surface.width,clear.surface.height);
+    return clear;
+}
 }

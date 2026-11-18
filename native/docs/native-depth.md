@@ -322,5 +322,7 @@ dxc -T cs_6_0 -E main -HV 2021 -D MC2_SINGLE_SAMPLE=1 native/src/native_color_re
 
 The captured scene check verifies that every exported channel has the expected
 float16 value and the source survives the copy. A live boot without Xenos
-completed this resolve and reached the smaller fixed-point color clear for
-the blur and bloom pass.
+completed this resolve and cleared the 322 x 182 target for blur and bloom.
+Native storage for this single-sample target is RGBA16_SNORM. The color
+check verifies both signs and zero using GPU readback. The subsequent draw
+needs the signed fixed-point shader output conversion.

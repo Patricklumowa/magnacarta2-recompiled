@@ -385,7 +385,7 @@ struct ColorRenderer::Impl {
          std::span<const RenderSamplerDesc> samplers, DepthRenderer* depth_renderer, ColorTarget& color_target, uint8_t write_mask)
         : depth(depth_renderer ? depth_renderer->impl_.get() : nullptr), color(color_target), gpu(color.Device()),
           attachment(color.Attachment(gpu, configuration.width, configuration.height, configuration.sample_count)),
-          pipeline(configuration, &gpu, pixel_shader, samplers, ColorTarget::kFormat,
+          pipeline(configuration, &gpu, pixel_shader, samplers, color.Format(),
                    depth ? RenderFormat::D32_FLOAT : RenderFormat::UNKNOWN, write_mask) {
         Require(!depth || (configuration.width == depth->width && configuration.height == depth->height &&
                 configuration.sample_count == depth->samples && depth->gpu.get() == &gpu),

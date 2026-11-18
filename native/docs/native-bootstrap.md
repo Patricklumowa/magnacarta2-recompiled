@@ -147,9 +147,9 @@ cursor on the CPU. The single-sample clears, optional
 [depth restore](native-depth.md#single-sample-depth-restore), and
 [fullscreen HDR passes](native-depth.md#fullscreen-hdr-passes) complete on
 the native queue. The graded image also resolves back into the existing HDR
-texture. The next unsupported operation is the 322 x 182 fixed-point color
-clear before the blur and bloom pass. An empty color shader directory setting
-keeps the depth-only checkpoint.
+texture. The subsequent 322 x 182 fixed-point target clears on the native
+queue. The next unsupported operation is the indexed draw for blur and bloom.
+An empty color shader directory setting keeps the depth-only checkpoint.
 
 Other indexed and nonindexed scene draws, direct begin-UP draws and raw/indirect GPU
 submission paths currently fail explicitly. Scene composition, remaining clears/resolves,

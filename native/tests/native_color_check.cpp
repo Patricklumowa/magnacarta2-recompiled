@@ -45,7 +45,15 @@ int main() try {
     }
     Reject([&] { ColorTarget invalid(0,1,1,gpu); });
     Reject([&] { ColorTarget invalid(1,1,3,gpu); });
-    std::cout<<"PASS: HDR values, partial clears, retained surfaces, 1/2/4-sample resolves and real fences; debug_layer="
+    ColorTarget fixed(5,4,1,gpu,{},RenderFormat::R16G16B16A16_SNORM);
+    constexpr float signed_level = 16383.f / 32767.f;
+    fixed.Clear(RenderColor(0,signed_level,-signed_level,1));
+    const auto signed_pixels = fixed.ReadPixels();
+    const uint16_t expected[] = {0,0x3fff,0xc001,0x7fff};
+    for (size_t i = 0; i < signed_pixels.size(); ++i)
+        Check(signed_pixels[i] == expected[i % 4], "Native fixed-point clear did not preserve signed values");
+    Reject([&] { fixed.Clear(RenderColor(2,0,0,0)); });
+    std::cout<<"PASS: HDR values, signed color, partial clears, retained surfaces, 1/2/4-sample resolves and real fences; debug_layer="
              <<gpu->debug_enabled<<", completed="<<gpu->completed<<'\n';
     return 0;
 } catch (const std::exception& error) { std::cerr<<"Native color check: "<<error.what()<<'\n'; return 1; }

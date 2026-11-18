@@ -107,6 +107,8 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     std::unique_ptr<ColorTarget> fullscreen_target;
     bool color_graded = false;
     bool fullscreen_resolved = false;
+    std::optional<SceneSurface> bloom_surface;
+    std::unique_ptr<ColorTarget> bloom_target;
     plume::RenderRect cleared_tile;
     std::optional<DepthDraw> prepass_draw;
     std::optional<TiledSceneDraw> scene_draw;
@@ -154,6 +156,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         std::lock_guard lock(mutex);
         prepass_draw.reset(); scene_draw.reset(); pending_restore.reset();
         pending_fullscreen.reset(); fullscreen_target.reset();
+        bloom_target.reset();
         stencil_framebuffer.reset(); stencil_target.reset();
         pending.reset(); renderer.reset(); depth_renderer.reset(); color_target.reset(); gpu.reset();
     }
@@ -208,13 +211,27 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             return true;
         }
         if (!(ctx.r4.u32 & 0x30)) {
+            bool bloom;
             {
                 std::lock_guard lock(mutex);
                 if (!depth_renderer) return false;
+                bloom = fullscreen_resolved;
             }
-            const auto clear=ReadSceneColorClear(ctx,base);
+            const auto clear=bloom ? ReadBloomClear(ctx,base) : ReadSceneColorClear(ctx,base);
             Flush(base,ctx.r3.u32);
             std::lock_guard lock(mutex);
+            if (bloom) {
+                if (!bloom_target) {
+                    bloom_target = std::make_unique<ColorTarget>(clear.surface.width, clear.surface.height, 1,
+                        gpu, std::span<const uint8_t>{}, plume::RenderFormat::R16G16B16A16_SNORM);
+                    bloom_surface = clear.surface;
+                }
+                Require(*bloom_surface == clear.surface, "Native bloom target allocation changed");
+                completed = bloom_target->Clear(clear.value);
+                REXLOG_INFO("MC2 native scene: cleared {}x{} fixed-point bloom target, completed={}",
+                            clear.surface.width, clear.surface.height, completed);
+                return true;
+            }
             if (!color_target) {
                 const auto resolve_shader = color_shaders ? std::span<const uint8_t>(color_shaders->resolve_dxil) : std::span<const uint8_t>{};
                 color_target=std::make_unique<ColorTarget>(clear.surface.width,clear.surface.height,clear.surface.samples,gpu,resolve_shader);
