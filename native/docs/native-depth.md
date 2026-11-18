@@ -309,6 +309,18 @@ of the color shader directory. Each has `vertex-shader.container`,
 `pixel-shader.container`, `vertex.dxil` and `pixel-7e3.dxil`. Both pixel shaders
 use specialization 4. The captured scene check can replay these passes with
 diagnostic grading constants and nonzero source alpha. It verifies coverage
-and exact alpha preservation across all 921,600 pixels. A live boot without
-Xenos completed both draws with the game's own constants, then stopped at the
-resolve at `0x827B3694`.
+and exact alpha preservation across all 921,600 pixels.
+
+The fullscreen resolve at `0x827B3694` writes the graded image into the same
+native allocation used by the tile resolves. It scales all four channels by
+1/8 and preserves the graded source. Compile the single-sample variant into the
+`fullscreen` shader directory to enable it:
+
+```text
+dxc -T cs_6_0 -E main -HV 2021 -D MC2_SINGLE_SAMPLE=1 native/src/native_color_resolve.hlsl -Fo <color-shaders>/fullscreen/color-resolve.dxil
+```
+
+The captured scene check verifies that every exported channel has the expected
+float16 value and the source survives the copy. A live boot without Xenos
+completed this resolve and reached the smaller fixed-point color clear for
+the blur and bloom pass.

@@ -113,6 +113,21 @@ SceneSurface ReadTiledColorSurface(const DeviceState& state, uint8_t* base) {
     return surface;
 }
 
+SceneSurface ReadFullscreenColorSurface(const DeviceState& state, uint8_t* base) {
+    SceneSurface surface{state.Word(12448),1280,720,1,{}};
+    std::vector<uint8_t> descriptor;
+    Require(state.Word(12452) == 0 && state.Word(12456) == 0 && state.Word(12460) == 0 &&
+            ReadGuest(base, surface.address, 48, descriptor), "Missing fullscreen HDR attachment");
+    Require((LoadBE32(descriptor.data()) & 15) == 4 && LoadBE32(descriptor.data() + 24) == 0x14000500 &&
+            LoadBE32(descriptor.data() + 28) == 0x302d0 && LoadBE32(descriptor.data() + 36) == 0x13fc1678 &&
+            state.Word(10372) == 0x302d0, "Fullscreen HDR attachment layout changed");
+    surface.description.assign(descriptor.begin()+24,descriptor.end());
+    state.FullViewport(surface);
+    Require((state.bytes[10940] & 0x30) == 0 && state.Word(12724) == 0 && state.Word(12716) == UINT32_MAX,
+            "Fullscreen HDR pass needs an untiled surface");
+    return surface;
+}
+
 DepthDraw ReadGeometry(const PPCContext& ctx, uint8_t* base, const DeviceState& state,
                        const SceneSurface& surface, const SceneVertexShader& shader) {
     Require(ctx.r4.u32 == 4 && state.Word(11824) == 0,
@@ -402,17 +417,9 @@ SceneFullscreenDraw ReadSceneFullscreenDraw(const PPCContext& ctx, uint8_t* base
          ctx.r7.u32 == 6 && ctx.r8.u32 == 6 && ctx.r9.u32 == 48), "Unsupported fullscreen HDR draw arguments");
     const DeviceState state(base, ctx.r3.u32);
     SceneFullscreenDraw pass;
-    pass.surface = {state.Word(12448),1280,720,1,{}};
+    pass.surface = ReadFullscreenColorSurface(state, base);
     std::vector<uint8_t> descriptor;
-    Require(state.Word(12452) == 0 && state.Word(12456) == 0 && state.Word(12460) == 0 &&
-            ReadGuest(base, pass.surface.address, 48, descriptor), "Missing fullscreen HDR attachment");
-    Require((LoadBE32(descriptor.data()) & 15) == 4 && LoadBE32(descriptor.data() + 24) == 0x14000500 &&
-            LoadBE32(descriptor.data() + 28) == 0x302d0 && LoadBE32(descriptor.data() + 36) == 0x13fc1678 &&
-            state.Word(10372) == 0x302d0, "Fullscreen HDR attachment layout changed");
-    pass.surface.description.assign(descriptor.begin()+24,descriptor.end());
-    state.FullViewport(pass.surface);
-    Require((state.bytes[10940] & 0x30) == 0 && state.Word(12724) == 0 && state.Word(12716) == UINT32_MAX &&
-            state.Word(11824) == 0 && state.Word(10452) == 0 && state.Word(10460) == (grade ? 7 : 15) &&
+    Require(state.Word(11824) == 0 && state.Word(10452) == 0 && state.Word(10460) == (grade ? 7 : 15) &&
             state.Word(10548) == 0x00700770 && state.Word(10552) == 0x10001 && (state.Word(10556) & 0x1f) == 7 &&
             state.Word(10564) == 0x80000 && state.Word(10568) == (grade ? 0x18002 : 0x18000) && state.Word(10572) == 0x43f &&
             state.Float(12672) == (grade ? 1 : 0) && state.Float(12676) == (grade ? 0 : 1) &&
@@ -468,5 +475,18 @@ plume::RenderSamplerDesc FullscreenColorSampler() {
     sampler.addressU = sampler.addressV = plume::RenderTextureAddressMode::CLAMP;
     sampler.maxLOD = 0;
     return sampler;
+}
+
+SceneSurface ReadFullscreenResolve(const PPCContext& ctx, uint8_t* base, const SceneResolveTexture& destination) {
+    Require(ctx.lr == 0x827B3694 && ctx.r4.u32 == 0xf4000000 && !ctx.r5.u32 && !ctx.r7.u32 && !ctx.r8.u32 && !ctx.r9.u32,
+            "Unsupported fullscreen resolve flags or region");
+    const DeviceState state(base, ctx.r3.u32);
+    const auto surface = ReadFullscreenColorSurface(state, base);
+    std::vector<uint8_t> descriptor;
+    Require(ctx.r6.u32 == destination.address && ReadGuest(base, ctx.r6.u32, 52, descriptor) &&
+            (LoadBE32(descriptor.data()) & 15) == 3, "Fullscreen resolve did not reuse the scene texture");
+    for (uint32_t i = 0; i < destination.fetch_words.size(); ++i)
+        Require(LoadBE32(descriptor.data() + 28 + i * 4) == destination.fetch_words[i], "Fullscreen resolve texture layout changed");
+    return surface;
 }
 }

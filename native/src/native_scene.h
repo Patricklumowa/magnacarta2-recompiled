@@ -87,4 +87,5 @@ SceneFullscreenDraw ReadSceneFullscreenDraw(const PPCContext& context, uint8_t* 
     const ScenePassShaders& shaders, const SceneResolveTexture& source, bool grade);
 void ReadFullscreenUpVertices(DepthDraw& draw, uint8_t* base, uint32_t address, uint32_t index_address);
 plume::RenderSamplerDesc FullscreenColorSampler();
+SceneSurface ReadFullscreenResolve(const PPCContext& context, uint8_t* base, const SceneResolveTexture& destination);
 }

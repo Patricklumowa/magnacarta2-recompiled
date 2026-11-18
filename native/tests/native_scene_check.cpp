@@ -122,7 +122,7 @@ void CheckDepthRestore(mc2::native::DepthRenderer& depth, mc2::native::NativeDev
           "Restored depth differs from the sampled source or modified the stencil plane");
 }
 
-void CheckFullscreenColor(const mc2::native::ColorTarget& source, const mc2::native::SceneSurface& surface,
+void CheckFullscreenColor(mc2::native::ColorTarget& source, const mc2::native::SceneSurface& surface,
                           const std::shared_ptr<mc2::native::NativeDevice>& gpu, const std::filesystem::path& directory) {
     using namespace mc2::native;
     using namespace plume;
@@ -199,6 +199,21 @@ void CheckFullscreenColor(const mc2::native::ColorTarget& source, const mc2::nat
     }
     Check(lifted_pixels == graded.size() / 4 && graded[0] == 0x3c00, "Fullscreen grade did not write the expected RGB range");
     std::cout << "PASS: fullscreen RGB grading with alpha preserved, graded=" << lifted_pixels << '\n';
+
+    const auto resolve_path = directory / "fullscreen" / "color-resolve.dxil";
+    if (std::filesystem::exists(resolve_path)) {
+        const auto shader = ReadNativeFile(resolve_path);
+        const auto before = gpu->completed;
+        Check(source.OverwriteResolved(target, -3, shader) == before + 1, "Fullscreen resolve fence did not complete");
+        const auto exported = source.ReadResolvedPixels();
+        Check(exported.size() == graded.size() && target.ReadPixels() == graded, "Fullscreen resolve changed its source or extent");
+        for (size_t i = 0; i < exported.size(); ++i) {
+            const auto value = graded[i];
+            Check(!value || (value >= 0x1000 && value < 0x7c00), "Fullscreen resolve fixture is outside the normalized range");
+            Check(exported[i] == (value ? value - 0x0c00 : 0), "Graded texture output does not match the scaled source");
+        }
+        std::cout << "PASS: fullscreen resolve replaced all HDR texels and retained its source\n";
+    }
 }
 
 void ReplayColor(const mc2::native::SceneDepthDraw& prepass, const mc2::native::SceneVertexShader& depth_shader,

@@ -7,6 +7,7 @@
 #include "native_scene.h"
 #include "native_color_target.h"
 #include "native_sampled_texture.h"
+#include "native_shader_input.h"
 #include "draw_capture.h"
 #include "guest_graphics_read.h"
 #include <rex/cvar.h>
@@ -92,6 +93,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     std::optional<SceneColorShaders> color_shaders;
     std::optional<ScenePassShaders> depth_restore_shaders;
     std::optional<ScenePassShaders> fullscreen_shaders, color_grade_shaders;
+    std::vector<uint8_t> fullscreen_resolve_shader;
     std::optional<SceneSurface> depth_surface,color_surface;
     std::unique_ptr<DepthRenderer> depth_renderer;
     std::unique_ptr<ColorTarget> color_target;
@@ -104,6 +106,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     std::optional<SceneSurface> fullscreen_surface;
     std::unique_ptr<ColorTarget> fullscreen_target;
     bool color_graded = false;
+    bool fullscreen_resolved = false;
     plume::RenderRect cleared_tile;
     std::optional<DepthDraw> prepass_draw;
     std::optional<TiledSceneDraw> scene_draw;
@@ -130,6 +133,8 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             if (std::filesystem::is_directory(restore_directory)) depth_restore_shaders = LoadDepthRestoreShaders(restore_directory);
             const auto fullscreen_directory = std::filesystem::path(color_directory) / "fullscreen";
             if (std::filesystem::is_directory(fullscreen_directory)) fullscreen_shaders = LoadFullscreenColorShaders(fullscreen_directory, false);
+            const auto fullscreen_resolve_path = fullscreen_directory / "color-resolve.dxil";
+            if (std::filesystem::exists(fullscreen_resolve_path)) fullscreen_resolve_shader = ReadNativeFile(fullscreen_resolve_path);
             const auto grade_directory = std::filesystem::path(color_directory) / "color-grade";
             if (std::filesystem::is_directory(grade_directory)) color_grade_shaders = LoadFullscreenColorShaders(grade_directory, true);
         }
@@ -471,6 +476,18 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         REXLOG_INFO("MC2 native scene: fullscreen RGB color grading, completed={}", completed);
     }
 
+    void ResolveFullscreen(const PPCContext& ctx, uint8_t* base) {
+        std::lock_guard lock(mutex);
+        Require(ctx.r3.u32 && ctx.r3.u32 == guest_device && color_graded && !fullscreen_resolved &&
+                !fullscreen_resolve_shader.empty(), "Fullscreen resolve requires the completed grade and single-sample copy shader");
+        const auto surface = ReadFullscreenResolve(ctx, base, scene_textures[0]);
+        Require(*fullscreen_surface == surface, "Fullscreen resolve source differs from the graded target");
+        completed = color_target->OverwriteResolved(*fullscreen_target, -3, fullscreen_resolve_shader);
+        fullscreen_resolved = true;
+        REXLOG_INFO("MC2 native scene: copied graded HDR to scene texture {:#x}, exponent=-3, completed={}",
+                    scene_textures[0].address, completed);
+    }
+
     // Record bounded changes at the clear boundary while surface support grows.
     // Logging itself never substitutes a clear or changes the PPC call.
     void TraceClear(const PPCContext& ctx, uint8_t* base) {
@@ -666,7 +683,10 @@ REX_HOOK_RAW(sub_8238AD80) {
 REX_HOOK_RAW(sub_823893A0) {
     if (REXCVAR_GET(mc2_scene_resolve_trace)) TraceSceneResolve(ctx, base);
     if (NativeBootActive() && Graphics().HasColorDraw()) {
-        try { Graphics().ResolveTile(ctx, base); }
+        try {
+            if (ctx.lr == 0x827B3694) Graphics().ResolveFullscreen(ctx, base);
+            else Graphics().ResolveTile(ctx, base);
+        }
         catch (const std::exception& error) { UnsupportedNativeOperation(error.what(), ctx); }
         // Preserve the guest's CPU resource bookkeeping. The original GPU
         // commands go only to staging; the native copy has already completed.

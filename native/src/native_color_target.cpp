@@ -119,6 +119,22 @@ ColorTarget::ColorTarget(uint32_t width,uint32_t height,uint32_t samples,std::sh
 ColorTarget::~ColorTarget()=default;
 uint64_t ColorTarget::Clear(RenderColor value,const RenderRect* rectangle) { return impl_->Clear(value,rectangle); }
 uint64_t ColorTarget::ResolveAndClear(const RenderRect& rectangle, int32_t exponent) { return impl_->ResolveAndClear(rectangle, exponent); }
+uint64_t ColorTarget::OverwriteResolved(const ColorTarget& source, int32_t exponent, std::span<const uint8_t> shader) {
+    const auto& input = *source.impl_;
+    auto& gpu = Device();
+    const RenderRect full(0,0,impl_->width,impl_->height);
+    Require(input.gpu.get() == &gpu && input.samples == 1 && input.width == impl_->width && input.height == impl_->height &&
+            impl_->tile_resolve && impl_->tile_resolve->CompletedRegion() == full,
+            "Fullscreen HDR copy requires a matching single-sample source and complete scene resolve");
+    Require(exponent >= -32 && exponent <= 31 && !shader.empty(), "Invalid fullscreen HDR resolve shader or exponent");
+    source.RequireCleared(full);
+    TileResolve copy(gpu, *input.texture, *impl_->tile_resolve->Output(), shader);
+    gpu.commands->begin();
+    copy.Record(full, std::ldexp(1.0f, exponent));
+    gpu.commands->end();
+    gpu.queue->executeCommandLists(gpu.commands.get(), gpu.fence.get());
+    return gpu.Complete();
+}
 std::vector<uint16_t> ColorTarget::ReadPixels() { return impl_->ReadPixels(false); }
 std::vector<uint16_t> ColorTarget::ReadResolvedPixels() { return impl_->ReadPixels(true); }
 NativeDevice& ColorTarget::Device() const { return *impl_->gpu; }
