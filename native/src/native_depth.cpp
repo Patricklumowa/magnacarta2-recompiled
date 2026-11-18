@@ -41,14 +41,15 @@ struct IndexedPipeline {
     size_t vertex_capacity = 0, index_capacity = 0;
 
     IndexedPipeline(const DepthConfiguration& c, NativeDevice* device_context, std::span<const uint8_t> ps = {},
-                    std::span<const RenderSamplerDesc> sampler_descs = {}, RenderFormat color_format = RenderFormat::UNKNOWN)
+                    std::span<const RenderSamplerDesc> sampler_descs = {}, RenderFormat color_format = RenderFormat::UNKNOWN,
+                    RenderFormat depth_format = RenderFormat::D32_FLOAT)
         : gpu(device_context), width(c.width), height(c.height) {
         Require(gpu && c.width && c.height && c.width <= 8192 && c.height <= 8192,
                 "Invalid native indexed target");
         Require(c.sample_count == 1 || c.sample_count == 2 || c.sample_count == 4, "Unsupported native sample count");
         Require(!c.vertex_shader.empty() && !c.inputs.empty() && c.inputs.size() <= 32,
                 "Missing native vertex shader or inputs");
-        Require(ps.empty() == (color_format == RenderFormat::UNKNOWN) && sampler_descs.size() <= 16 &&
+        Require((!ps.empty() || color_format == RenderFormat::UNKNOWN) && sampler_descs.size() <= 16 &&
                 (!ps.empty() || sampler_descs.empty()), "Invalid native pixel pipeline");
         slot = RenderInputSlot(0, c.inputs.front().stride);
         Require(slot.stride > 0 && slot.stride <= 1020, "Invalid native indexed vertex stride");
@@ -103,8 +104,8 @@ struct IndexedPipeline {
         Require(layout && vertex_shader, "Native indexed shader/layout creation failed");
         RenderGraphicsPipelineDesc desc;
         desc.pipelineLayout = layout.get(); desc.vertexShader = vertex_shader.get();
-        if (pixel_shader) {
-            desc.pixelShader = pixel_shader.get();
+        desc.pixelShader = pixel_shader.get();
+        if (color_format != RenderFormat::UNKNOWN) {
             desc.renderTargetCount = 1;
             desc.renderTargetFormat[0] = color_format;
             desc.renderTargetBlend[0] = RenderBlendDesc::Copy();
@@ -115,7 +116,9 @@ struct IndexedPipeline {
         desc.depthEnabled = true; desc.depthWriteEnabled = c.write; desc.depthClipEnabled = c.clip;
         desc.depthFunction = c.comparison; desc.cullMode = c.cull;
         desc.multisampling = RenderMultisampling(c.sample_count);
-        desc.depthTargetFormat = RenderFormat::D32_FLOAT;
+        desc.depthTargetFormat = depth_format;
+        // The depth restore uses Always with Keep for all stencil outcomes.
+        desc.stencilEnabled = depth_format == RenderFormat::D32_FLOAT_S8_UINT;
         pipeline = device->createGraphicsPipeline(desc);
         Require(bool(pipeline), "Native indexed pipeline creation failed");
         vertex_constants = device->createBuffer(RenderBufferDesc::UploadBuffer(4096));
@@ -124,13 +127,13 @@ struct IndexedPipeline {
         Require(vertex_constants && shared_constants && dummy_input, "Native indexed resource creation failed");
         const float dummy[] = {0,0,0,1}; Upload(dummy_input.get(), dummy, sizeof(dummy));
     }
-    void Prepare(const DepthDraw& draw, std::span<const uint8_t> ps = {}, std::span<const SampledTexture* const> textures = {}) {
+    void Prepare(const DepthDraw& draw, std::span<const uint8_t> ps = {}, std::span<const RenderTexture* const> textures = {}) {
         Require(draw.vertex_constants.size() == 4096 && draw.shared_constants.size() == 512,
                 "Invalid native vertex constants");
         Require(ps.size() == (pixel_shader ? 4096u : 0u) && textures.size() == samplers.size(),
                 "Invalid native pixel constants or texture count");
         for (const auto* texture : textures)
-            Require(texture && &texture->Device() == gpu, "Native sampled texture belongs to a different device or is missing");
+            Require(texture != nullptr, "Missing native sampled texture");
         if (!textures.empty()) {
             for (uint32_t slot = 0; slot < 16; ++slot) {
                 uint32_t texture_index, sampler_index;
@@ -175,7 +178,7 @@ struct IndexedPipeline {
         Upload(shared_constants.get(), draw.shared_constants.data(), 512);
         if (pixel_shader) Upload(pixel_constants.get(), ps.data(), ps.size());
         for (uint32_t i = 0; i < textures.size(); ++i)
-            texture_set->setTexture(i, textures[i]->Texture(), RenderTextureLayout::SHADER_READ);
+            texture_set->setTexture(i, textures[i], RenderTextureLayout::SHADER_READ);
     }
     void Record(const DepthDraw& draw) const {
         auto& commands = gpu->commands;
@@ -341,6 +344,33 @@ DepthResult DepthRenderer::Render(const DepthDraw& draw, bool read_pixels) { ret
 uint64_t DepthRenderer::ResolveAndClear(const RenderRect& rectangle) { return impl_->ResolveAndClear(rectangle); }
 std::vector<float> DepthRenderer::ReadResolvedPixels() { return impl_->ReadResolvedPixels(); }
 
+uint64_t DepthRenderer::RestoreResolvedDepth(const DepthConfiguration& config, const DepthDraw& draw,
+        std::span<const uint8_t> pixel_shader, std::span<const uint8_t> constants,
+        RenderTexture& target, RenderFramebuffer& framebuffer) {
+    auto& state = *impl_;
+    const RenderRect full(0,0,state.width,state.height);
+    Require(state.tile_resolve && state.tile_resolve->CompletedRegion() == full && draw.scissor == full &&
+            config.sample_count == 1 && config.width == state.width && config.height == state.height,
+            "Native depth restore requires a fully resolved texture and same-size single-sample target");
+    RenderSamplerDesc sampler;
+    sampler.minFilter = sampler.magFilter = RenderFilter::NEAREST;
+    sampler.mipmapMode = RenderMipmapMode::NEAREST;
+    sampler.maxLOD = 0;
+    auto& gpu = *state.gpu;
+    IndexedPipeline pipeline(config, &gpu, pixel_shader, std::span(&sampler, 1), RenderFormat::UNKNOWN,
+                             RenderFormat::D32_FLOAT_S8_UINT);
+    const RenderTexture* source = state.tile_resolve->Output();
+    pipeline.Prepare(draw, constants, std::span(&source, 1));
+    auto& commands = gpu.commands;
+    commands->begin();
+    commands->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(&target, RenderTextureLayout::DEPTH_WRITE));
+    commands->setFramebuffer(&framebuffer);
+    pipeline.Record(draw);
+    commands->end();
+    gpu.queue->executeCommandLists(commands.get(), gpu.fence.get());
+    return gpu.Complete();
+}
+
 struct ColorRenderer::Impl {
     DepthRenderer::Impl& depth;
     ColorTarget& color;
@@ -367,7 +397,13 @@ struct ColorRenderer::Impl {
                     std::span<const SampledTexture* const> textures) {
         Require(depth.initialized, "Native depth target has not been cleared");
         color.RequireCleared(draw.scissor);
-        pipeline.Prepare(draw, pixel_constants, textures);
+        std::array<const RenderTexture*, 16> views{};
+        Require(textures.size() <= views.size(), "Too many native sampled textures");
+        for (size_t i = 0; i < textures.size(); ++i) {
+            Require(textures[i] && &textures[i]->Device() == depth.gpu.get(), "Native sampled texture belongs to a different device or is missing");
+            views[i] = textures[i]->Texture();
+        }
+        pipeline.Prepare(draw, pixel_constants, std::span(views).first(textures.size()));
         auto& gpu = *depth.gpu;
         auto& commands = gpu.commands;
         const RenderTextureBarrier barriers[] = {

@@ -73,6 +73,11 @@ struct TiledSceneDraw {
     }
 };
 
+struct PendingDepthRestore {
+    SceneDepthRestore scene;
+    uint32_t vertices, endpoint;
+};
+
 class NativeGraphics final : public rex::system::IGraphicsSystem {
  public:
     MovieShaders shaders;
@@ -81,12 +86,15 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     std::unique_ptr<QuadRenderer> renderer;
     std::optional<SceneVertexShader> depth_shaders;
     std::optional<SceneColorShaders> color_shaders;
+    std::optional<SceneDepthRestoreShaders> depth_restore_shaders;
     std::optional<SceneSurface> depth_surface,color_surface;
     std::unique_ptr<DepthRenderer> depth_renderer;
     std::unique_ptr<ColorTarget> color_target;
     std::optional<SceneSurface> stencil_surface;
     std::unique_ptr<plume::RenderTexture> stencil_target;
     std::unique_ptr<plume::RenderFramebuffer> stencil_framebuffer;
+    std::optional<PendingDepthRestore> pending_restore;
+    bool depth_restored = false;
     plume::RenderRect cleared_tile;
     std::optional<DepthDraw> prepass_draw;
     std::optional<TiledSceneDraw> scene_draw;
@@ -109,6 +117,8 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         if (!color_directory.empty()) {
             Require(bool(depth_shaders), "Native color shaders require the verified depth shader directory");
             color_shaders = LoadColorShaders(color_directory);
+            const auto restore_directory = std::filesystem::path(color_directory) / "depth-restore";
+            if (std::filesystem::is_directory(restore_directory)) depth_restore_shaders = LoadDepthRestoreShaders(restore_directory);
         }
         NativeGraphics* expected = nullptr;
         Require(active.compare_exchange_strong(expected, this), "Only one native graphics system is supported");
@@ -124,7 +134,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     bool has_presentation() const override { return true; }
     void Shutdown() override {
         std::lock_guard lock(mutex);
-        prepass_draw.reset(); scene_draw.reset();
+        prepass_draw.reset(); scene_draw.reset(); pending_restore.reset();
         stencil_framebuffer.reset(); stencil_target.reset();
         pending.reset(); renderer.reset(); depth_renderer.reset(); color_target.reset(); gpu.reset();
     }
@@ -345,6 +355,45 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         return true;
     }
 
+    void BeginDepthRestore(PPCContext& ctx, uint8_t* base) {
+        const uint32_t device = ctx.r3.u32;
+        SceneDepthRestore scene;
+        {
+            std::lock_guard lock(mutex);
+            Require(device && device == guest_device && scene_tiles_retired && stencil_surface && !pending_restore &&
+                    !depth_restored && depth_restore_shaders, "Direct begin-UP draw requires the first native depth restore shaders");
+            scene = ReadSceneDepthRestore(ctx, base, *depth_restore_shaders, scene_textures[1]);
+            Require(scene.depth == *stencil_surface, "Native depth restore needs the cleared single-sample stencil surface");
+        }
+        // Preserve the guest's allocation and cursor bookkeeping. The caller
+        // writes vertex bytes after BeginVertices returns.
+        __imp__sub_828648A8(ctx, base);
+        const auto vertices = REX_LOAD_U32(device + 13448);
+        const auto endpoint = REX_LOAD_U32(device + 13444);
+        Require(vertices && !(vertices & 15) && ctx.r3.u32 == vertices && endpoint && !(endpoint & 3),
+                "Native depth restore staging allocation failed");
+        std::lock_guard lock(mutex);
+        pending_restore = PendingDepthRestore{std::move(scene), vertices, endpoint};
+    }
+
+    void CompleteDepthRestore(uint8_t* base) {
+        std::lock_guard lock(mutex);
+        if (!pending_restore) return;
+        auto& restore = *pending_restore;
+        Require(REX_LOAD_U32(guest_device + 48) == restore.endpoint && REX_LOAD_U32(guest_device + 13448) == restore.vertices,
+                "Guest did not commit the native depth restore vertices");
+        ReadDepthRestoreVertices(restore.scene.draw, base, restore.vertices);
+        auto configuration = ConfigureDepth(restore.scene.depth, depth_restore_shaders->vertex);
+        configuration.comparison = plume::RenderComparisonFunction::ALWAYS;
+        configuration.cull = plume::RenderCullMode::NONE;
+        completed = depth_renderer->RestoreResolvedDepth(configuration, restore.scene.draw,
+            depth_restore_shaders->pixel_dxil, restore.scene.pixel_constants, *stencil_target, *stencil_framebuffer);
+        pending_restore.reset();
+        depth_restored = true;
+        REXLOG_INFO("MC2 native scene: restored single-sample depth from texture {:#x}, completed={}",
+                    scene_textures[1].address, completed);
+    }
+
     // Record bounded changes at the clear boundary while surface support grows.
     // Logging itself never substitutes a clear or changes the PPC call.
     void TraceClear(const PPCContext& ctx, uint8_t* base) {
@@ -396,6 +445,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     void Flush(uint8_t* base, uint32_t device) {
         std::lock_guard lock(mutex);
         Require(device != 0 && device == guest_device, "Native operation used an unknown device");
+        Require(!pending_restore, "Legacy staging flushed during the pending native depth restore");
         if (pending) {
             Require(window && IsWindow(window), "Native game window is unavailable");
             if (!renderer) {
@@ -499,6 +549,13 @@ void DrawNativeSceneIndexed(const PPCContext& ctx, uint8_t* base) {
 
 using namespace mc2::native;
 
+REX_HOOK_RAW(sub_826DA3A0) {
+    __imp__sub_826DA3A0(ctx, base);
+    if (NativeBootActive()) {
+        try { Graphics().CompleteDepthRestore(base); }
+        catch (const std::exception& error) { UnsupportedNativeOperation(error.what(), ctx); }
+    }
+}
 REX_HOOK_RAW(sub_82388AA0) {
     if (NativeBootActive()) {
         // This routine already has a single-thread path; no legacy GPU workers
@@ -584,7 +641,8 @@ REX_HOOK_RAW(sub_8237CA28) {
 }
 REX_HOOK_RAW(sub_828648A8) {
     if (!NativeBootActive()) { __imp__sub_828648A8(ctx, base); return; }
-    UnsupportedNativeOperation("direct begin-UP draw", ctx);
+    try { Graphics().BeginDepthRestore(ctx, base); }
+    catch (const std::exception& error) { UnsupportedNativeOperation(error.what(), ctx); }
 }
 REX_HOOK_RAW(sub_82864D88) {
     if (!NativeBootActive()) { __imp__sub_82864D88(ctx, base); return; }

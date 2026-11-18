@@ -308,4 +308,68 @@ SceneTileResolve ReadSceneTileResolve(const PPCContext& ctx, uint8_t* base) {
     resolve.exponent = depth ? 0 : -3;
     return resolve;
 }
+
+SceneDepthRestoreShaders LoadDepthRestoreShaders(const std::filesystem::path& directory) {
+    // This shader uses the explicit UP declaration, which supplies the fetch
+    // format and stride at draw time.
+    return {{ReadNativeFile(directory / "vertex-shader.container"), ReadNativeFile(directory / "vertex.dxil"),
+             {{0,0,95,16,0,4}}}, ReadNativeFile(directory / "pixel-shader.container"),
+            ReadNativeFile(directory / "pixel.dxil")};
+}
+
+SceneDepthRestore ReadSceneDepthRestore(const PPCContext& ctx, uint8_t* base,
+        const SceneDepthRestoreShaders& shaders, const SceneResolveTexture& source) {
+    Require(ctx.lr == 0x826DA868 && ctx.r4.u32 == 8 && ctx.r5.u32 == 3 && ctx.r6.u32 == 16,
+            "Native depth restore requires the verified user-memory rectangle");
+    const DeviceState state(base, ctx.r3.u32);
+    SceneDepthRestore restore;
+    restore.depth = state.DepthSurface(base, 720, 1);
+    state.FullViewport(restore.depth);
+    Require((state.bytes[10940] & 0x30) == 0 && state.Word(12724) == 0 && state.Word(12716) == UINT32_MAX &&
+            state.Word(10548) == 0x00700777 && state.Word(10460) == 0 && (state.Word(10556) & 0x1f) == 7 &&
+            state.Word(10492) == 0x00ffff00 && state.Word(10496) == 0x00ffff00 && state.Word(10564) == 0x80000 &&
+            state.Word(10568) == 0x18002 && state.Word(10572) == 0x43f &&
+            state.Float(12672) == 1 && state.Float(12676) == 0 &&
+            state.Float(10504) == 640 && state.Float(10508) == 640 && state.Float(10512) == -360 &&
+            state.Float(10516) == 360 && state.Float(10520) == -1 && state.Float(10524) == 1,
+            "Native depth restore depth/stencil, color mask or viewport state changed");
+    Require(ReadBoundShader(base, state.Word(12704), true) == shaders.vertex.reference &&
+            ReadBoundShader(base, state.Word(12700), false) == shaders.pixel_reference,
+            "Untranslated native depth restore shaders");
+    std::vector<uint8_t> declaration;
+    Require(ReadGuest(base, state.Word(11824), 64, declaration) && (LoadBE32(declaration.data()) & 15) == 5,
+            "Invalid native depth restore declaration");
+    constexpr uint32_t declaration_words[] = {1,0,0xff000000,0,0,0,0,0,0x001a23a6,0};
+    for (uint32_t i = 0; i < std::size(declaration_words); ++i)
+        Require(LoadBE32(declaration.data() + 24 + i * 4) == declaration_words[i], "Native restore declaration differs");
+    Require(source.address && state.Word(12552) == source.address, "Native depth restore did not bind the scene depth resolve");
+    for (uint32_t i = 0; i < source.fetch_words.size(); ++i) {
+        const uint32_t expected = i == 1 ? source.fetch_words[i] & 0x1fffffff : source.fetch_words[i];
+        Require(state.Word(1152 + i * 4) == expected, "Native restore depth texture fetch differs");
+    }
+    auto& draw = restore.draw;
+    draw.vertex_constants = NativeVertexBytes(std::span(state.bytes).subspan(1920,4096), 2);
+    restore.pixel_constants = NativeVertexBytes(std::span(state.bytes).subspan(6016,4096), 2);
+    draw.shared_constants.resize(512);
+    const float half_pixel[] = {1.0f / restore.depth.width, -1.0f / restore.depth.height};
+    std::memcpy(draw.shared_constants.data() + 264, half_pixel, sizeof(half_pixel));
+    const auto mode = PackTextureFetchMode(0x688, 0, 0);
+    std::memcpy(draw.shared_constants.data() + 288, &mode, sizeof(mode));
+    draw.viewport = plume::RenderViewport(0,0,restore.depth.width,restore.depth.height,1,0);
+    draw.scissor = plume::RenderRect(0,0,restore.depth.width,restore.depth.height);
+    return restore;
+}
+
+void ReadDepthRestoreVertices(DepthDraw& draw, uint8_t* base, uint32_t address) {
+    constexpr float corners[][4] = {{0,0,0,1}, {1,0,0,1}, {0,1,0,1}, {1,1,0,1}};
+    std::vector<uint8_t> raw;
+    Require(ReadGuest(base, address, 3 * sizeof(corners[0]), raw), "Unreadable native depth restore vertices");
+    draw.vertices = NativeVertexBytes(raw, 2);
+    Require(std::memcmp(draw.vertices.data(), corners, draw.vertices.size()) == 0, "Native depth restore rectangle changed");
+    draw.vertices.resize(sizeof(corners));
+    // Expand the captured three-corner rectangle into two triangles.
+    std::memcpy(draw.vertices.data() + raw.size(), corners[3], sizeof(corners[3]));
+    draw.indices = {0,1,2,2,1,3};
+    draw.index_count = uint32_t(draw.indices.size());
+}
 }

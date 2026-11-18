@@ -46,6 +46,15 @@ struct SceneResolveTexture {
     std::array<uint32_t, 6> fetch_words{};
     bool operator==(const SceneResolveTexture&) const = default;
 };
+struct SceneDepthRestoreShaders {
+    SceneVertexShader vertex;
+    std::vector<uint8_t> pixel_reference, pixel_dxil;
+};
+struct SceneDepthRestore {
+    SceneSurface depth;
+    DepthDraw draw;
+    std::vector<uint8_t> pixel_constants;
+};
 struct SceneTileResolve {
     SceneSurface color, depth;
     SceneResolveTexture destination;
@@ -64,4 +73,8 @@ SceneDepthDraw ReadSceneDepthDraw(const PPCContext& context, uint8_t* base, cons
 SceneColorDraw ReadSceneColorDraw(const PPCContext& context, uint8_t* base, const SceneColorShaders& shaders);
 bool SameScenePositionInputs(const DepthDraw& depth, const DepthDraw& color);
 SceneTileResolve ReadSceneTileResolve(const PPCContext& context, uint8_t* base);
+SceneDepthRestoreShaders LoadDepthRestoreShaders(const std::filesystem::path& directory);
+SceneDepthRestore ReadSceneDepthRestore(const PPCContext& context, uint8_t* base,
+    const SceneDepthRestoreShaders& shaders, const SceneResolveTexture& source);
+void ReadDepthRestoreVertices(DepthDraw& draw, uint8_t* base, uint32_t address);
 }

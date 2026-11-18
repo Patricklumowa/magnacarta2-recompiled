@@ -4,6 +4,7 @@
 #include "native_scene.h"
 #include "native_shader_input.h"
 #include "shader_capture.h"
+#include <plume_d3d12.h>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -19,10 +20,112 @@ template<class F> void Reject(F&& action) {
     Check(rejected,"Unsupported native scene state was accepted");
 }
 
+void CheckDepthRestore(mc2::native::DepthRenderer& depth, mc2::native::NativeDevice& gpu,
+                       const mc2::native::SceneSurface& surface, const std::vector<float>& source,
+                       const std::filesystem::path& directory) {
+    using namespace mc2::native;
+    using namespace plume;
+    auto shaders = LoadDepthRestoreShaders(directory);
+    auto single_sample = surface;
+    single_sample.samples = 1;
+    auto config = ConfigureDepth(single_sample, shaders.vertex);
+    config.comparison = RenderComparisonFunction::ALWAYS;
+    config.cull = RenderCullMode::NONE;
+    DepthDraw draw;
+    std::array<uint8_t,64> guest{};
+    for (size_t offset : {16,20,32,40,48}) {
+        // Three big-endian float4 corners at a nonzero guest address.
+        guest[offset] = 0x3f;
+        guest[offset + 1] = 0x80;
+    }
+    ReadDepthRestoreVertices(draw, guest.data(), 4);
+    draw.vertex_constants.resize(4096);
+    const std::vector<uint8_t> pixel_constants(4096);
+    draw.shared_constants.resize(512);
+    const float half_pixel[] = {1.0f / surface.width, -1.0f / surface.height};
+    const auto fetch_mode = PackTextureFetchMode(0x688, 0, 0);
+    std::memcpy(draw.shared_constants.data() + 264, half_pixel, sizeof(half_pixel));
+    std::memcpy(draw.shared_constants.data() + 288, &fetch_mode, sizeof(fetch_mode));
+    draw.viewport = RenderViewport(0,0,surface.width,surface.height,1,0);
+    draw.scissor = RenderRect(0,0,surface.width,surface.height);
+
+    auto target = gpu.device->createTexture(RenderTextureDesc::DepthTarget(surface.width, surface.height,
+                                                                          RenderFormat::D32_FLOAT_S8_UINT));
+    Check(bool(target), "Restore test depth/stencil allocation failed");
+    RenderFramebufferDesc framebuffer_desc;
+    framebuffer_desc.depthAttachment = target.get();
+    auto framebuffer = gpu.device->createFramebuffer(framebuffer_desc);
+    Check(bool(framebuffer), "Restore test framebuffer creation failed");
+    auto& commands = gpu.commands;
+    commands->begin();
+    commands->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(target.get(), RenderTextureLayout::DEPTH_WRITE));
+    commands->setFramebuffer(framebuffer.get());
+    commands->clearDepthStencil(true, true, 1, 0xa7, nullptr, 0);
+    commands->end();
+    gpu.queue->executeCommandLists(commands.get(), gpu.fence.get());
+    const auto before_restore = gpu.Complete();
+    Check(depth.RestoreResolvedDepth(config, draw, shaders.pixel_dxil, pixel_constants, *target, *framebuffer) == before_restore + 1,
+          "Restore draw did not complete its own fence");
+
+    // D3D12 copies the two planes as distinct full subresources. Plume's
+    // generic copy interface does not expose the depth/stencil plane index.
+    auto* d3d_device = static_cast<D3D12Device*>(gpu.device.get())->d3d;
+    auto* d3d_texture = static_cast<D3D12Texture*>(target.get())->d3d;
+    const auto description = d3d_texture->GetDesc();
+    std::array<D3D12_PLACED_SUBRESOURCE_FOOTPRINT,2> layouts{};
+    std::array<UINT64,2> row_sizes{};
+    UINT64 bytes = 0;
+    d3d_device->GetCopyableFootprints(&description,0,2,0,layouts.data(),nullptr,row_sizes.data(),&bytes);
+    Check(bytes && bytes != UINT64_MAX, "Invalid depth/stencil copy footprints");
+    const size_t depth_stride = row_sizes[0] / surface.width, stencil_stride = row_sizes[1] / surface.width;
+    Check((depth_stride == 4 || depth_stride == 8) && (stencil_stride == 1 || stencil_stride == 8),
+          "Unexpected depth/stencil plane packing");
+    auto readback = gpu.device->createBuffer(RenderBufferDesc::ReadbackBuffer(bytes));
+    Check(bool(readback), "Restore test readback allocation failed");
+    auto* d3d_buffer = static_cast<D3D12Buffer*>(readback.get())->d3d;
+    auto* d3d_list = static_cast<D3D12CommandList*>(commands.get())->d3d;
+    commands->begin();
+    commands->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(target.get(), RenderTextureLayout::COPY_SOURCE));
+    for (uint32_t plane = 0; plane < layouts.size(); ++plane) {
+        D3D12_TEXTURE_COPY_LOCATION from{d3d_texture, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
+        from.SubresourceIndex = plane;
+        D3D12_TEXTURE_COPY_LOCATION to{d3d_buffer, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
+        to.PlacedFootprint = layouts[plane];
+        d3d_list->CopyTextureRegion(&to,0,0,0,&from,nullptr);
+    }
+    commands->end();
+    gpu.queue->executeCommandLists(commands.get(), gpu.fence.get());
+    gpu.Complete();
+    const auto* pixels = static_cast<const uint8_t*>(readback->map());
+    Check(pixels != nullptr, "Restore test readback mapping failed");
+    size_t match = 0, preserved = 0, covered = 0;
+    for (uint32_t y = 0; y < surface.height; ++y) {
+        const auto* depth_row = pixels + layouts[0].Offset + size_t(y) * layouts[0].Footprint.RowPitch;
+        const auto* stencil_row = pixels + layouts[1].Offset + size_t(y) * layouts[1].Footprint.RowPitch;
+        for (uint32_t x = 0; x < surface.width; ++x) {
+            float z;
+            std::memcpy(&z, depth_row + size_t(x) * depth_stride, sizeof(z));
+            preserved += stencil_row[size_t(x) * stencil_stride + (stencil_stride == 8 ? 4 : 0)] == 0xa7;
+            // The half-pixel offset places point samples on texel boundaries.
+            // Either adjacent texel may win when interpolation rounds the tie.
+            bool matches = false;
+            for (uint32_t sy : {y, (y + surface.height - 1) % surface.height})
+                for (uint32_t sx : {x, (x + surface.width - 1) % surface.width})
+                    matches |= std::abs(z - std::max(0.0f, source[size_t(sy) * surface.width + sx] - 1.0e-6f)) <= 1.0e-7f;
+            match += matches;
+            covered += z > 0 && z < 1;
+        }
+    }
+    readback->unmap();
+    std::cout << "Depth restore readback: matched=" << match << ", stencil preserved=" << preserved << ", covered=" << covered << '\n';
+    Check(match == source.size() && preserved == source.size() && covered > 1000,
+          "Restored depth differs from the sampled source or modified the stencil plane");
+}
+
 void ReplayColor(const mc2::native::SceneDepthDraw& prepass, const mc2::native::SceneVertexShader& depth_shader,
                  const mc2::native::SceneColorClear& clear, mc2::native::SceneColorDraw draw,
                  const mc2::native::SceneColorShaders& shaders, const std::filesystem::path& capture,
-                 const std::filesystem::path& output) {
+                 const std::filesystem::path& output, const std::filesystem::path& restore_directory) {
     using namespace mc2::native;
     using namespace plume;
     auto gpu = std::make_shared<NativeDevice>(true);
@@ -199,6 +302,8 @@ void ReplayColor(const mc2::native::SceneDepthDraw& prepass, const mc2::native::
               std::all_of(cleared_depth.begin(), cleared_depth.end(), [](float value) { return value == 0; }),
               "Retained tile source clears did not cover both regions");
         std::cout << "PASS: both captured tiles retained at the original resolve offsets, lower coverage=" << lower_coverage << '\n';
+        if (std::filesystem::is_directory(restore_directory))
+            CheckDepthRestore(depth, *gpu, prepass.surface, full_depth, restore_directory);
     }
     draw.draw.shared_constants[0] = uint8_t(bindings.size());
     const auto before_rejection = gpu->completed;
@@ -328,7 +433,8 @@ int main(int argc,char** argv) try {
                 Reject([&] { ReadSceneColorDraw(context, base, color_shaders); });
                 memory = scene_bytes;
             }
-            ReplayColor(draw, shaders, hdr, color_draw, color_shaders, color_capture, argv[5]);
+            ReplayColor(draw, shaders, hdr, color_draw, color_shaders, color_capture, argv[5],
+                        std::filesystem::path(argv[4]) / "depth-restore");
         }
     }
     std::cout<<"PASS: captured scene input reconstruction, unchanged guest state, clear-to-draw surface identity and unsupported-state rejection\n";

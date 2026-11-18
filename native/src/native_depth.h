@@ -43,6 +43,9 @@ class DepthRenderer {
     // Export sample zero as decoded 20e4 values and clear that depth region.
     uint64_t ResolveAndClear(const plume::RenderRect& rectangle);
     std::vector<float> ReadResolvedPixels();
+    uint64_t RestoreResolvedDepth(const DepthConfiguration& configuration, const DepthDraw& draw,
+                    std::span<const uint8_t> pixel_shader, std::span<const uint8_t> pixel_constants,
+                    plume::RenderTexture& target, plume::RenderFramebuffer& framebuffer);
  private:
     friend class ColorRenderer;
     struct Impl;

@@ -274,5 +274,22 @@ resolved textures retain the upper tile unchanged. A live run with the Xenos
 DLL physically absent completed all four copies and cleared their sources.
 The guest then retired its staging chunks and wrote the completion marker on
 the CPU after the final native fence. The separate single-sample surface
-then receives a native zero stencil clear with depth writes disabled. The
-following direct user-memory draw is the next unsupported operation.
+then receives a native zero stencil clear with depth writes disabled.
+
+## Single-sample depth restore
+
+The next pass samples the full resolved depth texture and writes depth into the
+single-sample D32/S8 attachment. It uses the game's direct user-memory draw
+with three rectangle corners. The native bridge snapshots the draw state at
+allocation, reads the vertices after the guest commits its staging cursor,
+and expands the rectangle into two triangles. The original shaders apply the
+depth bias. Color writes are masked and stencil uses Always with Keep.
+
+To enable this pass, put its verified `vertex-shader.container`,
+`pixel-shader.container`, `vertex.dxil` and `pixel.dxil` in the `depth-restore`
+subdirectory of the color shader directory. Use the default specialization
+for the pixel shader. The captured scene check uses this subdirectory when
+available. Its D3D12 readback checked both planes across all 921,600 pixels
+and verified the sampled depth, bias and stencil preservation. The live run
+completed the restore without Xenos and reached indexed user-memory draw
+`0x826D9CC0`.
