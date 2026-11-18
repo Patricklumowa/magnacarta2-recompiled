@@ -93,12 +93,12 @@ bool DescribeBaseRGBA8(std::span<const uint8_t> fetch_be, BaseRGBA8& output,
   // Compute the exact exclusive bound of sampled base texels. The SDK layout's
   // allocation estimate may include tile padding that isn't mapped by a title.
   uint64_t extent = 0;
-  if (result.tiled || result.bytes_per_texel == 1) {
+  if (result.tiled || (result.bytes_per_texel == 1 && result.endianness != 0)) {
     for (uint32_t y = 0; y < result.height; ++y)
       for (uint32_t x = 0; x < result.width; ++x)
         extent = std::max(extent, TexelEnd(result, x, y));
   } else {
-    extent = ByteOffset(result, result.width - 1, result.height - 1) + 4;
+    extent = ByteOffset(result, result.width - 1, result.height - 1) + result.bytes_per_texel;
   }
   if (!extent || extent > kMaxBytes || uint64_t(result.physical_address) + extent > 0x20000000ull)
     return Fail(error, "Texture base span exceeds capture or physical-memory bounds");
@@ -120,6 +120,20 @@ bool DecodeBaseRGBA8(const BaseRGBA8& description, std::span<const uint8_t> gues
   if (guest_bytes.size() < validated.source_bytes)
     return Fail(error, "Truncated texture payload");
   std::vector<uint8_t> pixels(size_t(validated.width) * validated.height * 4);
+  // Movie planes are linear 8-bit textures with identical RGB channels and
+  // constant alpha. Copy each row without per-channel swizzle or address math.
+  if (!validated.tiled && validated.bytes_per_texel == 1 && !validated.endianness && validated.swizzle == 0xa00) {
+    for (uint32_t y = 0; y < validated.height; ++y) {
+      const auto* row = guest_bytes.data() + ByteOffset(validated, 0, y);
+      auto* pixel = pixels.data() + size_t(y) * validated.width * 4;
+      for (uint32_t x = 0; x < validated.width; ++x, pixel += 4) {
+        pixel[0] = pixel[1] = pixel[2] = row[x];
+        pixel[3] = 255;
+      }
+    }
+    rgba = std::move(pixels);
+    return true;
+  }
   // Endian modes swap bytes within 16 bits, within 32 bits, or 16-bit halves.
   for (uint32_t y = 0; y < validated.height; ++y) {
     for (uint32_t x = 0; x < validated.width; ++x) {

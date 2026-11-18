@@ -126,6 +126,11 @@ draw (guest return address `0x826D9688`) around 20 seconds after startup. This i
 proof of live movie rendering without Xenos, not a native title menu or gameplay.
 No performance improvement is claimed from this test.
 
+The movie texture decoder computes the bounds of linear byte planes from
+their final row and expands grayscale pixels one row at a time. The texture
+checks verify the exact output channels and truncated-read bounds. The
+live movie and scene tests continued to use the original pixel shaders.
+
 A subsequent [native depth path](native-depth.md), enabled by
 `--mc2_native_boot_depth_shader_dir=<verified depth shader directory>`, replaces
 the first full depth clear and indexed triangle draw with native two-sample
