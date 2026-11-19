@@ -197,7 +197,15 @@ void CheckFullscreenColor(mc2::native::ColorTarget& source, const mc2::native::S
         Check(added[i] == (first[i] ? first[i] + 0x0400 : 0) && added[i + 3] == first[i + 3],
               "Additive HDR did not double red and preserve destination alpha");
     copy.RenderResolved(draw, pixel_constants, source);
-    std::cout << "PASS: additive HDR blend respects depth and stencil and preserves alpha\n";
+    draw.scissor = RenderRect(surface.width / 2, 0, surface.width, surface.height);
+    const auto scissored = clear_and_blend(0, 0);
+    for (size_t i = 0; i < scissored.size(); ++i) {
+        const bool inside = (i / 4) % surface.width >= surface.width / 2;
+        Check(scissored[i] == (inside ? added[i] : first[i]), "Additive HDR wrote outside the scissor or missed a pixel inside it");
+    }
+    draw.scissor = RenderRect(0, 0, surface.width, surface.height);
+    copy.RenderResolved(draw, pixel_constants, source);
+    std::cout << "PASS: additive HDR blend respects depth, stencil and scissor and preserves alpha\n";
 
     if (!std::filesystem::is_directory(directory / "color-grade")) return;
     const auto grade_shaders = LoadFullscreenColorShaders(directory / "color-grade", true);

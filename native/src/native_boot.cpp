@@ -467,9 +467,12 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         draw.renderer = &SceneRendererFor(snapshot);
         if (!tiled) {
             completed = draw.Render(draw.draw.scissor);
-            if (REXCVAR_GET(mc2_scene_resolve_trace))
-                REXLOG_INFO("MC2 native scene: additive HDR draw, indices={}, streams={}, textures={}, completed={}",
-                    draw.draw.index_count, draw.draw.VertexStreamCount(), draw.texture_count, completed);
+            if (REXCVAR_GET(mc2_scene_resolve_trace)) {
+                const auto& rect = draw.draw.scissor;
+                REXLOG_INFO("MC2 native scene: additive HDR draw, indices={}, streams={}, textures={}, scissor=[{},{},{},{}], completed={}",
+                    draw.draw.index_count, draw.draw.VertexStreamCount(), draw.texture_count,
+                    rect.left, rect.top, rect.right, rect.bottom, completed);
+            }
             return;
         }
         completed = draw.Render(cleared_tile);

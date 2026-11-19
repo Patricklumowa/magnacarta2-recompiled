@@ -57,9 +57,9 @@ struct DeviceState {
         result.description.assign(descriptor.begin()+24,descriptor.end());
         return result;
     }
-    void FullViewport(const SceneSurface& surface) const {
+    void FullViewport(const SceneSurface& surface, bool allow_scissor = false) const {
         Require(Float(12656) == 0 && Float(12660) == 0 && Float(12664) == surface.width &&
-                Float(12668) == surface.height && Word(11864) == 0,
+                Float(12668) == surface.height && Word(11864) <= uint32_t(allow_scissor),
                 "Scene viewport/scissor differs from the verified pass");
     }
 };
@@ -190,7 +190,7 @@ SceneSurface ReadFullscreenColorSurface(const DeviceState& state, uint8_t* base,
             LoadBE32(descriptor.data() + 28) == format_word && LoadBE32(descriptor.data() + 36) == 0x13fc1678 &&
             state.Word(10372) == (blend_format_word ? blend_format_word : format_word), "Fullscreen color attachment layout changed");
     surface.description.assign(descriptor.begin()+24,descriptor.end());
-    state.FullViewport(surface);
+    state.FullViewport(surface, blend_format_word != 0);
     Require((state.bytes[10940] & 0x30) == 0 && state.Word(12724) == 0 && state.Word(12716) == UINT32_MAX,
             "Fullscreen color pass needs an untiled surface");
     return surface;
@@ -472,6 +472,13 @@ SceneColorDraw ReadSceneColorDraw(const PPCContext& ctx, uint8_t* base, const Sc
     }
     snapshot.draw = ReadGeometry(ctx, base, state, snapshot.color_surface, snapshot.shaders->vertex,
                                  tiled ? 0x00700766 : 0x00700263);
+    if (!tiled && state.Word(11864)) {
+        const auto left = state.Word(12684), top = state.Word(12688);
+        const auto right = state.Word(12692), bottom = state.Word(12696);
+        Require(left < right && top < bottom && right <= snapshot.color_surface.width && bottom <= snapshot.color_surface.height,
+                "Additive HDR scissor is outside the color attachment");
+        snapshot.draw.scissor = plume::RenderRect(left, top, right, bottom);
+    }
     snapshot.pixel_constants = NativeVertexBytes(std::span(state.bytes).subspan(6016,4096),2);
     for (uint32_t slot = 0; slot < snapshot.shaders->texture_count; ++slot) {
         const auto fetch = std::span(state.bytes).subspan(1152 + slot * 24, 24);

@@ -613,8 +613,11 @@ container SHA-256
 three textures are a 1 x 1 RGBA8 texture, BC1 and BC3.
 
 The GPU readback check verifies additive RGB, unchanged alpha and rejection
-by either depth or stencil. A live run without Xenos completed two draws of
-1,224 indices with this pair and reached the next additive material.
+by depth or stencil. The pass reads each light's scissor rectangle, keeping
+the original viewport and restricting writes to the selected pixels. The
+readback checks both sides of the scissor boundary. A live run without Xenos
+completed 16 additive draws, including a 1,093 x 720 scissor and a
+1,034 x 579 scissor, and reached the first four-texture additive material.
 
 ## Scene presentation
 
