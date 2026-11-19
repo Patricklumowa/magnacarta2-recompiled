@@ -90,18 +90,20 @@ void RequireFirstTileDepth(const SceneSurface& prepass, const SceneSurface& tile
 struct TiledSceneDraw {
     DepthDraw draw;
     std::vector<uint8_t> pixel_constants;
-    std::array<std::shared_ptr<const SampledTexture>, 2> textures;
+    std::array<std::shared_ptr<const SampledTexture>, kTiledTextureSlots> textures;
+    uint32_t texture_count = 0;
     ColorRenderer* renderer = nullptr;
 
     uint64_t Render(const plume::RenderRect& rectangle) {
         draw.scissor = rectangle;
-        const std::array<const SampledTexture*, 2> bindings{textures[0].get(), textures[1].get()};
-        return renderer->Render(draw, pixel_constants, bindings);
+        std::array<const SampledTexture*, kTiledTextureSlots> bindings{};
+        for (uint32_t slot = 0; slot < texture_count; ++slot) bindings[slot] = textures[slot].get();
+        return renderer->Render(draw, pixel_constants, std::span(bindings).first(texture_count));
     }
 };
 struct CachedTiledRenderer {
     const SceneColorShaders* shaders;
-    std::array<float, 2> max_lod;
+    std::array<float, kTiledTextureSlots> max_lod;
     plume::RenderCullMode cull;
     std::unique_ptr<ColorRenderer> renderer;
 };
@@ -456,23 +458,28 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         TiledSceneDraw draw;
         draw.draw = std::move(snapshot.draw);
         draw.pixel_constants = std::move(snapshot.pixel_constants);
-        for (uint32_t slot = 0; slot < draw.textures.size(); ++slot)
+        draw.texture_count = snapshot.shaders->texture_count;
+        for (uint32_t slot = 0; slot < draw.texture_count; ++slot)
             draw.textures[slot] = SceneTextureFor(base, snapshot.textures[slot]);
         draw.renderer = &TiledRendererFor(snapshot);
         completed = draw.Render(cleared_tile);
         scene_draws.push_back(std::move(draw));
         tile_depth_surface = std::move(snapshot.tile_depth);
-        if (scene_draws.size() == 1 || REXCVAR_GET(mc2_scene_resolve_trace))
-            REXLOG_INFO("MC2 native scene: indexed HDR color draw {} in first tile, indices={}, BC mip levels={}/{}, completed={}",
-                scene_draws.size(), scene_draws.back().draw.index_count, snapshot.textures[0].mips.size(),
-                snapshot.textures[1].mips.size(), completed);
+        if (scene_draws.size() == 1 || REXCVAR_GET(mc2_scene_resolve_trace)) {
+            const auto& rendered = scene_draws.back();
+            REXLOG_INFO("MC2 native scene: indexed HDR color draw {} in first tile, indices={}, streams={}, textures={}, completed={}",
+                scene_draws.size(), rendered.draw.index_count, rendered.draw.secondary_vertices.empty() ? 1 : 2,
+                rendered.texture_count, completed);
+        }
         prepass_draw.reset();
     }
 
     ColorRenderer& TiledRendererFor(const SceneColorDraw& draw) {
-        // Both slots use the same verified wrap/anisotropic sampler settings
+        // These slots use the same verified wrap/anisotropic sampler settings
         // for this pass. Their maximum LODs vary with each texture's mip chain.
-        const std::array max_lod{draw.samplers[0].maxLOD, draw.samplers[1].maxLOD};
+        const auto samplers = std::span(draw.samplers).first(draw.shaders->texture_count);
+        std::array<float, kTiledTextureSlots> max_lod{};
+        for (size_t i = 0; i < samplers.size(); ++i) max_lod[i] = samplers[i].maxLOD;
         const auto existing = std::find_if(tiled_renderers.begin(), tiled_renderers.end(), [&](const auto& cached) {
             return cached.shaders == draw.shaders && cached.max_lod == max_lod && cached.cull == draw.cull;
         });
@@ -480,7 +487,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         auto configuration = ConfigureDepth(draw.color_surface, draw.shaders->vertex);
         configuration.cull = draw.cull;
         auto renderer = std::make_unique<ColorRenderer>(configuration, draw.shaders->pixel_dxil,
-            draw.samplers, *depth_renderer, *color_target);
+            samplers, *depth_renderer, *color_target);
         tiled_renderers.push_back({draw.shaders, max_lod, draw.cull, std::move(renderer)});
         return *tiled_renderers.back().renderer;
     }

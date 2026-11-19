@@ -18,7 +18,7 @@ struct DepthConfiguration {
     bool operator==(const DepthConfiguration&) const = default;
 };
 struct DepthDraw {
-    std::vector<uint8_t> vertices, vertex_constants, shared_constants;
+    std::vector<uint8_t> vertices, secondary_vertices, vertex_constants, shared_constants;
     std::vector<uint32_t> indices;
     uint32_t first_index = 0, index_count = 0;
     plume::RenderViewport viewport;
@@ -29,7 +29,7 @@ struct DepthResult {
     uint64_t completed_submission = 0;
     bool debug_layer = false;
 };
-// Native, single-stream indexed depth pass. Owns its target and pipeline,
+// Native indexed depth pass. Owns its target and pipeline,
 // shares the actual device/queue with other pipelines. No implicit per-draw
 // clears. Stencil and 24-bit console depth quantization are not emulated.
 class DepthRenderer {

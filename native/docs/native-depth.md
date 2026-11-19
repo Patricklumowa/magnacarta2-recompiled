@@ -515,6 +515,20 @@ snapshot check covers both winding values. A live run with the additional
 two-texture materials completed 113 world draws in the first tile and reached
 a mesh with a second vertex stream and a third texture.
 
+The next mesh uses a 40-byte geometry stream and a 12-byte auxiliary stream
+with three packed texture-coordinate inputs. Both streams keep their
+captured strides and fetch slots. The pipeline checks the indexed range
+against both buffers and binds the third BC texture when the material asks
+for it. Set `texture-count.txt` to `3` in that shader pair's subdirectory.
+Materials without a count file bind two textures.
+
+The captured vertex container SHA-256 is
+`e553571855b9b7374616b0c75053070b0ce0acc7ce60456d6a9cad9f0cf5d267` and the
+pixel container SHA-256 is
+`7b203f3e5ce90ba3c491020cadfaa51ce3dde0287e5cb914fa577d280cb382cd`.
+A live run completed 40 two-stream, three-texture draws and reached draw
+154 in the first tile.
+
 ## Scene presentation
 
 The display resolve validates a full, same-size RGBA8 source and destination.

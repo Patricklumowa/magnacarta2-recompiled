@@ -537,7 +537,8 @@ void ReplayColor(const mc2::native::SceneDepthDraw& prepass, const mc2::native::
     const auto& surface = draw.color_surface;
     DepthRenderer depth(ConfigureDepth(prepass.surface, depth_shader), gpu, shaders.depth_resolve_dxil);
     ColorTarget color(surface.width, surface.height, surface.samples, gpu, shaders.resolve_dxil);
-    ColorRenderer renderer(ConfigureDepth(surface, shaders.vertex), shaders.pixel_dxil, draw.samplers, depth, color);
+    ColorRenderer renderer(ConfigureDepth(surface, shaders.vertex), shaders.pixel_dxil,
+                           std::span(draw.samplers).first(shaders.texture_count), depth, color);
     std::array<std::unique_ptr<SampledTexture>, 2> textures;
     std::array<const SampledTexture*, 2> bindings;
     for (uint32_t slot = 0; slot < textures.size(); ++slot) {

@@ -30,6 +30,12 @@ void Upload(RenderBuffer* buffer, const void* bytes, size_t size) {
     buffer->unmap();
 }
 struct IndexedPipeline {
+    struct VertexStream {
+        RenderInputSlot slot;
+        uint32_t fetch = 0;
+        size_t capacity = 0;
+        std::unique_ptr<RenderBuffer> buffer;
+    };
     NativeDevice* gpu;
     uint32_t width, height;
     std::unique_ptr<RenderShader> vertex_shader, pixel_shader;
@@ -37,10 +43,11 @@ struct IndexedPipeline {
     std::unique_ptr<RenderPipeline> pipeline;
     std::unique_ptr<RenderDescriptorSet> texture_set, sampler_set;
     std::vector<std::unique_ptr<RenderSampler>> samplers;
-    std::unique_ptr<RenderBuffer> vertex_buffer, index_buffer, vertex_constants, shared_constants, pixel_constants, dummy_input;
-    RenderInputSlot slot;
-    RenderInputSlot dummy_slot{1, 0};
-    size_t vertex_capacity = 0, index_capacity = 0;
+    std::unique_ptr<RenderBuffer> index_buffer, vertex_constants, shared_constants, pixel_constants, dummy_input;
+    std::array<VertexStream, 2> streams;
+    uint32_t stream_count = 1;
+    RenderInputSlot dummy_slot{2, 0};
+    size_t index_capacity = 0;
 
     IndexedPipeline(const DepthConfiguration& c, NativeDevice* device_context, std::span<const uint8_t> ps = {},
                     std::span<const RenderSamplerDesc> sampler_descs = {}, RenderFormat color_format = RenderFormat::UNKNOWN,
@@ -53,19 +60,26 @@ struct IndexedPipeline {
                 "Missing native vertex shader or inputs");
         Require((!ps.empty() || color_format == RenderFormat::UNKNOWN) && sampler_descs.size() <= 16 &&
                 (!ps.empty() || sampler_descs.empty()), "Invalid native pixel pipeline");
-        slot = RenderInputSlot(0, c.inputs.front().stride);
-        Require(slot.stride > 0 && slot.stride <= 1020, "Invalid native indexed vertex stride");
+        streams[0].slot = RenderInputSlot(0, c.inputs.front().stride);
+        streams[0].fetch = c.inputs.front().fetch_index;
         std::vector<RenderInputElement> elements;
         for (const auto& input : c.inputs) {
+            const uint32_t stream_index = input.fetch_index == streams[0].fetch ? 0 : 1;
+            auto& stream = streams[stream_index];
+            if (stream_index == 1 && stream_count == 1) {
+                stream.slot = RenderInputSlot(1, input.stride);
+                stream.fetch = input.fetch_index;
+                stream_count = 2;
+            }
             const auto element_bytes=input.components*(input.storage==VertexStorage::Float32 ? 4 : 1);
-            Require(input.stride == slot.stride && input.fetch_index == c.inputs.front().fetch_index &&
-                    (input.constant_only || uint64_t(input.offset) + element_bytes <= slot.stride),
-                    "Native indexed pass requires one bounded vertex stream");
+            Require(input.stride && input.stride <= 1020 && input.stride == stream.slot.stride &&
+                    input.fetch_index == stream.fetch && (input.constant_only || uint64_t(input.offset) + element_bytes <= input.stride),
+                    "Native indexed pass requires bounded vertex streams with matching strides");
             Require(input.storage==VertexStorage::Float32 || input.components==4,"Invalid native byte vertex input");
             const auto format=input.storage==VertexStorage::UInt8 ? RenderFormat::R8G8B8A8_UINT :
                 input.storage==VertexStorage::UNorm8 ? RenderFormat::R8G8B8A8_UNORM : FloatFormat(input.components);
             elements.emplace_back(VertexSemantic(input.usage), input.usage_index, uint32_t(elements.size()),
-                                  format, input.constant_only ? 1 : 0, input.offset);
+                                  format, input.constant_only ? dummy_slot.index : stream_index, input.offset);
         }
         auto& device = gpu->device;
         const RenderRootDescriptorDesc roots[] = {
@@ -112,8 +126,9 @@ struct IndexedPipeline {
             desc.renderTargetFormat[0] = color_format;
             desc.renderTargetBlend[0] = blend;
         }
-        const RenderInputSlot slots[] = {slot, dummy_slot};
-        desc.inputSlots = slots; desc.inputSlotsCount = 2;
+        std::array slots{streams[0].slot, streams[1].slot, dummy_slot};
+        slots[stream_count] = dummy_slot;
+        desc.inputSlots = slots.data(); desc.inputSlotsCount = stream_count + 1;
         desc.inputElements = elements.data(); desc.inputElementsCount = uint32_t(elements.size());
         desc.depthEnabled = depth_format != RenderFormat::UNKNOWN;
         desc.depthWriteEnabled = desc.depthEnabled && c.write; desc.depthClipEnabled = c.clip;
@@ -146,13 +161,20 @@ struct IndexedPipeline {
                         "Native texture or sampler index is out of range");
             }
         }
-        Require(!draw.vertices.empty() && draw.vertices.size() <= 16 * 1024 * 1024 &&
-                draw.vertices.size() % slot.stride == 0 && draw.indices.size() <= 4 * 1024 * 1024,
-                "Invalid native indexed geometry extent");
+        Require((stream_count == 2) == !draw.secondary_vertices.empty() && draw.indices.size() <= 4 * 1024 * 1024,
+                "Invalid native indexed stream count or index extent");
+        const std::array<std::span<const uint8_t>, 2> vertices{draw.vertices, draw.secondary_vertices};
+        size_t vertex_count = SIZE_MAX;
+        for (uint32_t i = 0; i < stream_count; ++i) {
+            const auto stride = streams[i].slot.stride;
+            Require(!vertices[i].empty() && vertices[i].size() <= 16 * 1024 * 1024 && vertices[i].size() % stride == 0,
+                    "Invalid native indexed vertex extent");
+            vertex_count = std::min(vertex_count, vertices[i].size() / stride);
+        }
         Require(draw.index_count && draw.index_count % 3 == 0 &&
                 uint64_t(draw.first_index) + draw.index_count <= draw.indices.size(), "Invalid native triangle range");
         for (size_t i = draw.first_index; i < uint64_t(draw.first_index) + draw.index_count; ++i)
-            Require(draw.indices[i] < draw.vertices.size() / slot.stride, "Native index exceeds its vertex buffer");
+            Require(draw.indices[i] < vertex_count, "Native index exceeds a vertex stream");
         const auto& v = draw.viewport;
         for (float f : {v.x, v.y, v.width, v.height, v.minDepth, v.maxDepth})
             Require(std::isfinite(f), "Non-finite native viewport");
@@ -164,10 +186,16 @@ struct IndexedPipeline {
         Require(draw.scissor.left >= 0 && draw.scissor.top >= 0 && draw.scissor.right > draw.scissor.left &&
                 draw.scissor.bottom > draw.scissor.top && uint32_t(draw.scissor.right) <= width &&
                 uint32_t(draw.scissor.bottom) <= height, "Native scissor is out of bounds");
-        if (draw.vertices.size() > vertex_capacity) {
-            auto buffer = gpu->device->createBuffer(RenderBufferDesc::VertexBuffer(draw.vertices.size(), RenderHeapType::UPLOAD));
-            Require(bool(buffer), "Native vertex allocation failed");
-            vertex_buffer = std::move(buffer); vertex_capacity = draw.vertices.size();
+        for (uint32_t i = 0; i < stream_count; ++i) {
+            auto& stream = streams[i];
+            const auto bytes = vertices[i];
+            if (bytes.size() > stream.capacity) {
+                auto buffer = gpu->device->createBuffer(RenderBufferDesc::VertexBuffer(bytes.size(), RenderHeapType::UPLOAD));
+                Require(bool(buffer), "Native vertex stream allocation failed");
+                stream.buffer = std::move(buffer);
+                stream.capacity = bytes.size();
+            }
+            Upload(stream.buffer.get(), bytes.data(), bytes.size());
         }
         const size_t index_bytes = draw.indices.size() * 4;
         if (index_bytes > index_capacity) {
@@ -175,7 +203,6 @@ struct IndexedPipeline {
             Require(bool(buffer), "Native index allocation failed");
             index_buffer = std::move(buffer); index_capacity = index_bytes;
         }
-        Upload(vertex_buffer.get(), draw.vertices.data(), draw.vertices.size());
         Upload(index_buffer.get(), draw.indices.data(), index_bytes);
         Upload(vertex_constants.get(), draw.vertex_constants.data(), 4096);
         Upload(shared_constants.get(), draw.shared_constants.data(), 512);
@@ -194,11 +221,15 @@ struct IndexedPipeline {
             commands->setGraphicsDescriptorSet(texture_set.get(), 0);
             commands->setGraphicsDescriptorSet(sampler_set.get(), 3);
         }
-        const RenderVertexBufferView vertex_view(vertex_buffer.get(), draw.vertices.size());
+        const std::array vertex_sizes{draw.vertices.size(), draw.secondary_vertices.size()};
+        for (uint32_t i = 0; i < stream_count; ++i) {
+            const RenderVertexBufferView vertex_view(streams[i].buffer.get(), vertex_sizes[i]);
+            commands->setVertexBuffers(i, &vertex_view, 1, &streams[i].slot);
+        }
         const RenderIndexBufferView index_view(index_buffer.get(), draw.indices.size() * 4, RenderFormat::R32_UINT);
-        commands->setVertexBuffers(0, &vertex_view, 1, &slot); commands->setIndexBuffer(&index_view);
+        commands->setIndexBuffer(&index_view);
         const RenderVertexBufferView dummy_view(dummy_input.get(), 16);
-        commands->setVertexBuffers(1, &dummy_view, 1, &dummy_slot);
+        commands->setVertexBuffers(dummy_slot.index, &dummy_view, 1, &dummy_slot);
         commands->drawIndexedInstanced(draw.index_count, 1, draw.first_index, 0, 0);
     }
 };
