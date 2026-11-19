@@ -14,6 +14,7 @@
 #include <rex/hook.h>
 #include <atomic>
 #include <algorithm>
+#include <list>
 #include <mutex>
 #include <optional>
 #include <bit>
@@ -33,35 +34,48 @@ void Require(bool value, const char* message) {
     if (!value) throw std::runtime_error(message);
 }
 
-std::unique_ptr<SampledTexture> UploadSceneTexture(uint8_t* base, const mc2::texture::BlockTexture& description,
-                                                  const std::shared_ptr<NativeDevice>& gpu) {
-    std::vector<std::vector<uint8_t>> levels(description.mips.size());
-    for (uint32_t level = 0; level < levels.size(); ++level) {
-        const auto& mip = description.mips[level];
+using SceneMipData = std::vector<std::vector<uint8_t>>;
+
+template <class Mip>
+SceneMipData ReadSceneMipData(uint8_t* base, std::span<const Mip> mips) {
+    SceneMipData source(mips.size());
+    for (size_t level = 0; level < mips.size(); ++level) {
+        const auto& mip = mips[level];
         uint32_t alias;
-        std::vector<uint8_t> source;
         Require(mc2::draw_capture::TexturePhysicalAlias(mip.physical_address, mip.source_bytes, alias) &&
-                mc2::capture::ReadGuest(base, alias, mip.source_bytes, source), "Unreadable native scene texture mip");
+                mc2::capture::ReadGuest(base, alias, mip.source_bytes, source[level]), "Unreadable native scene texture mip");
+    }
+    return source;
+}
+
+std::shared_ptr<const SampledTexture> UploadSceneTexture(const mc2::texture::BlockTexture& description,
+        const SceneMipData& source, const std::shared_ptr<NativeDevice>& gpu) {
+    SceneMipData levels(source.size());
+    for (uint32_t level = 0; level < levels.size(); ++level) {
         std::string error;
-        if (!mc2::texture::LinearizeBlockMip(description, level, source, levels[level], error))
+        if (!mc2::texture::LinearizeBlockMip(description, level, source[level], levels[level], error))
             throw std::runtime_error(error);
     }
     const auto& top = description.mips.front();
     const auto format = description.format == 18 ? plume::RenderFormat::BC1_UNORM : plume::RenderFormat::BC3_UNORM;
-    return std::make_unique<SampledTexture>(format, top.width, top.height, levels, gpu);
+    return std::make_shared<SampledTexture>(format, top.width, top.height, levels, gpu);
 }
 
-std::unique_ptr<SampledTexture> UploadSceneTexture(uint8_t* base, const mc2::texture::BaseRGBA8& description,
-                                                  const std::shared_ptr<NativeDevice>& gpu) {
-    uint32_t alias;
-    std::vector<uint8_t> source, pixels;
-    Require(mc2::draw_capture::TexturePhysicalAlias(description.physical_address, description.source_bytes, alias) &&
-            mc2::capture::ReadGuest(base, alias, description.source_bytes, source), "Unreadable native overlay texture");
+std::shared_ptr<const SampledTexture> UploadSceneTexture(const mc2::texture::BaseRGBA8& description,
+        const SceneMipData& source, const std::shared_ptr<NativeDevice>& gpu) {
+    std::vector<uint8_t> pixels;
     std::string error;
-    if (!mc2::texture::DecodeBaseRGBA8(description, source, pixels, error)) throw std::runtime_error(error);
-    return std::make_unique<SampledTexture>(plume::RenderFormat::R8G8B8A8_UNORM, description.width,
+    if (!mc2::texture::DecodeBaseRGBA8(description, source.front(), pixels, error)) throw std::runtime_error(error);
+    return std::make_shared<SampledTexture>(plume::RenderFormat::R8G8B8A8_UNORM, description.width,
         description.height, std::span(&pixels, 1), gpu);
 }
+
+struct CachedSceneTexture {
+    std::array<uint32_t, 6> fetch_words;
+    SceneMipData source;
+    size_t source_bytes;
+    std::shared_ptr<const SampledTexture> texture;
+};
 
 void RequireFirstTileDepth(const SceneSurface& prepass, const SceneSurface& tile) {
     const auto& full_depth = prepass.description;
@@ -76,7 +90,7 @@ struct TiledSceneDraw {
     DepthDraw draw;
     std::vector<uint8_t> pixel_constants;
     SceneSurface depth;
-    std::array<std::unique_ptr<SampledTexture>, 2> textures;
+    std::array<std::shared_ptr<const SampledTexture>, 2> textures;
     std::unique_ptr<ColorRenderer> renderer;
 
     uint64_t Render(const plume::RenderRect& rectangle) {
@@ -118,6 +132,9 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     std::mutex mutex;
     std::shared_ptr<NativeDevice> gpu;
     std::unique_ptr<QuadRenderer> renderer;
+    std::list<CachedSceneTexture> scene_textures_cached;
+    size_t scene_texture_cache_bytes = 0;
+    uint32_t scene_texture_hits = 0, scene_texture_uploads = 0;
     std::optional<SceneVertexShader> depth_shaders;
     std::optional<SceneColorShaders> color_shaders;
     std::optional<ScenePassShaders> depth_restore_shaders;
@@ -234,6 +251,8 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         std::lock_guard lock(mutex);
         prepass_draw.reset(); scene_draw.reset(); pending_restore.reset();
         quad_renderers.clear();
+        scene_textures_cached.clear();
+        scene_texture_cache_bytes = 0;
         pending_up.reset(); pending_menu_fan.reset(); fullscreen_target.reset();
         bloom_target.reset();
         back_buffer.reset();
@@ -385,7 +404,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         draw.pixel_constants = std::move(snapshot.pixel_constants);
         draw.depth = std::move(snapshot.tile_depth);
         for (uint32_t slot = 0; slot < draw.textures.size(); ++slot)
-            draw.textures[slot] = UploadSceneTexture(base, snapshot.textures[slot], gpu);
+            draw.textures[slot] = SceneTextureFor(base, snapshot.textures[slot]);
         draw.renderer = std::make_unique<ColorRenderer>(ConfigureDepth(snapshot.color_surface, color_shaders->vertex),
             color_shaders->pixel_dxil, snapshot.samplers, *depth_renderer, *color_target);
         completed = draw.Render(cleared_tile);
@@ -579,6 +598,43 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         pending_up = PendingUpDraw{std::move(scene), vertices, indices, endpoint, pass, std::move(overlay)};
     }
 
+    template <class Texture>
+    std::shared_ptr<const SampledTexture> SceneTextureFor(uint8_t* base, const Texture& description) {
+        auto source = [&] {
+            if constexpr (requires { description.mips; }) return ReadSceneMipData(base, std::span(description.mips));
+            else return ReadSceneMipData(base, std::span(&description, 1));
+        }();
+        const auto existing = std::find_if(scene_textures_cached.begin(), scene_textures_cached.end(),
+            [&](const CachedSceneTexture& cached) { return cached.fetch_words == description.fetch_words; });
+        // The game can refill a texture at the same physical address.
+        // Compare the stored bytes for every mip before reusing its upload.
+        if (existing != scene_textures_cached.end() && existing->source == source) {
+            ++scene_texture_hits;
+            scene_textures_cached.splice(scene_textures_cached.end(), scene_textures_cached, existing);
+            return existing->texture;
+        }
+
+        auto texture = UploadSceneTexture(description, source, gpu);
+        ++scene_texture_uploads;
+        if (existing != scene_textures_cached.end()) {
+            scene_texture_cache_bytes -= existing->source_bytes;
+            scene_textures_cached.erase(existing);
+        }
+        size_t bytes = 0;
+        for (const auto& mip : source) bytes += mip.size();
+        constexpr size_t byte_limit = 32u * 1024u * 1024u;
+        constexpr size_t texture_limit = 64;
+        if (bytes <= byte_limit) {
+            while (scene_textures_cached.size() >= texture_limit || scene_texture_cache_bytes > byte_limit - bytes) {
+                scene_texture_cache_bytes -= scene_textures_cached.front().source_bytes;
+                scene_textures_cached.pop_front();
+            }
+            scene_textures_cached.push_back({description.fetch_words, std::move(source), bytes, texture});
+            scene_texture_cache_bytes += bytes;
+        }
+        return texture;
+    }
+
     ColorRenderer& QuadRendererFor(const SceneSurface& surface, const ScenePassShaders& program,
             std::span<const plume::RenderSamplerDesc> samplers, ColorTarget& target,
             plume::RenderBlendDesc blend = plume::RenderBlendDesc::Copy(),
@@ -629,10 +685,10 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
                 "Guest did not commit its menu fan geometry");
         auto& scene = up.scene;
         ReadMenuFanVertices(scene.pass.draw, base, up.vertices);
-        std::array<std::unique_ptr<SampledTexture>, 3> textures;
+        std::array<std::shared_ptr<const SampledTexture>, 3> textures;
         std::array<const SampledTexture*, 3> bindings;
         for (size_t i = 0; i < scene.texture_count; ++i) {
-            textures[i] = UploadSceneTexture(base, scene.textures[i], gpu);
+            textures[i] = SceneTextureFor(base, scene.textures[i]);
             bindings[i] = textures[i].get();
         }
         auto& renderer = QuadRendererFor(scene.pass.surface, *scene.pass.shaders,
@@ -692,7 +748,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             REXLOG_INFO("MC2 native scene: drew gamma and overlay into RGBA8 back buffer {:#x}, completed={}", surface.address, completed);
         } else if (up.pass == SceneQuadPass::Overlay) {
             auto& renderer = QuadRendererFor(surface, *overlay_shaders, std::span(&up.overlay->sampler,1), *back_buffer, OverlayBlend());
-            auto texture = std::visit([&](const auto& source) { return UploadSceneTexture(base, source, gpu); }, up.overlay->texture);
+            const auto texture = std::visit([&](const auto& source) { return SceneTextureFor(base, source); }, up.overlay->texture);
             const auto* sampled = texture.get();
             completed = renderer.Render(up.scene.draw, up.scene.pixel_constants, std::span(&sampled,1));
             REXLOG_INFO("MC2 native scene: blended overlay draw {} ({} indices), completed={}",
@@ -783,8 +839,12 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         if (result.present_submitted)
             REXLOG_INFO("MC2 native scene: presented frame {} at {}x{} with {} overlays, completed={}",
                         scene_frames, result.width, result.height, overlay_draws, completed);
-        if (REXCVAR_GET(mc2_scene_resolve_trace))
+        if (REXCVAR_GET(mc2_scene_resolve_trace)) {
             REXLOG_INFO("MC2 native scene: {} cached graphics pipelines after frame {}", quad_renderers.size(), scene_frames);
+            REXLOG_INFO("MC2 native scene: texture uploads={}, reuses={} for frame {}",
+                        scene_texture_uploads, scene_texture_hits, scene_frames);
+        }
+        scene_texture_uploads = scene_texture_hits = 0;
         ResetSceneFrame();
     }
 

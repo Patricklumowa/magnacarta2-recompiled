@@ -426,6 +426,14 @@ backend presented 46 scene frames after the movie skip. Pressing Start on
 that screen advanced into a transition that encounters another menu fan
 shader. The main menu and gameplay are still incomplete on this backend.
 
+The native renderer reuses scene textures when all six fetch words and
+every source mip match. The cache retains up to 64 entries and 32 MiB of
+source bytes. The live title screen reused 48 texture bindings per steady
+frame, reducing GPU submissions from 115 to 67. Median time between
+presented title frames was 418 ms before the cache and 379 ms after it
+in sequential runs at a 2560 x 1600 window size. Gameplay performance
+has yet to be measured on this backend.
+
 ## Scene presentation
 
 The display resolve validates a full, same-size RGBA8 source and destination.
