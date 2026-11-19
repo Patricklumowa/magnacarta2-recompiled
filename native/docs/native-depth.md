@@ -481,6 +481,25 @@ visible quad, and an unchanged depth target after queries. A live run
 completed 403 occlusion queries and cleared the tiled HDR target for the
 first post-movie material draw.
 
+## First post-movie material
+
+The first world mesh uses a one-stream position, tangent, binormal, normal,
+color and UV layout and a 16-bit index buffer. Its material uses BC1 and BC3
+textures. The native path retains the original packed vertex inputs, both
+10-level mip chains, reversed-depth testing and 7e3 output quantization.
+
+Place the captured shader containers, `vertex.dxil` and `pixel-7e3.dxil`
+in `<color-shaders>/world-opaque`. The container SHA-256 values are
+`e49aa6ad666c05da31edcb3b2f745d49f6cff5cd035259c7f29ea3354a01262c` for the
+vertex shader and
+`cb3b35879e373143880aaff5ffdc2cab3ad0131a9d9d4de53360789ce26ecb78` for the
+pixel shader. Compile the pixel shader for specialization flags 4 as in the
+tiled color replay.
+
+A live run with the Xenos plugin absent uploaded both mip chains and completed
+the draw of 336 indices on D3D12 in the first tile. The complete world frame
+requires support for the subsequent draws in the same tile.
+
 ## Scene presentation
 
 The display resolve validates a full, same-size RGBA8 source and destination.

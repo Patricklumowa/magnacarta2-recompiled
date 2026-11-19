@@ -729,7 +729,8 @@ void ReplayColor(const mc2::native::SceneDepthDraw& prepass, const mc2::native::
 int main(int argc,char** argv) try {
     using namespace mc2::native;
     using mc2::capture::LoadBE32;
-    Check(argc==3 || argc==4 || argc==6,"Usage: mc2_native_scene_check <depth-capture> <depth-shaders> [color-capture [color-shaders output.rgba16f]]");
+    Check(argc==3 || argc==4 || argc==6 || argc==8,
+          "Usage: mc2_native_scene_check <depth-capture> <depth-shaders> [color-capture [color-shaders output.rgba16f [world-capture world-shaders]]]");
     const std::filesystem::path capture(argv[1]);
     const auto shaders=LoadDepthShaders(argv[2]);
     std::array<uint8_t,65536> memory{};
@@ -813,7 +814,7 @@ int main(int argc,char** argv) try {
         }
         store(0x200,0x3f800000); Reject([&] { ReadSceneColorClear(context,base); }); memory=original_color;
         store(0x108,640); Reject([&] { ReadSceneColorClear(context,base); });
-        if (argc == 6) {
+        if (argc >= 6) {
             constexpr uint32_t ps = 0x8400;
             const auto color_shaders = LoadColorShaders(argv[4]);
             memory = original_color;
@@ -843,6 +844,35 @@ int main(int argc,char** argv) try {
                 memory = scene_bytes;
             }
             ReplayColor(draw, shaders, hdr, color_draw, color_shaders, color_capture, argv[5], argv[4]);
+            if (argc == 8) {
+                const std::filesystem::path world_capture(argv[6]);
+                const auto world_shaders = LoadColorShaders(argv[7]);
+                const auto world_indices = ReadNativeFile(world_capture / "index-buffer.data.bin");
+                constexpr uint32_t world_index_data = 0xb800;
+                copy(device, ReadNativeFile(world_capture / "device.bin"));
+                copy(color_surface, ReadNativeFile(world_capture / "targets/color-0.descriptor.bin"));
+                copy(surface, ReadNativeFile(world_capture / "targets/depth.descriptor.bin"));
+                copy(vb, ReadNativeFile(world_capture / "vertices/slot-00.descriptor.bin"));
+                copy(ib, ReadNativeFile(world_capture / "index-buffer.descriptor.bin"));
+                copy(vertex_data, ReadNativeFile(world_capture / "vertices/slot-00.data.bin"));
+                copy(world_index_data, world_indices);
+                store(vb + 24, vertex_data | 3); store(ib + 24, world_index_data);
+                store(device + 12468, vb); store(device + 12444, ib); store(device + 1912, vertex_data | 3);
+                for (uint32_t offset : {12448,12732,12736}) store(device + offset, color_surface);
+                for (uint32_t offset : {12464,12752}) store(device + offset, surface);
+                store(device + 12704, vs); store(device + 12700, ps);
+                bind_shader(vs, 0xc000, world_shaders.vertex.reference, true);
+                bind_shader(ps, 0xd000, world_shaders.pixel_reference, false);
+                context.r5.u32 = 0; context.r6.u32 = 336;
+                Reject([&] { ReadSceneColorDraw(context, base, color_shaders); });
+                const auto world = ReadSceneColorDraw(context, base, color_shaders, &world_shaders);
+                Check(world.shaders == &world_shaders && world.draw.index_count == 336 &&
+                      world.draw.indices.size() * 2 == world_indices.size(), "World material or 16-bit index extent differs");
+                for (size_t i = 0; i < world.draw.indices.size(); ++i)
+                    Check(world.draw.indices[i] == (uint32_t(world_indices[i * 2]) * 256 + world_indices[i * 2 + 1]),
+                          "World index byte order differs");
+                std::cout << "PASS: captured world material selection and 16-bit indices\n";
+            }
         }
     }
     std::cout<<"PASS: captured scene input reconstruction, unchanged guest state, clear-to-draw surface identity and unsupported-state rejection\n";

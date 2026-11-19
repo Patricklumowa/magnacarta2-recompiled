@@ -228,13 +228,18 @@ DepthDraw ReadGeometry(const PPCContext& ctx, uint8_t* base, const DeviceState& 
             "Bound vertex fetch differs from its resource descriptor");
     DepthDraw draw;
     draw.vertices=NativeVertexBytes(raw,LoadBE32(vertex_descriptor.data()+28)&3);
-    Require(ReadGuest(base,state.Word(12444),32,index_descriptor) &&
-            (LoadBE32(index_descriptor.data()) & 0xf000000f) == 0xc0000002 &&
+    Require(ReadGuest(base,state.Word(12444),32,index_descriptor), "Unreadable native scene index descriptor");
+    const auto index_type = LoadBE32(index_descriptor.data()) & 0xf000000f;
+    Require((index_type == 0xc0000002 || index_type == 0x20000002) &&
             mc2::draw_capture::BufferBytes(index_descriptor.data(),index_descriptor.size(),false,address,size) &&
             ReadGuest(base,address,size,raw), "Unsupported native scene index buffer");
-    Require(raw.size()%4 == 0, "Invalid 32-bit scene index extent");
-    draw.indices.resize(raw.size()/4);
-    for (size_t i=0;i<draw.indices.size();++i) draw.indices[i]=LoadBE32(raw.data()+i*4);
+    const uint32_t index_stride = index_type == 0x20000002 ? 2 : 4;
+    Require(raw.size() % index_stride == 0, "Invalid native scene index extent");
+    draw.indices.resize(raw.size() / index_stride);
+    for (size_t i = 0; i < draw.indices.size(); ++i) {
+        const auto* index = raw.data() + i * index_stride;
+        draw.indices[i] = index_stride == 2 ? (uint32_t(index[0]) << 8) | index[1] : LoadBE32(index);
+    }
     draw.first_index=ctx.r5.u32; draw.index_count=ctx.r6.u32;
     ReadDepthTransform(draw, state, surface);
     return draw;
@@ -259,7 +264,11 @@ SceneColorShaders LoadColorShaders(const std::filesystem::path& directory) {
         {0,0,95,40,0,4,true}, {6,0,95,40,0,3}, {7,0,95,40,12,4,false,VertexStorage::UInt8},
         {3,0,95,40,16,4,false,VertexStorage::UInt8}, {10,0,95,40,20,4,false,VertexStorage::UInt8}, {5,0,95,40,24,2}
     };
-    Require(vertex.inputs == expected, "Scene color shader input layout differs from the verified shader");
+    const std::vector<VertexInput> world = {
+        {0,0,95,40,0,3}, {6,0,95,40,16,4,false,VertexStorage::UInt8}, {7,0,95,40,20,4,false,VertexStorage::UInt8},
+        {3,0,95,40,24,4,false,VertexStorage::UInt8}, {10,0,95,40,28,4,false,VertexStorage::UNorm8}, {5,0,95,40,32,2}
+    };
+    Require(vertex.inputs == expected || vertex.inputs == world, "Unrecognized scene color shader input layout");
     SceneColorShaders shaders{std::move(vertex), ReadNativeFile(directory / "pixel-shader.container"),
                               ReadNativeFile(directory / "pixel-7e3.dxil"), {}, {}};
     const auto resolve_path = directory / "color-resolve.dxil";
@@ -356,7 +365,8 @@ void ReadOcclusionVertices(DepthDraw& draw, uint8_t* base, uint32_t vertices, ui
     for (size_t i = 0; i < draw.indices.size(); ++i)
         draw.indices[i] = (uint32_t(index_data[i * 2]) << 8) | index_data[i * 2 + 1];
 }
-SceneColorDraw ReadSceneColorDraw(const PPCContext& ctx, uint8_t* base, const SceneColorShaders& shaders) {
+SceneColorDraw ReadSceneColorDraw(const PPCContext& ctx, uint8_t* base, const SceneColorShaders& shaders,
+                                  const SceneColorShaders* world_shaders) {
     DeviceState state(base, ctx.r3.u32);
     SceneColorDraw snapshot;
     snapshot.color_surface = ReadTiledColorSurface(state, base);
@@ -366,9 +376,10 @@ SceneColorDraw ReadSceneColorDraw(const PPCContext& ctx, uint8_t* base, const Sc
     // Full color write, copy blend, and no alpha test or alpha-to-coverage.
     Require(state.Word(10460) == 0xf && state.Word(10552) == 0x10001 && (state.Word(10556) & 0x1f) == 7,
             "Native color draw has unsupported color write, blend or alpha state");
-    Require(ReadBoundShader(base, state.Word(12700), false) == shaders.pixel_reference,
-            "Untranslated native scene pixel shader");
-    snapshot.draw = ReadGeometry(ctx, base, state, snapshot.color_surface, shaders.vertex);
+    const auto pixel_shader = ReadBoundShader(base, state.Word(12700), false);
+    snapshot.shaders = pixel_shader == shaders.pixel_reference ? &shaders : world_shaders;
+    Require(snapshot.shaders && pixel_shader == snapshot.shaders->pixel_reference, "Untranslated native scene pixel shader");
+    snapshot.draw = ReadGeometry(ctx, base, state, snapshot.color_surface, snapshot.shaders->vertex);
     snapshot.pixel_constants = NativeVertexBytes(std::span(state.bytes).subspan(6016,4096),2);
     for (uint32_t slot = 0; slot < snapshot.textures.size(); ++slot)
         ReadBlockSceneTexture(state, slot, slot ? 20u : 18u, snapshot.draw, snapshot.textures[slot], snapshot.samplers[slot]);

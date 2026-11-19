@@ -168,6 +168,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     std::optional<SceneVertexShader> depth_shaders;
     std::optional<SceneVertexShader> occlusion_shader;
     std::optional<SceneColorShaders> color_shaders;
+    std::optional<SceneColorShaders> world_color_shaders;
     std::optional<ScenePassShaders> depth_restore_shaders;
     std::optional<ScenePassShaders> fullscreen_shaders, color_grade_shaders;
     std::optional<ScenePassShaders> bloom_shaders, composition_shaders, back_buffer_shaders;
@@ -226,6 +227,8 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         if (!color_directory.empty()) {
             Require(bool(depth_shaders), "Native color shaders require the verified depth shader directory");
             color_shaders = LoadColorShaders(color_directory);
+            const auto world_directory = std::filesystem::path(color_directory) / "world-opaque";
+            if (std::filesystem::is_directory(world_directory)) world_color_shaders = LoadColorShaders(world_directory);
             const auto occlusion_directory = std::filesystem::path(color_directory) / "occlusion";
             if (std::filesystem::is_directory(occlusion_directory)) occlusion_shader = LoadOcclusionShader(occlusion_directory);
             const auto restore_directory = std::filesystem::path(color_directory) / "depth-restore";
@@ -424,7 +427,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
 
     void DrawColor(const PPCContext& ctx, uint8_t* base) {
         Require(bool(color_shaders), "Indexed color shader directory is not configured");
-        auto snapshot = ReadSceneColorDraw(ctx, base, *color_shaders);
+        auto snapshot = ReadSceneColorDraw(ctx, base, *color_shaders, world_color_shaders ? &*world_color_shaders : nullptr);
         Flush(base, ctx.r3.u32);
         std::lock_guard lock(mutex);
         Require(!scene_draw && scene_copies == 0 && depth_renderer && color_target && depth_surface &&
@@ -443,8 +446,8 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         draw.depth = std::move(snapshot.tile_depth);
         for (uint32_t slot = 0; slot < draw.textures.size(); ++slot)
             draw.textures[slot] = SceneTextureFor(base, snapshot.textures[slot]);
-        draw.renderer = std::make_unique<ColorRenderer>(ConfigureDepth(snapshot.color_surface, color_shaders->vertex),
-            color_shaders->pixel_dxil, snapshot.samplers, *depth_renderer, *color_target);
+        draw.renderer = std::make_unique<ColorRenderer>(ConfigureDepth(snapshot.color_surface, snapshot.shaders->vertex),
+            snapshot.shaders->pixel_dxil, snapshot.samplers, *depth_renderer, *color_target);
         completed = draw.Render(cleared_tile);
         REXLOG_INFO("MC2 native scene: indexed HDR color draw in first tile, indices={}, BC mip levels={}/{}, completed={}",
             draw.draw.index_count, snapshot.textures[0].mips.size(), snapshot.textures[1].mips.size(), completed);

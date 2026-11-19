@@ -39,6 +39,7 @@ struct SceneColorClear {
 };
 struct SceneColorDraw {
     SceneSurface color_surface, tile_depth;
+    const SceneColorShaders* shaders = nullptr;
     DepthDraw draw;
     std::vector<uint8_t> pixel_constants;
     std::array<mc2::texture::BlockTexture, 2> textures;
@@ -99,7 +100,8 @@ SceneColorClear ReadSceneColorClear(const PPCContext& context, uint8_t* base);
 SceneDepthDraw ReadSceneDepthDraw(const PPCContext& context, uint8_t* base, const SceneVertexShader& shader);
 SceneDepthDraw ReadOcclusionDraw(const PPCContext& context, uint8_t* base, const SceneVertexShader& shader);
 void ReadOcclusionVertices(DepthDraw& draw, uint8_t* base, uint32_t vertices, uint32_t indices);
-SceneColorDraw ReadSceneColorDraw(const PPCContext& context, uint8_t* base, const SceneColorShaders& shaders);
+SceneColorDraw ReadSceneColorDraw(const PPCContext& context, uint8_t* base, const SceneColorShaders& shaders,
+                                  const SceneColorShaders* world_shaders = nullptr);
 bool SameScenePositionInputs(const DepthDraw& depth, const DepthDraw& color);
 SceneTileResolve ReadSceneTileResolve(const PPCContext& context, uint8_t* base);
 ScenePassShaders LoadDepthRestoreShaders(const std::filesystem::path& directory);
