@@ -4,6 +4,7 @@
 #include "native_sampled_texture.h"
 #include "guest_graphics_read.h"
 #include "draw_capture.h"
+#include <bcrypt.h>
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -16,6 +17,18 @@ namespace {
 using mc2::capture::ReadGuest;
 using mc2::capture::LoadBE32;
 void Require(bool value, const char* error) { if (!value) throw std::runtime_error(error); }
+std::string ShaderHashPrefix(const std::vector<uint8_t>& bytes) {
+    std::array<uint8_t, 32> digest{};
+    Require(bytes.size() <= UINT32_MAX && BCRYPT_SUCCESS(BCryptHash(BCRYPT_SHA256_ALG_HANDLE, nullptr, 0,
+                const_cast<uint8_t*>(bytes.data()), static_cast<ULONG>(bytes.size()), digest.data(), static_cast<ULONG>(digest.size()))),
+            "Could not hash the captured scene shader");
+    return std::format("{:02x}{:02x}{:02x}{:02x}", digest[0], digest[1], digest[2], digest[3]);
+}
+bool HasShaderHashName(std::string_view name) {
+    constexpr std::string_view hex = "0123456789abcdefABCDEF";
+    return name.size() == 17 && name[8] == '-' && name.substr(0, 8).find_first_not_of(hex) == name.npos &&
+           name.substr(9).find_first_not_of(hex) == name.npos;
+}
 constexpr uint32_t kOcclusionBoxVertices = 8, kOcclusionBoxIndices = 36;
 struct DeviceState {
     std::vector<uint8_t> bytes;
@@ -278,7 +291,7 @@ SceneVertexShader LoadOcclusionShader(const std::filesystem::path& directory) {
     Require(shader.inputs == expected, "Occlusion shader does not use the verified float3 input");
     return shader;
 }
-SceneColorShaders LoadColorShaders(const std::filesystem::path& directory, const char* pixel_dxil) {
+SceneColorShaders LoadColorShaders(const std::filesystem::path& directory, std::string_view pixel_dxil) {
     auto vertex = LoadVertexShader(directory);
     // The vertex metadata gives the attribute types and offsets. Each draw
     // validates the bound fetch descriptors, and the pipeline checks its
@@ -297,6 +310,39 @@ SceneColorShaders LoadColorShaders(const std::filesystem::path& directory, const
                 !(input >> trailing), "Invalid tiled material texture count");
     }
     return shaders;
+}
+SceneMaterialLibrary::SceneMaterialLibrary(const std::filesystem::path& directory, std::string_view pixel_dxil)
+    : directory_(directory), pixel_dxil_(pixel_dxil) {
+    if (std::filesystem::is_regular_file(directory_ / "vertex-shader.container"))
+        loaded_.push_back(LoadColorShaders(directory_, pixel_dxil_));
+}
+const SceneColorShaders* SceneMaterialLibrary::Find(const std::vector<uint8_t>& vertex, const std::vector<uint8_t>& pixel) {
+    const auto matches = [&](const SceneColorShaders& program) {
+        return vertex == program.vertex.reference && pixel == program.pixel_reference;
+    };
+    std::lock_guard lock(mutex_);
+    const auto cached = std::find_if(loaded_.begin(), loaded_.end(), matches);
+    if (cached != loaded_.end()) return &*cached;
+
+    const auto path = directory_ / (ShaderHashPrefix(vertex) + '-' + ShaderHashPrefix(pixel));
+    if (std::filesystem::is_regular_file(path / "vertex-shader.container")) {
+        auto program = LoadColorShaders(path, pixel_dxil_);
+        if (matches(program)) return &loaded_.emplace_back(std::move(program));
+    }
+    // Keep support for older shader banks whose subdirectory names were chosen by hand.
+    if (!scanned_named_directories_) {
+        if (std::filesystem::is_directory(directory_)) {
+            for (const auto& material : std::filesystem::directory_iterator(directory_)) {
+                if (material.is_directory() && !HasShaderHashName(material.path().filename().string()) &&
+                    std::filesystem::is_regular_file(material.path() / "vertex-shader.container"))
+                    loaded_.push_back(LoadColorShaders(material.path(), pixel_dxil_));
+            }
+        }
+        scanned_named_directories_ = true;
+        const auto named = std::find_if(loaded_.begin(), loaded_.end(), matches);
+        if (named != loaded_.end()) return &*named;
+    }
+    return nullptr;
 }
 DepthConfiguration ConfigureDepth(const SceneSurface& surface, const SceneVertexShader& shader) {
     DepthConfiguration configuration;
@@ -388,8 +434,7 @@ void ReadOcclusionVertices(DepthDraw& draw, uint8_t* base, uint32_t vertices, ui
         draw.indices[i] = (uint32_t(index_data[i * 2]) << 8) | index_data[i * 2 + 1];
 }
 SceneColorDraw ReadSceneColorDraw(const PPCContext& ctx, uint8_t* base, const SceneColorShaders& shaders,
-                                  std::span<const SceneColorShaders> world_shaders,
-                                  std::span<const SceneColorShaders> additive_shaders) {
+                                 SceneMaterialLibrary* world_shaders, SceneMaterialLibrary* additive_shaders) {
     DeviceState state(base, ctx.r3.u32);
     SceneColorDraw snapshot;
     const bool tiled = (state.bytes[10940] & 0x20) != 0;
@@ -419,15 +464,11 @@ SceneColorDraw ReadSceneColorDraw(const PPCContext& ctx, uint8_t* base, const Sc
         culls_clockwise ? plume::RenderCullMode::FRONT : plume::RenderCullMode::BACK;
     const auto pixel_shader = ReadBoundShader(base, state.Word(12700), false);
     const auto vertex_shader = ReadBoundShader(base, state.Word(12704), true);
-    const auto matches = [&](const SceneColorShaders& program) {
-        return pixel_shader == program.pixel_reference && vertex_shader == program.vertex.reference;
-    };
-    if (tiled && matches(shaders)) snapshot.shaders = &shaders;
+    if (tiled && pixel_shader == shaders.pixel_reference && vertex_shader == shaders.vertex.reference) snapshot.shaders = &shaders;
     else {
-        const auto programs = tiled ? world_shaders : additive_shaders;
-        const auto program = std::find_if(programs.begin(), programs.end(), matches);
-        Require(program != programs.end(), "Untranslated native scene shader pair");
-        snapshot.shaders = &*program;
+        auto* programs = tiled ? world_shaders : additive_shaders;
+        if (programs) snapshot.shaders = programs->Find(vertex_shader, pixel_shader);
+        Require(snapshot.shaders, "Untranslated native scene shader pair");
     }
     snapshot.draw = ReadGeometry(ctx, base, state, snapshot.color_surface, snapshot.shaders->vertex,
                                  tiled ? 0x00700766 : 0x00700263);

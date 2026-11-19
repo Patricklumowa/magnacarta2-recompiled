@@ -498,8 +498,15 @@ tiled color replay.
 
 A live run with the Xenos plugin absent uploaded both mip chains and completed
 the draw of 336 indices on D3D12 in the first tile. Additional world materials
-use subdirectories of `world-opaque` with the same four files. The next
-observed pair uses the same world vertex shader and pixel container SHA-256
+use subdirectories of `world-opaque` with the same four files. For direct
+lookup, name each subdirectory with the first eight hexadecimal digits of
+the vertex container SHA-256, a hyphen, and the first eight digits of the
+pixel container SHA-256. The renderer loads the pair on its first draw and
+compares both full containers with the guest bindings. A path miss also
+checks manually named material directories. The same lookup applies to
+`world-additive`.
+
+The next observed pair uses the same world vertex shader and pixel container SHA-256
 `90083832b46de285c180a78c88fa0745adb2fc24568714ffe8dec7a9d041c329`, with
 BC1 textures in both slots. The renderer selects the full vertex and pixel
 pair and reads the BC1 or BC3 format from each fetch descriptor.

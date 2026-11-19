@@ -878,6 +878,7 @@ int main(int argc,char** argv) try {
             if (argc == 8) {
                 const std::filesystem::path world_capture(argv[6]);
                 const auto world_shaders = LoadColorShaders(argv[7]);
+                SceneMaterialLibrary world_library{argv[7]};
                 const auto world_indices = ReadNativeFile(world_capture / "index-buffer.data.bin");
                 constexpr uint32_t world_index_data = 0xb800;
                 copy(device, ReadNativeFile(world_capture / "device.bin"));
@@ -896,15 +897,17 @@ int main(int argc,char** argv) try {
                 bind_shader(ps, 0xd000, world_shaders.pixel_reference, false);
                 context.r5.u32 = 0; context.r6.u32 = 336;
                 Reject([&] { ReadSceneColorDraw(context, base, color_shaders); });
-                const auto world = ReadSceneColorDraw(context, base, color_shaders, std::span(&world_shaders, 1));
-                Check(world.shaders == &world_shaders && world.draw.index_count == 336 &&
+                const auto world = ReadSceneColorDraw(context, base, color_shaders, &world_library);
+                Check(world.shaders->vertex.reference == world_shaders.vertex.reference &&
+                      world.shaders->pixel_reference == world_shaders.pixel_reference && world.draw.index_count == 336 &&
                       world.draw.indices.size() * 2 == world_indices.size(), "World material or 16-bit index extent differs");
                 for (size_t i = 0; i < world.draw.indices.size(); ++i)
                     Check(world.draw.indices[i] == (uint32_t(world_indices[i * 2]) * 256 + world_indices[i * 2 + 1]),
                           "World index byte order differs");
                 Check(world.cull == plume::RenderCullMode::FRONT, "Captured world cull mode differs");
                 store(device + 10568, 0x18006);
-                const auto reversed = ReadSceneColorDraw(context, base, color_shaders, std::span(&world_shaders, 1));
+                const auto reversed = ReadSceneColorDraw(context, base, color_shaders, &world_library);
+                Check(reversed.shaders == world.shaders, "Cached material reference changed between draws");
                 Check(reversed.cull == plume::RenderCullMode::BACK, "Reversed guest winding kept the wrong cull mode");
                 std::cout << "PASS: captured world material selection and 16-bit indices\n";
             }

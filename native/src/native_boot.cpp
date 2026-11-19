@@ -176,7 +176,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     std::optional<SceneVertexShader> depth_shaders;
     std::optional<SceneVertexShader> occlusion_shader;
     std::optional<SceneColorShaders> color_shaders;
-    std::vector<SceneColorShaders> world_color_shaders, additive_color_shaders;
+    std::optional<SceneMaterialLibrary> world_color_shaders, additive_color_shaders;
     std::optional<ScenePassShaders> depth_restore_shaders;
     std::optional<ScenePassShaders> fullscreen_shaders, color_grade_shaders;
     std::optional<ScenePassShaders> bloom_shaders, composition_shaders, back_buffer_shaders;
@@ -236,19 +236,8 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         if (!color_directory.empty()) {
             Require(bool(depth_shaders), "Native color shaders require the verified depth shader directory");
             color_shaders = LoadColorShaders(color_directory);
-            const auto world_directory = std::filesystem::path(color_directory) / "world-opaque";
-            if (std::filesystem::is_directory(world_directory)) {
-                world_color_shaders.push_back(LoadColorShaders(world_directory));
-                for (const auto& material : std::filesystem::directory_iterator(world_directory))
-                    if (material.is_directory() && std::filesystem::is_regular_file(material.path() / "vertex-shader.container"))
-                        world_color_shaders.push_back(LoadColorShaders(material.path()));
-            }
-            const auto additive_directory = std::filesystem::path(color_directory) / "world-additive";
-            if (std::filesystem::is_directory(additive_directory)) {
-                for (const auto& material : std::filesystem::directory_iterator(additive_directory))
-                    if (material.is_directory() && std::filesystem::is_regular_file(material.path() / "vertex-shader.container"))
-                        additive_color_shaders.push_back(LoadColorShaders(material.path(), "pixel.dxil"));
-            }
+            world_color_shaders.emplace(std::filesystem::path(color_directory) / "world-opaque");
+            additive_color_shaders.emplace(std::filesystem::path(color_directory) / "world-additive", "pixel.dxil");
             const auto occlusion_directory = std::filesystem::path(color_directory) / "occlusion";
             if (std::filesystem::is_directory(occlusion_directory)) occlusion_shader = LoadOcclusionShader(occlusion_directory);
             const auto restore_directory = std::filesystem::path(color_directory) / "depth-restore";
@@ -447,7 +436,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
 
     void DrawColor(const PPCContext& ctx, uint8_t* base) {
         Require(bool(color_shaders), "Indexed color shader directory is not configured");
-        auto snapshot = ReadSceneColorDraw(ctx, base, *color_shaders, world_color_shaders, additive_color_shaders);
+        auto snapshot = ReadSceneColorDraw(ctx, base, *color_shaders, &*world_color_shaders, &*additive_color_shaders);
         Flush(base, ctx.r3.u32);
         std::lock_guard lock(mutex);
         const bool tiled = snapshot.color_surface.samples == 2;
