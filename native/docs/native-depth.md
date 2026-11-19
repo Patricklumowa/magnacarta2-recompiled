@@ -637,8 +637,17 @@ that copy and reached the single-sample depth resolve at `0x827B3560`.
 That depth resolve copies the restored depth plane back into the scene depth
 texture. It uses the existing 20e4 conversion and a typed depth view of the
 D32/S8 attachment. The captured GPU replay compares the complete export with
-the restored depth readback. A live run completed the depth export without
-Xenos and reached another fullscreen draw before the bloom pass.
+the restored depth readback. In the first 3D scene the game then uses that
+texture to mask the sky pass. Its pixel shader samples scene depth with a
+point-clamp sampler and clips fragments against the game's fade distance.
+Surviving fragments write depth with a LESS comparison. Color writes are
+disabled. A live D3D12 run completed this mask and reached the first sky draw.
+
+The mask uses four float4 positions with 16-byte stride. The game supplies
+the indices `0,1,2,0,2,3`. The renderer reads the two triangles in that
+order. Place the locally translated mask shaders in `<color-shaders>/depth-mask/`
+as `vertex-shader.container`, `pixel-shader.container`, `vertex.dxil` and
+`pixel.dxil`.
 
 Compile the single-sample shader alongside the depth-restore shaders:
 

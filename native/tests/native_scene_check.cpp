@@ -140,6 +140,68 @@ void CheckDepthRestore(mc2::native::DepthRenderer& depth, mc2::native::NativeDev
     }
 }
 
+void CheckDepthMask(mc2::native::DepthRenderer& depth, mc2::native::NativeDevice& gpu,
+                    mc2::native::SceneSurface surface, const std::filesystem::path& directory) {
+    using namespace mc2::native;
+    using namespace plume;
+    surface.samples = 1;
+    const auto shaders = LoadDepthRestoreShaders(directory / "depth-mask");
+    const auto export_shader = ReadNativeFile(directory / "depth-restore" / "depth-resolve.dxil");
+    auto config = ConfigureDepth(surface, shaders.vertex);
+    config.comparison = RenderComparisonFunction::LESS;
+    config.cull = RenderCullMode::NONE;
+    auto target = gpu.device->createTexture(RenderTextureDesc::DepthTarget(surface.width, surface.height, RenderFormat::D32_FLOAT_S8_UINT));
+    RenderFramebufferDesc desc;
+    desc.depthAttachment = target.get();
+    auto framebuffer = gpu.device->createFramebuffer(desc);
+    Check(target && framebuffer, "Depth mask test target allocation failed");
+    const uint32_t third = surface.width / 3;
+    const RenderRect left(0,0,third,surface.height), middle(third,0,2*third,surface.height);
+    auto& commands = gpu.commands;
+    commands->begin();
+    commands->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(target.get(), RenderTextureLayout::DEPTH_WRITE));
+    commands->setFramebuffer(framebuffer.get());
+    commands->clearDepthStencil(true,true,0.875f,0x52,nullptr,0);
+    commands->clearDepthStencil(true,false,0.125f,0,&left,1);
+    commands->clearDepthStencil(true,false,0.5f,0,&middle,1);
+    commands->end();
+    gpu.queue->executeCommandLists(commands.get(), gpu.fence.get());
+    gpu.Complete();
+    depth.OverwriteResolvedDepth(*target, export_shader);
+
+    // The guest supplies four float4s and two 16-bit triangles in this order.
+    const float corners[] = {-1,-1,0.75f,1, -1,1,0.75f,1, 1,1,0.75f,1, 1,-1,0.75f,1};
+    const auto vertices = NativeVertexBytes({reinterpret_cast<const uint8_t*>(corners),sizeof(corners)}, 2);
+    std::array<uint8_t,80> guest{};
+    std::copy(vertices.begin(), vertices.end(), guest.begin() + 4);
+    const std::array<uint8_t,12> indices{0,0,0,1,0,2,0,0,0,2,0,3};
+    std::copy(indices.begin(), indices.end(), guest.begin() + 68);
+    DepthDraw draw;
+    ReadQuadUpVertices(draw, guest.data(), 4, 68, 16);
+    draw.viewport = RenderViewport(0,0,surface.width,surface.height,1,0);
+    draw.scissor = RenderRect(0,0,surface.width,surface.height);
+    draw.vertex_constants.resize(4096);
+    draw.shared_constants.resize(512);
+    std::vector<uint8_t> pixel_constants(4096);
+    const float screen_uv[] = {0.5f,-0.5f,0.5f,0.5f};
+    const float depth_scale = 1, fade_start = 1.5f;
+    const auto fetch_mode = PackTextureFetchMode(0x688,0,0);
+    std::memcpy(draw.vertex_constants.data()+80,screen_uv,sizeof(screen_uv));
+    std::memcpy(draw.shared_constants.data()+288,&fetch_mode,sizeof(fetch_mode));
+    std::memcpy(pixel_constants.data()+40,&depth_scale,sizeof(depth_scale));
+    std::memcpy(pixel_constants.data()+48,&fade_start,sizeof(fade_start));
+    depth.RestoreResolvedDepth(config, draw, shaders.pixel_dxil, pixel_constants, *target, *framebuffer, true);
+    depth.OverwriteResolvedDepth(*target, export_shader);
+    const auto actual = depth.ReadResolvedPixels();
+    Check(actual.size() == size_t(surface.width)*surface.height, "Depth mask readback has the wrong size");
+    // Left fails LESS, middle writes reversed depth 0.25, right is clipped by the sampled scene depth.
+    for (uint32_t y=0; y<surface.height; ++y)
+        for (uint32_t x=0; x<surface.width; ++x)
+            Check(actual[size_t(y)*surface.width+x] == (x<third ? 0.125f : x<2*third ? 0.25f : 0.875f),
+                  "Depth mask changed the wrong pixels");
+    std::cout << "PASS: fullscreen depth mask respects triangle order, sampled depth and LESS comparison\n";
+}
+
 void CheckFullscreenColor(mc2::native::ColorTarget& source, const mc2::native::SceneSurface& surface,
                           const std::shared_ptr<mc2::native::NativeDevice>& gpu, const std::filesystem::path& directory) {
     using namespace mc2::native;
@@ -770,6 +832,8 @@ void ReplayColor(const mc2::native::SceneDepthDraw& prepass, const mc2::native::
             CheckFullscreenColor(color, surface, gpu, shader_directory);
         if (std::filesystem::is_directory(shader_directory / "bloom"))
             CheckBloom(depth, color, surface, gpu, shader_directory);
+        if (std::filesystem::is_directory(shader_directory / "depth-mask"))
+            CheckDepthMask(depth, *gpu, surface, shader_directory);
     }
     draw.draw.shared_constants[0] = uint8_t(bindings.size());
     const auto before_rejection = gpu->completed;

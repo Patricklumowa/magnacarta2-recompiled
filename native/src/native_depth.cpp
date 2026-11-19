@@ -472,7 +472,7 @@ uint64_t DepthRenderer::OverwriteResolvedDepth(RenderTexture& source, std::span<
 
 uint64_t DepthRenderer::RestoreResolvedDepth(const DepthConfiguration& config, const DepthDraw& draw,
         std::span<const uint8_t> pixel_shader, std::span<const uint8_t> constants,
-        RenderTexture& target, RenderFramebuffer& framebuffer) {
+        RenderTexture& target, RenderFramebuffer& framebuffer, bool clamp_uv) {
     auto& state = *impl_;
     const RenderRect full(0,0,state.width,state.height);
     Require(state.tile_resolve && state.tile_resolve->CompletedRegion() == full && draw.scissor == full &&
@@ -482,6 +482,7 @@ uint64_t DepthRenderer::RestoreResolvedDepth(const DepthConfiguration& config, c
     sampler.minFilter = sampler.magFilter = RenderFilter::NEAREST;
     sampler.mipmapMode = RenderMipmapMode::NEAREST;
     sampler.maxLOD = 0;
+    if (clamp_uv) sampler.addressU = sampler.addressV = RenderTextureAddressMode::CLAMP;
     auto& gpu = *state.gpu;
     IndexedPipeline pipeline(config, &gpu, pixel_shader, std::span(&sampler, 1), RenderFormat::UNKNOWN,
                              RenderFormat::D32_FLOAT_S8_UINT);

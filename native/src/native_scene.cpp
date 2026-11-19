@@ -113,10 +113,11 @@ void ReadFullscreenConstants(const DeviceState& state, const SceneSurface& surfa
 }
 
 void RequireFullscreenDrawState(const DeviceState& state, const SceneSurface& surface, bool reverse_depth,
-                                uint32_t color_mask = 15, uint32_t raster_mode = 0x18000, uint32_t blend_control = 0x10001) {
+                                uint32_t color_mask = 15, uint32_t raster_mode = 0x18000,
+                                uint32_t blend_control = 0x10001, uint32_t depth_control = 0x00700770) {
     const float half_width = surface.width * 0.5f, half_height = surface.height * 0.5f;
     Require(state.Word(11824) == 0 && state.Word(10452) == 0 && state.Word(10460) == color_mask &&
-            state.Word(10548) == 0x00700770 && state.Word(10552) == blend_control && (state.Word(10556) & 0x1f) == 7 &&
+            state.Word(10548) == depth_control && state.Word(10552) == blend_control && (state.Word(10556) & 0x1f) == 7 &&
             state.Word(10564) == 0x80000 && state.Word(10568) == raster_mode && state.Word(10572) == 0x43f &&
             state.Float(12672) == (reverse_depth ? 1 : 0) && state.Float(12676) == (reverse_depth ? 0 : 1) &&
             state.Float(10504) == half_width && state.Float(10508) == half_width && state.Float(10512) == -half_height &&
@@ -766,6 +767,23 @@ SceneSurface ReadPostprocessDepthResolve(const PPCContext& ctx, uint8_t* base, c
     return surface;
 }
 
+SceneFullscreenDraw ReadDepthMaskDraw(const PPCContext& ctx, uint8_t* base,
+        const ScenePassShaders& shaders, const SceneResolveTexture& source) {
+    Require(ctx.lr == 0x826D9CC0 && ctx.r4.u32 == 4 && !ctx.r5.u32 && ctx.r6.u32 == 4 &&
+            ctx.r7.u32 == 6 && ctx.r8.u32 == 1 && ctx.r9.u32 == 16, "Unsupported scene depth mask geometry");
+    const DeviceState state(base, ctx.r3.u32);
+    ReadFullscreenColorSurface(state, base);
+    SceneFullscreenDraw pass;
+    pass.surface = state.DepthSurface(base, 720, 1);
+    RequireFullscreenDrawState(state, pass.surface, true, 0, 0x18000, 0x10001, 0x00700716);
+    Require(ReadBoundShader(base, state.Word(12704), true) == shaders.vertex.reference &&
+            ReadBoundShader(base, state.Word(12700), false) == shaders.pixel_reference, "Untranslated scene depth mask shaders");
+    RequireSceneTexture(state, source, 0x4800);
+    ReadFullscreenConstants(state, pass.surface, pass.draw, pass.pixel_constants, true);
+    pass.shaders = &shaders;
+    return pass;
+}
+
 SceneColorClear ReadBloomClear(const PPCContext& ctx, uint8_t* base) {
     Require(ctx.lr == 0x8238B590 && ctx.r4.u32 == 0xf, "Unsupported bloom color clear arguments");
     const DeviceState state(base, ctx.r3.u32);
@@ -987,13 +1005,19 @@ uint32_t ReadScanoutResolve(const PPCContext& ctx, uint8_t* base, const SceneSur
     return ctx.r6.u32;
 }
 
-void ReadQuadUpVertices(DepthDraw& draw, uint8_t* base, uint32_t address, uint32_t index_address) {
+void ReadQuadUpVertices(DepthDraw& draw, uint8_t* base, uint32_t address, uint32_t index_address, uint32_t stride) {
     std::vector<uint8_t> vertices, indices;
-    Require(ReadGuest(base,address,128,vertices) && ReadGuest(base,index_address,12,indices), "Unreadable scene quad vertices or indices");
+    Require((stride == 16 || stride == 32) && ReadGuest(base,address,4 * stride,vertices) &&
+            ReadGuest(base,index_address,12,indices), "Unreadable scene quad vertices or indices");
     draw.vertices = NativeVertexBytes(vertices, 2);
-    draw.indices = {0,1,3,0,3,2};
-    for (size_t i = 0; i < draw.indices.size(); ++i)
-        Require((uint32_t(indices[i*2]) << 8 | indices[i*2+1]) == draw.indices[i], "Scene quad triangle indices changed");
+    constexpr uint32_t expected[] = {0,1,3,0,3,2};
+    draw.indices.resize(std::size(expected));
+    for (size_t i = 0; i < draw.indices.size(); ++i) {
+        const auto index = uint32_t(indices[i*2]) << 8 | indices[i*2+1];
+        Require(index < 4, "Scene quad index exceeds the four supplied vertices");
+        if (stride == 32) Require(index == expected[i], "Scene quad triangle indices changed");
+        draw.indices[i] = index;
+    }
     draw.index_count = uint32_t(draw.indices.size());
 }
 

@@ -135,7 +135,7 @@ uint8_t* OcclusionReportMemory(uint8_t* base, uint32_t allocation) {
             "Occlusion report storage is not writable");
     return destination;
 }
-enum class SceneQuadPass { HdrCopy, Bloom, Composition, BackBuffer, Overlay };
+enum class SceneQuadPass { HdrCopy, DepthMask, Bloom, Composition, BackBuffer, Overlay };
 struct PendingUpDraw {
     SceneFullscreenDraw scene;
     uint32_t vertices, indices, endpoint;
@@ -177,7 +177,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     std::optional<SceneVertexShader> occlusion_shader;
     std::optional<SceneColorShaders> color_shaders;
     std::optional<SceneMaterialLibrary> world_color_shaders, additive_color_shaders;
-    std::optional<ScenePassShaders> depth_restore_shaders;
+    std::optional<ScenePassShaders> depth_restore_shaders, depth_mask_shaders;
     std::optional<ScenePassShaders> fullscreen_shaders, color_grade_shaders;
     std::optional<ScenePassShaders> bloom_shaders, composition_shaders, back_buffer_shaders;
     std::vector<ScenePassShaders> filter_shaders;
@@ -245,6 +245,8 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             const auto postprocess_depth_resolve_path = restore_directory / "depth-resolve.dxil";
             if (std::filesystem::exists(postprocess_depth_resolve_path))
                 postprocess_depth_resolve_shader = ReadNativeFile(postprocess_depth_resolve_path);
+            const auto depth_mask_directory = std::filesystem::path(color_directory) / "depth-mask";
+            if (std::filesystem::is_directory(depth_mask_directory)) depth_mask_shaders = LoadDepthRestoreShaders(depth_mask_directory);
             const auto fullscreen_directory = std::filesystem::path(color_directory) / "fullscreen";
             if (std::filesystem::is_directory(fullscreen_directory)) fullscreen_shaders = LoadFullscreenColorShaders(fullscreen_directory, false);
             const auto fullscreen_resolve_path = fullscreen_directory / "color-resolve.dxil";
@@ -682,6 +684,12 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
                 pass = SceneQuadPass::HdrCopy;
                 Require(bool(fullscreen_shaders), "Indexed begin-UP draw requires the first fullscreen HDR shaders");
                 scene = ReadSceneFullscreenDraw(ctx, base, *fullscreen_shaders, scene_textures[0], false);
+            } else if (!bloom_surface && ctx.r9.u32 == 16) {
+                pass = SceneQuadPass::DepthMask;
+                Require(depth_mask_shaders && stencil_surface && !scene_color_needs_resolve,
+                        "Depth mask draw requires the completed scene textures and translated shaders");
+                scene = ReadDepthMaskDraw(ctx, base, *depth_mask_shaders, scene_textures[1]);
+                Require(*stencil_surface == scene.surface, "Depth mask changed the single-sample attachment");
             } else if (bloom_copies < 3) {
                 pass = SceneQuadPass::Bloom;
                 Require(bloom_surface && bloom_target && bloom_draws == bloom_copies,
@@ -910,8 +918,16 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         if (up.pass == SceneQuadPass::Overlay)
             ReadOverlayUpVertices(up.scene.draw, base, up.vertices, up.indices, *up.overlay);
         else if (up.pass != SceneQuadPass::HdrCopy)
-            ReadQuadUpVertices(up.scene.draw, base, up.vertices, up.indices);
-        if (up.pass == SceneQuadPass::Bloom) {
+            ReadQuadUpVertices(up.scene.draw, base, up.vertices, up.indices, up.pass == SceneQuadPass::DepthMask ? 16 : 32);
+        if (up.pass == SceneQuadPass::DepthMask) {
+            const auto& shaders = *up.scene.shaders;
+            auto config = ConfigureDepth(surface, shaders.vertex);
+            config.comparison = plume::RenderComparisonFunction::LESS;
+            config.cull = plume::RenderCullMode::NONE;
+            completed = depth_renderer->RestoreResolvedDepth(config, up.scene.draw, shaders.pixel_dxil,
+                up.scene.pixel_constants, *stencil_target, *stencil_framebuffer, true);
+            REXLOG_INFO("MC2 native scene: drew fullscreen depth mask, completed={}", completed);
+        } else if (up.pass == SceneQuadPass::Bloom) {
             const auto& shaders = *up.scene.shaders;
             if (bloom_draws == 0) {
                 const std::array samplers{sampler, sampler};
