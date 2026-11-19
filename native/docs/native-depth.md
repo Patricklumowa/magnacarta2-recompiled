@@ -529,6 +529,14 @@ pixel container SHA-256 is
 A live run completed 40 two-stream, three-texture draws and reached draw
 154 in the first tile.
 
+Another version of the same vertex layout uses a 48-byte geometry stride
+with the 12-byte auxiliary stream. The renderer takes the geometry stride
+from the shader's vertex fetch and checks it against the bound buffer. Its
+vertex container SHA-256 is
+`04db7b6e5b6eba493892bff6997007cd2374fed4db0bc626f35dd905a7cdee41`.
+With the corresponding material pairs loaded, a live run completed 1,351
+draws in the first tile.
+
 ## Scene presentation
 
 The display resolve validates a full, same-size RGBA8 source and destination.

@@ -277,9 +277,10 @@ SceneColorShaders LoadColorShaders(const std::filesystem::path& directory) {
         {0,0,95,40,0,4,true}, {6,0,95,40,0,3}, {7,0,95,40,12,4,false,VertexStorage::UInt8},
         {3,0,95,40,16,4,false,VertexStorage::UInt8}, {10,0,95,40,20,4,false,VertexStorage::UInt8}, {5,0,95,40,24,2}
     };
+    const auto stride = vertex.inputs.front().stride;
     const std::vector<VertexInput> world = {
-        {0,0,95,40,0,3}, {6,0,95,40,16,4,false,VertexStorage::UInt8}, {7,0,95,40,20,4,false,VertexStorage::UInt8},
-        {3,0,95,40,24,4,false,VertexStorage::UInt8}, {10,0,95,40,28,4,false,VertexStorage::UNorm8}, {5,0,95,40,32,2}
+        {0,0,95,stride,0,3}, {6,0,95,stride,16,4,false,VertexStorage::UInt8}, {7,0,95,stride,20,4,false,VertexStorage::UInt8},
+        {3,0,95,stride,24,4,false,VertexStorage::UInt8}, {10,0,95,stride,28,4,false,VertexStorage::UNorm8}, {5,0,95,stride,32,2}
     };
     auto layered = world;
     const VertexInput auxiliary[] = {
