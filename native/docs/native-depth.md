@@ -553,6 +553,18 @@ The texture checks cover face strides, packed mips and byte-exact GPU
 roundtrips of all six faces. The live run completed two six-slot draws
 and advanced through draw 1,397 in the first tile.
 
+## Baked world lighting
+
+The captured material layout adds a float2 lightmap coordinate at byte 40
+of the 48-byte geometry stream. Its shaders sample the three baked lightmap
+textures alongside two material textures. Use `texture-count.txt` with
+`5` for this pair. The vertex container SHA-256 is
+`4bee2b50df046fc158fb6c4e1978c924bd0169297193714415714966f6eb263f`
+and the pixel container SHA-256 is
+`dafa3f027c3bfa1e4cfde570d26e7884ce6bfe9bf47c4a2f63dd8f89a00968b3`.
+The live run completed 13 draws with this layout and passed draw 1,410
+in the first tile.
+
 ## Scene presentation
 
 The display resolve validates a full, same-size RGBA8 source and destination.

@@ -288,7 +288,9 @@ SceneColorShaders LoadColorShaders(const std::filesystem::path& directory) {
         {5,7,94,12,8,4,false,VertexStorage::UNorm8}
     };
     layered.insert(layered.end(), std::begin(auxiliary), std::end(auxiliary));
-    Require(vertex.inputs == expected || vertex.inputs == world || vertex.inputs == layered,
+    auto lightmapped = world;
+    lightmapped.push_back({10,1,95,stride,40,2});
+    Require(vertex.inputs == expected || vertex.inputs == world || vertex.inputs == layered || vertex.inputs == lightmapped,
             "Unrecognized scene color shader input layout");
     SceneColorShaders shaders{std::move(vertex), ReadNativeFile(directory / "pixel-shader.container"),
                               ReadNativeFile(directory / "pixel-7e3.dxil"), {}, {}};
