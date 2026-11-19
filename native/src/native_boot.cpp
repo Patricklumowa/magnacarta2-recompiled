@@ -219,6 +219,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             load_menu_fan("alpha-detail", {18,18,20}, 0x01000706);
             load_menu_fan("alpha-clamp", {20}, 0x01000706, 1);
             load_menu_fan("menu-transition", {20}, 0x01000706, 1);
+            load_menu_fan("menu-foreground", {20}, 0x01000706);
             const auto present_directory = fullscreen_directory / "present";
             if (std::filesystem::is_directory(present_directory)) {
                 present_vertex_shader = ReadNativeFile(present_directory / "vertex.dxil");
@@ -991,7 +992,12 @@ uint32_t ResetStaging(uint8_t* base, uint32_t device) {
     REX_STORE_U32(device + 48, begin - 4);
     REX_STORE_U32(device + 52, begin + extent);
     REX_STORE_U32(device + 56, begin + extent - 160);
+    // The native fence has retired the vertex and index uploads. Reclaim
+    // their staging cursors and byte count along with the command cursor.
+    REX_STORE_U32(device + 14916, 0);
+    REX_STORE_U32(device + 14924, begin);
     REX_STORE_U32(device + 14928, begin);
+    REX_STORE_U32(device + 14932, 0);
     return begin - 4;
 }
 }

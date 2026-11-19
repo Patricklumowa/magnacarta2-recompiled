@@ -19,7 +19,7 @@ Magna Carta 2 Recompiled (MC2Recomp) uses [ReXGlue](https://github.com/rexglue/r
 | PC settings | F4 menu with 720p, 1440p, and 4K rendering presets |
 | Frame rate | 30 FPS, 60 FPS, and experimental unlocked modes; targets are not performance guarantees |
 | Graphics | D3D12 compatibility renderer; original shadow/tiling behavior retained |
-| Native graphics migration | Experimental D3D12 backend runs the movies and the animated Press START screen without Xenos. The main menu and gameplay are incomplete. See [native bootstrap](native/docs/native-bootstrap.md). |
+| Native graphics migration | Experimental D3D12 backend runs the movies, animated Press START screen, and main menu without Xenos. Gameplay coverage is incomplete. See [native bootstrap](native/docs/native-bootstrap.md). |
 | Performance | Substantial overhead and stutter remain; optimization is in progress |
 | Audio | Not working in current gameplay tests; enabling output does not resolve missing audio support |
 | Saves and progression | Full save/load, combat, and chapter coverage remain unverified |
@@ -152,7 +152,7 @@ The current priorities are consistent frame delivery while preserving the origin
 Experimental shader output/sample specialization and the fast constant-copy hook remain opt-in. Their presence in the source does not establish a validated whole-game improvement. GPU timing capture is also off by default.
 
 Native graphics migration includes opt-in shader capture and a Windows D3D12
-backend. It presents startup movies and the animated title screen through DXGI.
+backend. It presents the startup movies, animated title screen, and main menu through DXGI.
 The playable default uses Xenos. See the
 [implementation status and capture workflow](native/docs/native-renderer.md).
 

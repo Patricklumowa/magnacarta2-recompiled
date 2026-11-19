@@ -425,8 +425,10 @@ background, and Press START prompt at a 2560 x 1600 window size. The native
 backend presented 46 scene frames after the movie skip. Pressing Start on
 that screen now shows "Validating downloadable content." This dialog uses
 a clamp-to-edge BC3 shader pair in `fullscreen/menu-fan/menu-transition`.
-Another menu fan shader follows the dialog. The main menu and gameplay are
-still incomplete on this backend.
+The next fan samples wrapping BC3, and its shader pair goes in
+`fullscreen/menu-fan/menu-foreground`. A live run displayed New Game,
+Load Game, Options, and Extra at the main menu. Gameplay coverage is still
+incomplete on this backend.
 
 The native renderer reuses scene textures when all six fetch words and
 every source mip match. The cache retains up to 64 entries and 32 MiB of
@@ -443,9 +445,11 @@ without accessing it, and rejects an uncommitted range.
 
 With the batched checks, median time between presented title frames
 with 38 overlays fell from 379 ms to 30 ms in another run at the same
-window size. The run presented 86 scene frames and then stopped at an
-unsupported user-memory allocation. Gameplay performance has yet to
-be measured on this backend.
+window size. That run stopped after 86 frames when the guest exhausted
+its user-memory draw staging. The native reset now reclaims the vertex
+and index allocation cursors and their byte count after the fence.
+A later run presented 2,132 scene frames and closed cleanly.
+Gameplay performance has yet to be measured on this backend.
 
 ## Scene presentation
 

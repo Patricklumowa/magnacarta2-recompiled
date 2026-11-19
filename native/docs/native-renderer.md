@@ -50,8 +50,8 @@ Xenos. The guest then retires its staging chunks on the CPU. See
 
 The native backend also runs depth restore, bloom, scene composition, and
 RGBA8 presentation for the animated title screen and the downloadable content
-validation dialog that follows Start. The remainder of the main-menu
-transition encounters an unsupported shader. See [scene presentation](native-depth.md#scene-presentation).
+validation dialog that follows Start. The native main menu uses the same
+presentation path. See [scene presentation](native-depth.md#scene-presentation).
 
 The optional bounded live movie comparison uses the same native drawing code
 on live guest inputs. Two movie draws passed the CPU comparison during a clean
