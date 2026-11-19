@@ -497,8 +497,19 @@ pixel shader. Compile the pixel shader for specialization flags 4 as in the
 tiled color replay.
 
 A live run with the Xenos plugin absent uploaded both mip chains and completed
-the draw of 336 indices on D3D12 in the first tile. The complete world frame
-requires support for the subsequent draws in the same tile.
+the draw of 336 indices on D3D12 in the first tile. Additional world materials
+use subdirectories of `world-opaque` with the same four files. The next
+observed pair uses the same world vertex shader and pixel container SHA-256
+`90083832b46de285c180a78c88fa0745adb2fc24568714ffe8dec7a9d041c329`, with
+BC1 textures in both slots. The renderer selects the full vertex and pixel
+pair and reads the BC1 or BC3 format from each fetch descriptor.
+
+Each first-tile draw retains its constants, indices, vertices and texture
+references in draw order. The lower tile replays that order after its clear.
+Draws in this pass share pipelines by shader pair and sampler LOD limits.
+With the two observed world materials loaded, a live run completed 12 first-tile
+draws and reached the next material. The game still needs more material
+coverage before it can present the first world frame.
 
 ## Scene presentation
 

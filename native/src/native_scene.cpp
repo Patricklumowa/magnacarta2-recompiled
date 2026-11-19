@@ -110,7 +110,7 @@ void RequireFullscreenDrawState(const DeviceState& state, const SceneSurface& su
             state.Float(10524) == (reverse_depth ? 1 : 0), "Fullscreen blend, mask, depth or viewport state changed");
 }
 
-void ReadBlockSceneTexture(const DeviceState& state, uint32_t slot, uint32_t format, DepthDraw& draw,
+void ReadBlockSceneTexture(const DeviceState& state, uint32_t slot, uint32_t expected_format, DepthDraw& draw,
                            mc2::texture::BlockTexture& texture, plume::RenderSamplerDesc& sampler, bool clamp_uv = false) {
     std::string error;
     if (!mc2::texture::DescribeBlockTexture(std::span(state.bytes).subspan(1152 + slot * 24, 24), texture, error))
@@ -121,7 +121,7 @@ void ReadBlockSceneTexture(const DeviceState& state, uint32_t slot, uint32_t for
     const uint32_t addressing = clamp_uv ? 0x00004800 : 0;
     if (!state.Word(12552 + 4 * slot) || (words[0] & 0x0007fc00) != addressing || words[3] != 0x06280d10 ||
         (words[4] & ~mip_max_mask) != 0x803 || (words[5] & 0x1ff) != 0 ||
-        texture.format != format || texture.mip_min_level != 0) {
+        (expected_format && texture.format != expected_format) || texture.mip_min_level != 0) {
         throw std::runtime_error(std::format(
             "Native scene texture {} format {}, levels {}-{}, sampler {:#x}/{:#x}/{:#x}/{:#x} differs",
             slot, texture.format, texture.mip_min_level, texture.mip_max_level,
@@ -209,13 +209,12 @@ void ReadDepthTransform(DepthDraw& draw, const DeviceState& state, const SceneSu
 }
 
 DepthDraw ReadGeometry(const PPCContext& ctx, uint8_t* base, const DeviceState& state,
-                       const SceneSurface& surface, const SceneVertexShader& shader) {
+                       const SceneSurface& surface) {
     Require(ctx.r4.u32 == 4 && state.Word(11824) == 0,
             "Native scene requires the verified triangle-list vertex inputs");
     Require(state.Word(10548) == 0x00700766 && state.Word(10568) == 0x00018002 && state.Word(10572) == 0x43f &&
             state.Word(10564) == 0x80000 && state.Word(10452) == 0 && state.Float(12672) == 1 && state.Float(12676) == 0,
             "Depth/stencil, culling, clipping, vertex base or viewport state differs from the verified pass");
-    Require(ReadBoundShader(base,state.Word(12704),true) == shader.reference, "Untranslated native scene vertex shader");
     Require(uint32_t(state.bytes[12536])*4 == 40, "Native scene vertex stride changed");
     std::vector<uint8_t> vertex_descriptor, index_descriptor, raw;
     uint32_t address=0,size=0;
@@ -330,7 +329,8 @@ SceneDepthDraw ReadSceneDepthDraw(const PPCContext& ctx, uint8_t* base, const Sc
     const auto surface = state.DepthSurface(base,720);
     state.FullViewport(surface);
     Require(state.Word(12700) == 0, "Native depth pass has a bound pixel shader");
-    return {surface, ReadGeometry(ctx, base, state, surface, shader)};
+    Require(ReadBoundShader(base, state.Word(12704), true) == shader.reference, "Untranslated native scene depth shader");
+    return {surface, ReadGeometry(ctx, base, state, surface)};
 }
 SceneDepthDraw ReadOcclusionDraw(const PPCContext& ctx, uint8_t* base, const SceneVertexShader& shader) {
     const auto vertices = ctx.r6.u32;
@@ -366,7 +366,7 @@ void ReadOcclusionVertices(DepthDraw& draw, uint8_t* base, uint32_t vertices, ui
         draw.indices[i] = (uint32_t(index_data[i * 2]) << 8) | index_data[i * 2 + 1];
 }
 SceneColorDraw ReadSceneColorDraw(const PPCContext& ctx, uint8_t* base, const SceneColorShaders& shaders,
-                                  const SceneColorShaders* world_shaders) {
+                                  std::span<const SceneColorShaders> world_shaders) {
     DeviceState state(base, ctx.r3.u32);
     SceneColorDraw snapshot;
     snapshot.color_surface = ReadTiledColorSurface(state, base);
@@ -377,12 +377,20 @@ SceneColorDraw ReadSceneColorDraw(const PPCContext& ctx, uint8_t* base, const Sc
     Require(state.Word(10460) == 0xf && state.Word(10552) == 0x10001 && (state.Word(10556) & 0x1f) == 7,
             "Native color draw has unsupported color write, blend or alpha state");
     const auto pixel_shader = ReadBoundShader(base, state.Word(12700), false);
-    snapshot.shaders = pixel_shader == shaders.pixel_reference ? &shaders : world_shaders;
-    Require(snapshot.shaders && pixel_shader == snapshot.shaders->pixel_reference, "Untranslated native scene pixel shader");
-    snapshot.draw = ReadGeometry(ctx, base, state, snapshot.color_surface, snapshot.shaders->vertex);
+    const auto vertex_shader = ReadBoundShader(base, state.Word(12704), true);
+    const auto matches = [&](const SceneColorShaders& program) {
+        return pixel_shader == program.pixel_reference && vertex_shader == program.vertex.reference;
+    };
+    if (matches(shaders)) snapshot.shaders = &shaders;
+    else {
+        const auto program = std::find_if(world_shaders.begin(), world_shaders.end(), matches);
+        Require(program != world_shaders.end(), "Untranslated native scene shader pair");
+        snapshot.shaders = &*program;
+    }
+    snapshot.draw = ReadGeometry(ctx, base, state, snapshot.color_surface);
     snapshot.pixel_constants = NativeVertexBytes(std::span(state.bytes).subspan(6016,4096),2);
     for (uint32_t slot = 0; slot < snapshot.textures.size(); ++slot)
-        ReadBlockSceneTexture(state, slot, slot ? 20u : 18u, snapshot.draw, snapshot.textures[slot], snapshot.samplers[slot]);
+        ReadBlockSceneTexture(state, slot, 0, snapshot.draw, snapshot.textures[slot], snapshot.samplers[slot]);
     return snapshot;
 }
 

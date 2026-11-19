@@ -865,7 +865,7 @@ int main(int argc,char** argv) try {
                 bind_shader(ps, 0xd000, world_shaders.pixel_reference, false);
                 context.r5.u32 = 0; context.r6.u32 = 336;
                 Reject([&] { ReadSceneColorDraw(context, base, color_shaders); });
-                const auto world = ReadSceneColorDraw(context, base, color_shaders, &world_shaders);
+                const auto world = ReadSceneColorDraw(context, base, color_shaders, std::span(&world_shaders, 1));
                 Check(world.shaders == &world_shaders && world.draw.index_count == 336 &&
                       world.draw.indices.size() * 2 == world_indices.size(), "World material or 16-bit index extent differs");
                 for (size_t i = 0; i < world.draw.indices.size(); ++i)

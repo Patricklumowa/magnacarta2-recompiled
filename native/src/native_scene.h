@@ -101,7 +101,7 @@ SceneDepthDraw ReadSceneDepthDraw(const PPCContext& context, uint8_t* base, cons
 SceneDepthDraw ReadOcclusionDraw(const PPCContext& context, uint8_t* base, const SceneVertexShader& shader);
 void ReadOcclusionVertices(DepthDraw& draw, uint8_t* base, uint32_t vertices, uint32_t indices);
 SceneColorDraw ReadSceneColorDraw(const PPCContext& context, uint8_t* base, const SceneColorShaders& shaders,
-                                  const SceneColorShaders* world_shaders = nullptr);
+                                  std::span<const SceneColorShaders> world_shaders = {});
 bool SameScenePositionInputs(const DepthDraw& depth, const DepthDraw& color);
 SceneTileResolve ReadSceneTileResolve(const PPCContext& context, uint8_t* base);
 ScenePassShaders LoadDepthRestoreShaders(const std::filesystem::path& directory);
