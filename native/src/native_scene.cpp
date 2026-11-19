@@ -188,7 +188,8 @@ SceneSurface ReadFullscreenColorSurface(const DeviceState& state, uint8_t* base,
             ReadGuest(base, surface.address, 48, descriptor), "Missing fullscreen color attachment");
     Require((LoadBE32(descriptor.data()) & 15) == 4 && LoadBE32(descriptor.data() + 24) == 0x14000500 &&
             LoadBE32(descriptor.data() + 28) == format_word && LoadBE32(descriptor.data() + 36) == 0x13fc1678 &&
-            state.Word(10372) == (blend_format_word ? blend_format_word : format_word), "Fullscreen color attachment layout changed");
+            (state.Word(10372) == format_word || (blend_format_word && state.Word(10372) == blend_format_word)),
+            "Fullscreen color attachment layout changed");
     surface.description.assign(descriptor.begin()+24,descriptor.end());
     state.FullViewport(surface, blend_format_word != 0);
     Require((state.bytes[10940] & 0x30) == 0 && state.Word(12724) == 0 && state.Word(12716) == UINT32_MAX,
@@ -458,6 +459,7 @@ SceneColorDraw ReadSceneColorDraw(const PPCContext& ctx, uint8_t* base, const Sc
     } else {
         // Format 12 requests higher precision blending with the same 7e3 storage as format 3.
         snapshot.color_surface = ReadFullscreenColorSurface(state, base, 0x302d0, 0xc02d0);
+        Require(state.Word(10372) == 0xc02d0, "Additive HDR draw requires the verified blend format");
         snapshot.depth_surface = state.DepthSurface(base, 720, 1);
         Require(state.Word(10492) == 0x00ffff00 && state.Word(10496) == 0x00ffff00,
                 "Additive HDR draw requires stencil reference zero and a full read mask");
@@ -738,7 +740,8 @@ SceneSurface ReadFullscreenResolve(const PPCContext& ctx, uint8_t* base, const S
     Require(ctx.lr == 0x827B3694 && ctx.r4.u32 == 0xf4000000 && !ctx.r5.u32 && !ctx.r7.u32 && !ctx.r8.u32 && !ctx.r9.u32,
             "Unsupported fullscreen resolve flags or region");
     const DeviceState state(base, ctx.r3.u32);
-    const auto surface = ReadFullscreenColorSurface(state, base);
+    // A full resolve covers the attachment even if the last light used a scissor.
+    const auto surface = ReadFullscreenColorSurface(state, base, 0x302d0, 0xc02d0);
     std::vector<uint8_t> descriptor;
     Require(ctx.r6.u32 == destination.address && ReadGuest(base, ctx.r6.u32, 52, descriptor) &&
             (LoadBE32(descriptor.data()) & 15) == 3, "Fullscreen resolve did not reuse the scene texture");

@@ -200,7 +200,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     std::optional<SceneSurface> fullscreen_surface;
     std::unique_ptr<ColorTarget> fullscreen_target;
     bool color_graded = false;
-    bool grade_resolved = false;
+    bool scene_color_needs_resolve = false;
     bool scene_composited = false;
     bool composition_resolved = false;
     std::optional<SceneSurface> bloom_surface;
@@ -368,7 +368,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
                 if (!depth_surface) return false;
                 Require(ctx.r3.u32 && ctx.r3.u32 == guest_device, "Color clear used an unknown device");
                 bloom = REX_LOAD_U32(ctx.r3.u32 + 10372) == 0x505a0;
-                Require(!bloom || (fullscreen_surface && depth_restored && (!color_graded || grade_resolved)),
+                Require(!bloom || (fullscreen_surface && depth_restored && !scene_color_needs_resolve),
                         "Bloom clear requires the prepared scene color and depth");
             }
             const auto clear=bloom ? ReadBloomClear(ctx,base) : ReadSceneColorClear(ctx,base);
@@ -467,6 +467,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         draw.renderer = &SceneRendererFor(snapshot);
         if (!tiled) {
             completed = draw.Render(draw.draw.scissor);
+            scene_color_needs_resolve = true;
             if (REXCVAR_GET(mc2_scene_resolve_trace)) {
                 const auto& rect = draw.draw.scissor;
                 REXLOG_INFO("MC2 native scene: additive HDR draw, indices={}, streams={}, textures={}, scissor=[{},{},{},{}], completed={}",
@@ -967,7 +968,8 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         Flush(base, ctx.r3.u32);
         std::lock_guard lock(mutex);
         auto scene = ReadSceneFullscreenDraw(ctx, base, *color_grade_shaders, scene_textures[0], true);
-        Require(fullscreen_target && fullscreen_surface && *fullscreen_surface == scene.surface && !color_graded && !bloom_surface,
+        Require(fullscreen_target && fullscreen_surface && *fullscreen_surface == scene.surface &&
+                !scene_color_needs_resolve && !color_graded && !bloom_surface,
                 "Color grading requires the first fullscreen HDR target");
         const auto sampler = FullscreenColorSampler();
         auto blend = plume::RenderBlendDesc::Copy();
@@ -976,23 +978,24 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             blend, plume::RenderCullMode::FRONT);
         completed = renderer.RenderResolved(scene.draw, scene.pixel_constants, *color_target);
         color_graded = true;
+        scene_color_needs_resolve = true;
         REXLOG_INFO("MC2 native scene: fullscreen RGB color grading, completed={}", completed);
     }
 
     void ResolveFullscreen(const PPCContext& ctx, uint8_t* base) {
         std::lock_guard lock(mutex);
-        const bool resolve_grade = color_graded && !grade_resolved && !bloom_surface;
+        const bool resolve_scene_color = scene_color_needs_resolve && !bloom_surface;
         const bool resolve_composition = scene_composited && !composition_resolved;
-        Require(ctx.r3.u32 && ctx.r3.u32 == guest_device && (resolve_grade || resolve_composition) &&
-                !fullscreen_resolve_shader.empty(),
+        Require(ctx.r3.u32 && ctx.r3.u32 == guest_device && fullscreen_surface && fullscreen_target && color_target &&
+                (resolve_scene_color || resolve_composition) && !fullscreen_resolve_shader.empty(),
                 "Fullscreen resolve requires the completed native pass and single-sample copy shader");
         const auto surface = ReadFullscreenResolve(ctx, base, scene_textures[0]);
         Require(*fullscreen_surface == surface, "Fullscreen resolve source differs from the drawn target");
         completed = color_target->OverwriteResolved(*fullscreen_target, -3, fullscreen_resolve_shader);
-        grade_resolved |= resolve_grade;
+        scene_color_needs_resolve = false;
         composition_resolved |= resolve_composition;
         REXLOG_INFO("MC2 native scene: resolved {} HDR into scene texture {:#x}, exponent=-3, completed={}",
-                    resolve_composition ? "composed" : "graded", scene_textures[0].address, completed);
+                    resolve_composition ? "composed" : color_graded ? "graded" : "lit", scene_textures[0].address, completed);
     }
 
     void ResolveBloom(const PPCContext& ctx, uint8_t* base) {
@@ -1069,7 +1072,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         scene_copies = 0;
         scene_tiles_retired = false;
         color_graded = false;
-        grade_resolved = false;
+        scene_color_needs_resolve = false;
         scene_composited = false;
         composition_resolved = false;
         bloom_draws = bloom_copies = 0;

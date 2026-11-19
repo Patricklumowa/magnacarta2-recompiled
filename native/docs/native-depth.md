@@ -629,6 +629,11 @@ With the separate shader banks loaded, a live run completed all 65 additive
 draws before the fullscreen resolve. This included seven-texture draws of
 14,556 and 8,472 indices.
 
+The fullscreen resolve now publishes the lit HDR image into the scene
+texture using the same exponent as the grade and composition passes. This
+feeds subsequent passes from the updated color data. The live run completed
+that copy and reached the next resolve at `0x827B3560`.
+
 ## Scene presentation
 
 The display resolve validates a full, same-size RGBA8 source and destination.
