@@ -193,6 +193,20 @@ SceneSurface ReadBloomColorSurface(const DeviceState& state, uint8_t* base) {
     return surface;
 }
 
+void ReadDepthTransform(DepthDraw& draw, const DeviceState& state, const SceneSurface& surface) {
+    draw.vertex_constants=NativeVertexBytes(std::span(state.bytes).subspan(1920,4096),2);
+    draw.shared_constants.resize(512);
+    const float half_pixel[] = {1.0f/surface.width,-1.0f/surface.height};
+    std::memcpy(draw.shared_constants.data()+264,half_pixel,sizeof(half_pixel));
+    const float x_scale = state.Float(10504), y_scale = state.Float(10512);
+    const float x = state.Float(10508) - x_scale, y = state.Float(10516) + y_scale;
+    Require(x_scale == float(surface.width) / 2 && y_scale == -float(surface.height) / 2 &&
+            std::abs(x) <= 0.5f && std::abs(y) <= 0.5f && state.Float(10520) == -1 && state.Float(10524) == 1,
+            "Native scene cached viewport transform differs");
+    draw.viewport=plume::RenderViewport(x,y,float(surface.width),float(surface.height),1,0);
+    draw.scissor=plume::RenderRect(0,0,surface.width,surface.height);
+}
+
 DepthDraw ReadGeometry(const PPCContext& ctx, uint8_t* base, const DeviceState& state,
                        const SceneSurface& surface, const SceneVertexShader& shader) {
     Require(ctx.r4.u32 == 4 && state.Word(11824) == 0,
@@ -221,17 +235,7 @@ DepthDraw ReadGeometry(const PPCContext& ctx, uint8_t* base, const DeviceState& 
     draw.indices.resize(raw.size()/4);
     for (size_t i=0;i<draw.indices.size();++i) draw.indices[i]=LoadBE32(raw.data()+i*4);
     draw.first_index=ctx.r5.u32; draw.index_count=ctx.r6.u32;
-    draw.vertex_constants=NativeVertexBytes(std::span(state.bytes).subspan(1920,4096),2);
-    draw.shared_constants.resize(512);
-    const float half_pixel[] = {1.0f/surface.width,-1.0f/surface.height};
-    std::memcpy(draw.shared_constants.data()+264,half_pixel,sizeof(half_pixel));
-    const float x_scale = state.Float(10504), y_scale = state.Float(10512);
-    const float x = state.Float(10508) - x_scale, y = state.Float(10516) + y_scale;
-    Require(x_scale == float(surface.width) / 2 && y_scale == -float(surface.height) / 2 &&
-            std::abs(x) <= 0.5f && std::abs(y) <= 0.5f && state.Float(10520) == -1 && state.Float(10524) == 1,
-            "Native scene cached viewport transform differs");
-    draw.viewport=plume::RenderViewport(x,y,float(surface.width),float(surface.height),1,0);
-    draw.scissor=plume::RenderRect(0,0,surface.width,surface.height);
+    ReadDepthTransform(draw, state, surface);
     return draw;
 }
 }
@@ -240,6 +244,12 @@ SceneVertexShader LoadDepthShaders(const std::filesystem::path& directory) {
     auto shader = LoadVertexShader(directory);
     const std::vector<VertexInput> expected = {{0,0,95,40,0,4,true}, {10,0,95,40,0,3}, {5,0,95,40,24,2}};
     Require(shader.inputs == expected, "Scene depth shader input layout differs from the verified shader");
+    return shader;
+}
+SceneVertexShader LoadOcclusionShader(const std::filesystem::path& directory) {
+    auto shader = LoadVertexShader(directory);
+    const std::vector<VertexInput> expected = {{0,0,95,12,0,3}};
+    Require(shader.inputs == expected, "Occlusion shader does not use the verified float3 input");
     return shader;
 }
 SceneColorShaders LoadColorShaders(const std::filesystem::path& directory) {
@@ -311,6 +321,35 @@ SceneDepthDraw ReadSceneDepthDraw(const PPCContext& ctx, uint8_t* base, const Sc
     state.FullViewport(surface);
     Require(state.Word(12700) == 0, "Native depth pass has a bound pixel shader");
     return {surface, ReadGeometry(ctx, base, state, surface, shader)};
+}
+SceneDepthDraw ReadOcclusionDraw(const PPCContext& ctx, uint8_t* base, const SceneVertexShader& shader) {
+    Require(ctx.r4.u32 == 4 && ctx.r5.u32 == 0 && ctx.r6.u32 == 8 && ctx.r7.u32 == 36 &&
+            ctx.r8.u32 == 1 && ctx.r9.u32 == 12, "Unsupported occlusion box geometry");
+    const DeviceState state(base, ctx.r3.u32);
+    state.NoColorAttachments();
+    SceneDepthDraw pass;
+    pass.surface = state.DepthSurface(base, 720);
+    state.FullViewport(pass.surface);
+    Require(state.Word(10452) == 0 && state.Word(10460) == 0 && state.Word(10548) == 0x00700762 &&
+            state.Word(10564) == 0x80000 && state.Word(10568) == 0x18002 && state.Word(10572) == 0x43f &&
+            state.Float(12672) == 1 && state.Float(12676) == 0 && state.Word(11824) == 0 &&
+            (state.bytes[10940] & 0x30) == 0 && state.Word(12724) == 0 && state.Word(12716) == UINT32_MAX,
+            "Occlusion box needs the verified untiled, read-only depth state");
+    Require(state.Word(12700) == 0 && ReadBoundShader(base, state.Word(12704), true) == shader.reference,
+            "Untranslated occlusion shaders");
+    ReadDepthTransform(pass.draw, state, pass.surface);
+    return pass;
+}
+
+void ReadOcclusionVertices(DepthDraw& draw, uint8_t* base, uint32_t vertices, uint32_t indices) {
+    std::vector<uint8_t> vertex_data, index_data;
+    Require(ReadGuest(base, vertices, 8 * 12, vertex_data) && ReadGuest(base, indices, 36 * 2, index_data),
+            "Unreadable occlusion box vertices or indices");
+    draw.vertices = NativeVertexBytes(vertex_data, 2);
+    draw.indices.resize(36);
+    for (size_t i = 0; i < draw.indices.size(); ++i)
+        draw.indices[i] = (uint32_t(index_data[i * 2]) << 8) | index_data[i * 2 + 1];
+    draw.index_count = uint32_t(draw.indices.size());
 }
 SceneColorDraw ReadSceneColorDraw(const PPCContext& ctx, uint8_t* base, const SceneColorShaders& shaders) {
     DeviceState state(base, ctx.r3.u32);

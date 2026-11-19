@@ -141,6 +141,19 @@ int main(int argc, char** argv) try {
         std::cout << "PASS: sample-zero resolve rejected the diagonal's sample-one coverage\n";
     }
     std::cout << "PASS: mini-fetch layout, byte order, indexed range, reversed/ordinary depth, retained target, scissor, two-sample coverage, partial clears, rejection and shared native queue; debug_layer=" << gpu->debug_enabled << '\n';
+    DepthRenderer queried(config, gpu);
+    auto query_config = config;
+    query_config.write = false;
+    auto query_draw = draw;
+    query_draw.indices[5] = 2;
+    query_draw.index_count = 6;
+    queried.Clear(.8f);
+    Check(queried.CountPassingSamples(query_config, query_draw) == 0, "Occluded quad counted visible samples");
+    for (const float z : {.125f, .15f}) {
+        for (size_t i = 0; i < 4; ++i) std::memcpy(query_draw.vertices.data() + i * 40 + 8, &z, 4);
+        Check(queried.CountPassingSamples(query_config, query_draw) == 32, "Occlusion count or retained depth differs");
+    }
+    std::cout << "PASS: two-sample occlusion counts and no depth writes\n";
     if (argc >= 5) {
         const std::filesystem::path capture(argv[3]);
         auto device = Read(capture / "device.bin");

@@ -15,6 +15,7 @@ struct DepthConfiguration {
     plume::RenderComparisonFunction comparison = plume::RenderComparisonFunction::GREATER_EQUAL;
     plume::RenderCullMode cull = plume::RenderCullMode::NONE;
     bool write = true, clip = true;
+    bool operator==(const DepthConfiguration&) const = default;
 };
 struct DepthDraw {
     std::vector<uint8_t> vertices, vertex_constants, shared_constants;
@@ -40,6 +41,7 @@ class DepthRenderer {
     // MSAA diagnostic readback resolves the greatest depth value per pixel.
     // This does not implement the game's surface resolve/copy contract.
     DepthResult Render(const DepthDraw& draw, bool read_pixels = false);
+    uint64_t CountPassingSamples(const DepthConfiguration& configuration, const DepthDraw& draw);
     // Export sample zero as decoded 20e4 values and clear that depth region.
     uint64_t ResolveAndClear(const plume::RenderRect& rectangle);
     std::vector<float> ReadResolvedPixels();

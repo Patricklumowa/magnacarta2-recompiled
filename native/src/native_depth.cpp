@@ -2,6 +2,8 @@
 #include "native_color_target.h"
 #include "native_sampled_texture.h"
 #include "native_tile_resolve.h"
+#include <plume_d3d12.h>
+#include <wrl/client.h>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -203,6 +205,22 @@ struct IndexedPipeline {
 }
 
 struct DepthRenderer::Impl {
+    struct SampleCounter {
+        DepthConfiguration configuration;
+        IndexedPipeline pipeline;
+        Microsoft::WRL::ComPtr<ID3D12QueryHeap> heap;
+        std::unique_ptr<RenderBuffer> result;
+
+        SampleCounter(const DepthConfiguration& config, NativeDevice& gpu)
+            : configuration(config), pipeline(config, &gpu),
+              result(gpu.device->createBuffer(RenderBufferDesc::ReadbackBuffer(sizeof(uint64_t)))) {
+            const D3D12_QUERY_HEAP_DESC desc{D3D12_QUERY_HEAP_TYPE_OCCLUSION, 1, 0};
+            auto* device = static_cast<D3D12Device*>(gpu.device.get())->d3d;
+            Require(result && SUCCEEDED(device->CreateQueryHeap(&desc, IID_PPV_ARGS(&heap))),
+                    "Native occlusion query allocation failed");
+        }
+    };
+
     uint32_t width, height, samples;
     std::shared_ptr<NativeDevice> gpu;
     IndexedPipeline draw_pipeline;
@@ -211,6 +229,7 @@ struct DepthRenderer::Impl {
     std::unique_ptr<RenderFramebuffer> framebuffer;
     std::unique_ptr<RenderBuffer> readback;
     std::unique_ptr<TileResolve> tile_resolve;
+    std::unique_ptr<SampleCounter> sample_counter;
     bool initialized = false;
 
     Impl(const DepthConfiguration& c, std::shared_ptr<NativeDevice> context, std::span<const uint8_t> resolve_shader)
@@ -335,6 +354,34 @@ struct DepthRenderer::Impl {
         if (read_pixels) result.pixels = MappedDepth(width, height);
         return result;
     }
+
+    uint64_t CountPassingSamples(const DepthConfiguration& config, const DepthDraw& draw) {
+        Require(initialized && !config.write && config.width == width && config.height == height &&
+                config.sample_count == samples, "Occlusion query requires the initialized depth surface without writes");
+        if (!sample_counter) sample_counter = std::make_unique<SampleCounter>(config, *gpu);
+        auto& query = *sample_counter;
+        Require(query.configuration == config, "Native occlusion pipeline state changed");
+        query.pipeline.Prepare(draw);
+        auto& commands = gpu->commands;
+        auto* command_list = static_cast<D3D12CommandList*>(commands.get())->d3d;
+        auto* buffer = static_cast<D3D12Buffer*>(query.result.get())->d3d;
+        commands->begin();
+        commands->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(target.get(), RenderTextureLayout::DEPTH_WRITE));
+        commands->setFramebuffer(framebuffer.get());
+        command_list->BeginQuery(query.heap.Get(), D3D12_QUERY_TYPE_OCCLUSION, 0);
+        query.pipeline.Record(draw);
+        command_list->EndQuery(query.heap.Get(), D3D12_QUERY_TYPE_OCCLUSION, 0);
+        command_list->ResolveQueryData(query.heap.Get(), D3D12_QUERY_TYPE_OCCLUSION, 0, 1, buffer, 0);
+        commands->end();
+        gpu->queue->executeCommandLists(commands.get(), gpu->fence.get());
+        gpu->Complete();
+        const auto* mapped = query.result->map();
+        Require(mapped != nullptr, "Native occlusion query result could not be mapped");
+        uint64_t count;
+        std::memcpy(&count, mapped, sizeof(count));
+        query.result->unmap();
+        return count;
+    }
 };
 DepthRenderer::DepthRenderer(const DepthConfiguration& configuration, std::shared_ptr<NativeDevice> device,
                              std::span<const uint8_t> resolve_shader)
@@ -342,6 +389,9 @@ DepthRenderer::DepthRenderer(const DepthConfiguration& configuration, std::share
 DepthRenderer::~DepthRenderer() = default;
 void DepthRenderer::Clear(float depth, const RenderRect* rectangle) { impl_->Clear(depth, rectangle); }
 DepthResult DepthRenderer::Render(const DepthDraw& draw, bool read_pixels) { return impl_->Render(draw, read_pixels); }
+uint64_t DepthRenderer::CountPassingSamples(const DepthConfiguration& config, const DepthDraw& draw) {
+    return impl_->CountPassingSamples(config, draw);
+}
 uint64_t DepthRenderer::ResolveAndClear(const RenderRect& rectangle) { return impl_->ResolveAndClear(rectangle); }
 std::vector<float> DepthRenderer::ReadResolvedPixels() { return impl_->ReadResolvedPixels(); }
 

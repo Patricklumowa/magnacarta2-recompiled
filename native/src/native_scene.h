@@ -90,12 +90,15 @@ struct SceneTileResolve {
     bool copy_depth = false;
 };
 SceneVertexShader LoadDepthShaders(const std::filesystem::path& directory);
+SceneVertexShader LoadOcclusionShader(const std::filesystem::path& directory);
 SceneColorShaders LoadColorShaders(const std::filesystem::path& directory);
 DepthConfiguration ConfigureDepth(const SceneSurface& surface, const SceneVertexShader& shader);
 DepthClear ReadDepthClear(const PPCContext& context, uint8_t* base);
 SceneSurface ReadPostprocessDepthStencilClear(const PPCContext& context, uint8_t* base);
 SceneColorClear ReadSceneColorClear(const PPCContext& context, uint8_t* base);
 SceneDepthDraw ReadSceneDepthDraw(const PPCContext& context, uint8_t* base, const SceneVertexShader& shader);
+SceneDepthDraw ReadOcclusionDraw(const PPCContext& context, uint8_t* base, const SceneVertexShader& shader);
+void ReadOcclusionVertices(DepthDraw& draw, uint8_t* base, uint32_t vertices, uint32_t indices);
 SceneColorDraw ReadSceneColorDraw(const PPCContext& context, uint8_t* base, const SceneColorShaders& shaders);
 bool SameScenePositionInputs(const DepthDraw& depth, const DepthDraw& color);
 SceneTileResolve ReadSceneTileResolve(const PPCContext& context, uint8_t* base);

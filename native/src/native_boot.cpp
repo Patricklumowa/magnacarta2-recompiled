@@ -14,6 +14,7 @@
 #include <rex/hook.h>
 #include <atomic>
 #include <algorithm>
+#include <cstring>
 #include <list>
 #include <mutex>
 #include <optional>
@@ -104,6 +105,28 @@ struct PendingDepthRestore {
     SceneDepthRestore scene;
     uint32_t vertices, endpoint;
 };
+struct PendingOcclusionDraw {
+    DepthDraw draw;
+    uint32_t vertices, indices, endpoint;
+};
+
+using OcclusionReports = std::array<uint32_t, 16>;
+
+uint8_t* OcclusionReportMemory(uint8_t* base, uint32_t allocation) {
+    // Match the CPU's report getter, which reads through the C0000000
+    // physical alias. The two 32-byte records hold end and begin counts.
+    const uint32_t page_offset = ((allocation & 0xfffu) + 0x200u) & 0x1000u;
+    const uint32_t address = 0xc0000000u + (allocation & 0x1fffffffu) + page_offset;
+    Require(allocation && !(allocation & 31) && address < 0xe0000000u &&
+            mc2::capture::GuestRange(address, sizeof(OcclusionReports)), "Invalid occlusion report address");
+    auto* destination = rex::memory::GuestPtr(base, address);
+    MEMORY_BASIC_INFORMATION region{};
+    Require(VirtualQuery(destination, &region, sizeof(region)) && region.State == MEM_COMMIT &&
+            (region.Protect & PAGE_READWRITE) && !(region.Protect & PAGE_GUARD) &&
+            region.RegionSize - (uintptr_t(destination) - uintptr_t(region.BaseAddress)) >= sizeof(OcclusionReports),
+            "Occlusion report storage is not writable");
+    return destination;
+}
 enum class SceneQuadPass { HdrCopy, Bloom, Composition, BackBuffer, Overlay };
 struct PendingUpDraw {
     SceneFullscreenDraw scene;
@@ -143,6 +166,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     size_t scene_texture_cache_bytes = 0;
     uint32_t scene_texture_hits = 0, scene_texture_uploads = 0;
     std::optional<SceneVertexShader> depth_shaders;
+    std::optional<SceneVertexShader> occlusion_shader;
     std::optional<SceneColorShaders> color_shaders;
     std::optional<ScenePassShaders> depth_restore_shaders;
     std::optional<ScenePassShaders> fullscreen_shaders, color_grade_shaders;
@@ -159,6 +183,8 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     std::unique_ptr<plume::RenderTexture> stencil_target;
     std::unique_ptr<plume::RenderFramebuffer> stencil_framebuffer;
     std::optional<PendingDepthRestore> pending_restore;
+    std::optional<PendingOcclusionDraw> pending_occlusion;
+    uint32_t occlusion_query = 0;
     bool depth_restored = false;
     std::optional<PendingUpDraw> pending_up;
     std::optional<PendingMenuFan> pending_menu_fan;
@@ -200,6 +226,8 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         if (!color_directory.empty()) {
             Require(bool(depth_shaders), "Native color shaders require the verified depth shader directory");
             color_shaders = LoadColorShaders(color_directory);
+            const auto occlusion_directory = std::filesystem::path(color_directory) / "occlusion";
+            if (std::filesystem::is_directory(occlusion_directory)) occlusion_shader = LoadOcclusionShader(occlusion_directory);
             const auto restore_directory = std::filesystem::path(color_directory) / "depth-restore";
             if (std::filesystem::is_directory(restore_directory)) depth_restore_shaders = LoadDepthRestoreShaders(restore_directory);
             const auto fullscreen_directory = std::filesystem::path(color_directory) / "fullscreen";
@@ -259,6 +287,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     void Shutdown() override {
         std::lock_guard lock(mutex);
         prepass_draw.reset(); scene_draw.reset(); pending_restore.reset();
+        pending_occlusion.reset(); occlusion_query = 0;
         quad_renderers.clear();
         scene_textures_cached.clear();
         scene_texture_cache_bytes = 0;
@@ -624,6 +653,73 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         pending_up = PendingUpDraw{std::move(scene), vertices, indices, endpoint, pass, std::move(overlay)};
     }
 
+    void BeginOcclusionDraw(PPCContext& ctx, uint8_t* base) {
+        const auto device = ctx.r3.u32;
+        SceneDepthDraw scene;
+        {
+            std::lock_guard lock(mutex);
+            Require(device && device == guest_device && occlusion_query && occlusion_shader && depth_surface &&
+                    !pending_occlusion && !pending_restore && !pending_up && !pending_menu_fan && !color_surface,
+                    "Occlusion draw requires the open query and native depth surface");
+            scene = ReadOcclusionDraw(ctx, base, *occlusion_shader);
+            Require(scene.surface == *depth_surface, "Occlusion draw uses another depth surface");
+        }
+        const uint32_t vertex_out = REX_LOAD_U32(ctx.r1.u32 + 84), index_out = ctx.r10.u32;
+        __imp__sub_82864D88(ctx, base);
+        // Leave the original allocation failure code available for its retry.
+        if (ctx.r3.u32) return;
+        const uint32_t vertices = REX_LOAD_U32(vertex_out), indices = REX_LOAD_U32(index_out);
+        const uint32_t endpoint = REX_LOAD_U32(device + 13444);
+        Require(vertices && indices && endpoint && !(vertices & 15) && !(indices & 3) && !(endpoint & 3),
+                "Invalid native occlusion staging addresses");
+        std::lock_guard lock(mutex);
+        pending_occlusion = PendingOcclusionDraw{std::move(scene.draw), vertices, indices, endpoint};
+    }
+
+    void IssueOcclusion(PPCContext& ctx, uint8_t* base, bool begin) {
+        const uint32_t query = ctx.r3.u32;
+        std::vector<uint8_t> state;
+        Require(ctx.r4.u32 == (begin ? 2u : 1u) && mc2::capture::ReadGuest(base, query, 156, state) &&
+                mc2::capture::LoadBE32(state.data()) == guest_device && mc2::capture::LoadBE32(state.data() + 4) == 9,
+                "Unexpected guest occlusion query object");
+        if (begin) {
+            __imp__sub_8237D5F0(ctx, base);
+            std::lock_guard lock(mutex);
+            Require(!occlusion_query && depth_surface && occlusion_shader && REX_LOAD_U32(query + 148) == 1,
+                    "Occlusion begin requires a single untiled report and translated shader");
+            occlusion_query = query;
+            return;
+        }
+
+        uint64_t samples = 0;
+        {
+            std::lock_guard lock(mutex);
+            Require(occlusion_query == query && REX_LOAD_U32(query + 148) == 1 && depth_surface,
+                    "Occlusion end differs from the active query");
+            if (pending_occlusion) {
+                auto& up = *pending_occlusion;
+                Require(REX_LOAD_U32(guest_device + 48) == up.endpoint, "Guest did not commit the occlusion geometry");
+                ReadOcclusionVertices(up.draw, base, up.vertices, up.indices);
+                auto configuration = ConfigureDepth(*depth_surface, *occlusion_shader);
+                configuration.write = false;
+                samples = depth_renderer->CountPassingSamples(configuration, up.draw);
+                completed = gpu->completed;
+                pending_occlusion.reset();
+            }
+            occlusion_query = 0;
+        }
+
+        auto* destination = OcclusionReportMemory(base, REX_LOAD_U32(query + 28));
+        __imp__sub_8237D5F0(ctx, base);
+        // The guest routines handle readiness, end-minus-begin and query reuse.
+        // Publish the real passing count after the guest arms its end report.
+        OcclusionReports reports{};
+        reports[0] = reports[4] = uint32_t(std::min<uint64_t>(samples, UINT32_MAX));
+        std::memcpy(destination, reports.data(), sizeof(reports));
+        if (REXCVAR_GET(mc2_scene_resolve_trace))
+            REXLOG_INFO("MC2 native scene: occlusion query returned {} passing samples", samples);
+    }
+
     template <class Texture>
     std::shared_ptr<const SampledTexture> SceneTextureFor(uint8_t* base, const Texture& description) {
         auto source = [&] {
@@ -863,7 +959,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         std::lock_guard lock(mutex);
         if (!scanout_texture) return;
         Require(ctx.lr == 0x8248B7BC && ctx.r3.u32 == guest_device && ctx.r4.u32 == scanout_texture && !ctx.r5.u32 &&
-                !pending && !pending_restore && !pending_up && !pending_menu_fan && !retiring_tiles &&
+                !pending && !pending_restore && !pending_up && !pending_menu_fan && !occlusion_query && !retiring_tiles &&
                 renderer && window && !present_vertex_shader.empty() && !present_pixel_shader.empty(),
                 "Scene swap requires the resolved back buffer, window and presentation shaders");
         renderer->SetWindow(window);
@@ -969,7 +1065,8 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     void Flush(uint8_t* base, uint32_t device) {
         std::lock_guard lock(mutex);
         Require(device != 0 && device == guest_device, "Native operation used an unknown device");
-        Require(!pending_restore && !pending_up && !pending_menu_fan, "Legacy staging flushed during a pending native user-memory draw");
+        Require(!pending_restore && !pending_up && !pending_menu_fan && !pending_occlusion,
+                "Legacy staging flushed during a pending native user-memory draw");
         if (pending) {
             Require(window && IsWindow(window), "Native game window is unavailable");
             auto& movie_renderer = MovieRenderer(pending->draw);
@@ -1204,6 +1301,17 @@ REX_HOOK_RAW(sub_828648A8) {
 }
 REX_HOOK_RAW(sub_82864D88) {
     if (!NativeBootActive()) { __imp__sub_82864D88(ctx, base); return; }
-    try { Graphics().BeginIndexedUp(ctx, base); }
+    try {
+        if (ctx.lr == 0x826D9B00 || ctx.lr == 0x826D9BA0) Graphics().BeginOcclusionDraw(ctx, base);
+        else Graphics().BeginIndexedUp(ctx, base);
+    }
+    catch (const std::exception& error) { UnsupportedNativeOperation(error.what(), ctx); }
+}
+REX_HOOK_RAW(sub_8237D5F0) {
+    if (!NativeBootActive() || (ctx.lr != 0x8247FE10 && ctx.lr != 0x82480008)) {
+        __imp__sub_8237D5F0(ctx, base);
+        return;
+    }
+    try { Graphics().IssueOcclusion(ctx, base, ctx.lr == 0x8247FE10); }
     catch (const std::exception& error) { UnsupportedNativeOperation(error.what(), ctx); }
 }
