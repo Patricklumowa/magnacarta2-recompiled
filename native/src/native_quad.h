@@ -43,6 +43,7 @@ class QuadRenderer {
     QuadRenderer(const QuadRenderer&) = delete;
     QuadRenderer& operator=(const QuadRenderer&) = delete;
     QuadResult Render(const QuadDraw& draw);
+    uint64_t RenderInto(const QuadDraw& draw, ColorTarget& color);
     // The caller owns the HWND and its message loop. Null detaches it.
     void SetWindow(plume::RenderWindow window);
     // Draw directly at the window's current resolution, preserving aspect.

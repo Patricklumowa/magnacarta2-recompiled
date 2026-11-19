@@ -329,7 +329,7 @@ struct QuadRenderer::Impl {
     }
 
     QuadResult Draw(const QuadDraw& draw, RenderTexture* outputTarget, RenderFramebuffer* outputFramebuffer,
-                    RenderBuffer* outputReadback, bool present, uint32_t backbufferIndex) {
+                    RenderBuffer* outputReadback, bool present, uint32_t backbufferIndex, bool clear_target = true) {
         // The prior Render returned only after its real GPU fence. These
         // persistent uploads and command allocator are now safe to reuse.
         std::memcpy(vertexBuffer->map(), draw.vertices.data(), draw.vertices.size());
@@ -358,7 +358,8 @@ struct QuadRenderer::Impl {
         commands->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(outputTarget, RenderTextureLayout::COLOR_WRITE));
         commands->setFramebuffer(outputFramebuffer);
         commands->setScissors(RenderRect(0, 0, width, height));
-        commands->clearColor(0, present ? RenderColor(0, 0, 0, 1) : RenderColor(1, 0, 1, 1));
+        if (clear_target)
+            commands->clearColor(0, present ? RenderColor(0, 0, 0, 1) : RenderColor(1, 0, 1, 1));
         commands->setViewports(AspectViewport(draw.width, draw.height, width, height));
         commands->setGraphicsPipelineLayout(layout.get());
         commands->setPipeline(pipeline.get());
@@ -416,6 +417,19 @@ QuadRenderer::QuadRenderer(const QuadDraw& configuration, std::shared_ptr<Native
     : impl_(std::make_unique<Impl>(configuration, std::move(device))) {}
 QuadRenderer::~QuadRenderer() = default;
 QuadResult QuadRenderer::Render(const QuadDraw& draw) { return impl_->Render(draw); }
+uint64_t QuadRenderer::RenderInto(const QuadDraw& draw, ColorTarget& color) {
+    impl_->ValidateConfiguration(draw);
+    Require(color.Format() == draw.target_format, "Native movie and back-buffer formats differ");
+    auto* texture = color.Attachment(*impl_->gpu, draw.width, draw.height, 1);
+    const RenderTexture* attachment = texture;
+    RenderFramebufferDesc desc;
+    desc.colorAttachments = &attachment;
+    desc.colorAttachmentsCount = 1;
+    auto framebuffer = impl_->device->createFramebuffer(desc);
+    Require(bool(framebuffer), "Native movie framebuffer allocation failed");
+    color.Clear(RenderColor(0, 0, 0, 1));
+    return impl_->Draw(draw, texture, framebuffer.get(), nullptr, false, 0, false).completed_submission;
+}
 void QuadRenderer::SetWindow(RenderWindow window) { impl_->SetWindow(window); }
 QuadResult QuadRenderer::Present(const QuadDraw& draw, bool vsync, bool read_pixels) {
     return impl_->Present(draw, vsync, read_pixels);

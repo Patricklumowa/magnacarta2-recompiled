@@ -115,6 +115,10 @@ struct PendingMenuFan {
     SceneMenuFan scene;
     uint32_t vertices, endpoint;
 };
+struct PendingMovieDraw {
+    QuadDraw draw;
+    uint32_t target;
+};
 struct QuadSamplerState {
     float max_lod;
     plume::RenderTextureAddressMode address_u, address_v;
@@ -179,7 +183,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     bool scene_tiles_retired = false;
     uint64_t depth_draws = 0;
     uint64_t scene_frames = 0;
-    std::optional<QuadDraw> pending;
+    std::optional<PendingMovieDraw> pending;
     HWND window = nullptr;
     uint64_t completed = 0;
     uint32_t guest_device = 0;
@@ -554,9 +558,26 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         SceneQuadPass pass;
         {
             std::lock_guard lock(mutex);
-            Require(device && device == guest_device && depth_restored && !pending_up && !pending_menu_fan && !scanout_texture,
+            Require(device && device == guest_device && !pending_up && !pending_menu_fan && !scanout_texture,
                     "Unexpected native indexed user-memory draw");
-            if (!fullscreen_surface) {
+            if (!depth_restored) {
+                Require(!depth_surface && (pending || back_buffer_surface) && overlay_shaders,
+                        "Early indexed overlay needs a native movie back buffer");
+                pass = SceneQuadPass::Overlay;
+                scene = ReadBackBufferOverlay(ctx, base, *overlay_shaders, overlay.emplace());
+                if (pending) {
+                    Require(!back_buffer_surface && pending->target == scene.surface.address &&
+                            pending->draw.width == scene.surface.width && pending->draw.height == scene.surface.height,
+                            "Movie and loading overlay use different back buffers");
+                    auto& movie_renderer = MovieRenderer(pending->draw);
+                    EnsureBackBuffer(scene.surface);
+                    completed = movie_renderer.RenderInto(pending->draw, *back_buffer);
+                    pending.reset();
+                    back_buffer_surface = scene.surface;
+                    REXLOG_INFO("MC2 native scene: drew movie into the loading back buffer, completed={}", completed);
+                }
+                Require(*back_buffer_surface == scene.surface, "Loading overlay target differs from the back buffer");
+            } else if (!fullscreen_surface) {
                 pass = SceneQuadPass::HdrCopy;
                 Require(bool(fullscreen_shaders), "Indexed begin-UP draw requires the first fullscreen HDR shaders");
                 scene = ReadSceneFullscreenDraw(ctx, base, *fullscreen_shaders, scene_textures[0], false);
@@ -739,11 +760,8 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             scene_composited = true;
             REXLOG_INFO("MC2 native scene: composed fullscreen depth of field and bloom, completed={}", completed);
         } else if (up.pass == SceneQuadPass::BackBuffer) {
-            using namespace plume;
-            if (!back_buffer)
-                back_buffer = std::make_unique<ColorTarget>(surface.width, surface.height, surface.samples, gpu,
-                    std::span<const uint8_t>{}, RenderFormat::R8G8B8A8_UNORM);
-            back_buffer->Clear(RenderColor(0,0,0,1));
+            EnsureBackBuffer(surface);
+            back_buffer->Clear(plume::RenderColor(0,0,0,1));
             auto& renderer = QuadRendererFor(surface, *back_buffer_shaders, std::span(&sampler,1), *back_buffer);
             completed = renderer.RenderResolved(up.scene.draw, up.scene.pixel_constants, *color_target);
             back_buffer_surface = surface;
@@ -766,6 +784,12 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             REXLOG_INFO("MC2 native scene: fullscreen HDR copy, completed={}", completed);
         }
         pending_up.reset();
+    }
+
+    void EnsureBackBuffer(const SceneSurface& surface) {
+        if (!back_buffer)
+            back_buffer = std::make_unique<ColorTarget>(surface.width, surface.height, surface.samples, gpu,
+                std::span<const uint8_t>{}, plume::RenderFormat::R8G8B8A8_UNORM);
     }
 
     void DrawColorGrade(const PPCContext& ctx, uint8_t* base) {
@@ -824,6 +848,11 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         // attachment until Swap consumes it. No guest texture upload is needed.
         scanout_texture = ReadScanoutResolve(ctx, base, *back_buffer_surface);
         REXLOG_INFO("MC2 native scene: ready for display resolve to guest texture {:#x}", scanout_texture);
+    }
+
+    bool HasBackBuffer() {
+        std::lock_guard lock(mutex);
+        return bool(back_buffer_surface);
     }
 
     void PresentScene(const PPCContext& ctx) {
@@ -925,18 +954,23 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         }
     }
 
+    QuadRenderer& MovieRenderer(const QuadDraw& draw) {
+        if (!renderer) {
+            if (!gpu) gpu = std::make_shared<NativeDevice>();
+            renderer = std::make_unique<QuadRenderer>(draw, gpu);
+        }
+        return *renderer;
+    }
+
     void Flush(uint8_t* base, uint32_t device) {
         std::lock_guard lock(mutex);
         Require(device != 0 && device == guest_device, "Native operation used an unknown device");
         Require(!pending_restore && !pending_up && !pending_menu_fan, "Legacy staging flushed during a pending native user-memory draw");
         if (pending) {
             Require(window && IsWindow(window), "Native game window is unavailable");
-            if (!renderer) {
-                if (!gpu) gpu=std::make_shared<NativeDevice>();
-                renderer = std::make_unique<QuadRenderer>(*pending,gpu);
-                renderer->SetWindow(window);
-            }
-            const auto result = renderer->Present(*pending, REXCVAR_QUERY(std::string, mc2_framerate) != "unlocked");
+            auto& movie_renderer = MovieRenderer(pending->draw);
+            movie_renderer.SetWindow(window);
+            const auto result = movie_renderer.Present(pending->draw, REXCVAR_QUERY(std::string, mc2_framerate) != "unlocked");
             completed = result.completed_submission;
             pending.reset();
             if (completed == 1 || (completed && completed % 120 == 0))
@@ -1014,9 +1048,10 @@ void SetNativeBootWindow(void* window) {
 void QueueNativeMovie(const PPCContext& ctx, uint8_t* base) {
     auto& system = Graphics();
     std::lock_guard lock(system.mutex);
-    Require(!system.pending, "Native movie backend cannot compose multiple draws yet");
+    Require(!system.pending && !system.back_buffer_surface, "Native movie backend cannot start a second draw");
     try {
-        system.pending = ReadMovieDraw(ctx, base, system.shaders).draw;
+        auto movie = ReadMovieDraw(ctx, base, system.shaders);
+        system.pending = PendingMovieDraw{std::move(movie.draw), mc2::capture::LoadBE32(movie.device.data() + 12448)};
     } catch (const std::exception& error) {
         UnsupportedNativeOperation(error.what(), ctx);
     }
@@ -1083,7 +1118,7 @@ REX_HOOK_RAW(sub_8238AD80) {
 }
 REX_HOOK_RAW(sub_823893A0) {
     if (REXCVAR_GET(mc2_scene_resolve_trace)) TraceSceneResolve(ctx, base);
-    if (NativeBootActive() && Graphics().HasColorDraw()) {
+    if (NativeBootActive() && (Graphics().HasColorDraw() || (ctx.lr == 0x8248B7AC && Graphics().HasBackBuffer()))) {
         try {
             if (ctx.lr == 0x827B3694 && ctx.r4.u32 == 0) Graphics().ResolveBloom(ctx, base);
             else if (ctx.lr == 0x827B3694) Graphics().ResolveFullscreen(ctx, base);

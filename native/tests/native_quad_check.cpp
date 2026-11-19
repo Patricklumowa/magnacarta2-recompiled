@@ -1,6 +1,7 @@
 // Requires the locally translated, verified movie VS and flags-zero PS.
 // No game data or shader binaries are distributed with this fixture.
 #include "native_quad.h"
+#include "native_color_target.h"
 #include <array>
 #include <cstring>
 #include <fstream>
@@ -86,7 +87,8 @@ int main(int argc, char** argv) try {
         QuadTexture texture{2, 2, std::vector<uint8_t>(16)};
         Fill(texture, value); draw.textures.push_back(std::move(texture));
     }
-    QuadRenderer renderer(draw, true);
+    auto gpu = std::make_shared<NativeDevice>(true);
+    QuadRenderer renderer(draw, gpu);
     Pixels(renderer.Render(draw), 1, {16,32,48,255});
 
     Fill(draw.textures[0], 91); Fill(draw.textures[1], 129); Fill(draw.textures[2], 203);
@@ -132,7 +134,10 @@ int main(int argc, char** argv) try {
     renderer.SetWindow(window.handle);
     Presented(renderer.Present(draw, false, true), 10, 13, 9);
     renderer.SetWindow(nullptr);
-    std::cout << "PASS: persistent uploads, rejection, ten fenced draws, swapchain resize, letterboxing, zero-size suspension, presentation without readback, and detach/reattach\n";
+    ColorTarget movie_frame(draw.width, draw.height, 1, gpu, {}, draw.target_format);
+    const auto completed = renderer.RenderInto(draw, movie_frame);
+    Pixels({.pixels = movie_frame.ReadRgba8(), .completed_submission = completed}, 12, {155,129,203,64});
+    std::cout << "PASS: persistent uploads, rejection, window presentation, resize, and movie rendering into a shared color target\n";
     return 0;
 } catch (const std::exception& error) {
     std::cerr << "Native quad check: " << error.what() << '\n';

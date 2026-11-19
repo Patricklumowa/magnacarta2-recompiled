@@ -165,7 +165,9 @@ and exercised the three-tap bloom shaders. A later test skipped the movie,
 displayed the animated title screen, and opened the main menu after the
 downloadable content validation dialog. Reclaiming CPU draw staging after
 the native fence kept the allocator available through more than 2,100
-presented scene frames.
+presented scene frames. Selecting New Game reached its opening movie.
+The original subtitle draw now blends over the video in the same native
+back buffer.
 An empty color shader directory setting keeps the depth-only checkpoint.
 
 Other indexed and nonindexed scene draws and raw or indirect GPU submission

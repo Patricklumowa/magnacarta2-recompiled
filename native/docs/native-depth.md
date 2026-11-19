@@ -451,6 +451,13 @@ and index allocation cursors and their byte count after the fence.
 A later run presented 2,132 scene frames and closed cleanly.
 Gameplay performance has yet to be measured on this backend.
 
+The opening movie after New Game combines the queued video quad with the
+original subtitle draw in the native RGBA8 back buffer. The movie and text
+share that target through the normal display resolve and DXGI swap, with no
+pixel readback during playback. The native quad check verifies the movie's
+RGBA output into a shared color target. A live run displayed the original
+subtitles over the opening movie before the timed smoke check closed.
+
 ## Scene presentation
 
 The display resolve validates a full, same-size RGBA8 source and destination.
