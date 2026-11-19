@@ -170,6 +170,35 @@ void CheckFullscreenColor(mc2::native::ColorTarget& source, const mc2::native::S
     Check(colored > 1000 && first[0] == 0, "Fullscreen HDR copy did not sample both scene regions");
     std::cout << "PASS: fullscreen HDR sampling and coverage, colored=" << colored << '\n';
 
+    auto depth_stencil = gpu->device->createTexture(
+        RenderTextureDesc::DepthTarget(surface.width, surface.height, RenderFormat::D32_FLOAT_S8_UINT));
+    Check(bool(depth_stencil), "Additive scene test depth/stencil allocation failed");
+    auto framebuffer = gpu->device->createFramebuffer(RenderFramebufferDesc(nullptr, 0, depth_stencil.get()));
+    Check(bool(framebuffer), "Additive scene test depth/stencil framebuffer failed");
+    config.write = false;
+    config.stencil_comparison = RenderComparisonFunction::EQUAL;
+    ColorRenderer additive(config, shaders.pixel_dxil, std::span(&sampler, 1), target, *depth_stencil, SceneAdditiveBlend());
+    const auto clear_and_blend = [&](float depth, uint8_t stencil) {
+        auto& commands = gpu->commands;
+        commands->begin();
+        commands->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(depth_stencil.get(), RenderTextureLayout::DEPTH_WRITE));
+        commands->setFramebuffer(framebuffer.get());
+        commands->clearDepthStencil(true, true, depth, stencil, nullptr, 0);
+        commands->end();
+        gpu->queue->executeCommandLists(commands.get(), gpu->fence.get());
+        gpu->Complete();
+        additive.RenderResolved(draw, pixel_constants, source);
+        return target.ReadPixels();
+    };
+    Check(clear_and_blend(0, 1) == first, "Nonzero stencil allowed additive HDR writes");
+    Check(clear_and_blend(1, 0) == first, "Nearer depth allowed additive HDR writes");
+    const auto added = clear_and_blend(0, 0);
+    for (size_t i = 0; i < added.size(); i += 4)
+        Check(added[i] == (first[i] ? first[i] + 0x0400 : 0) && added[i + 3] == first[i + 3],
+              "Additive HDR did not double red and preserve destination alpha");
+    copy.RenderResolved(draw, pixel_constants, source);
+    std::cout << "PASS: additive HDR blend respects depth and stencil and preserves alpha\n";
+
     if (!std::filesystem::is_directory(directory / "color-grade")) return;
     const auto grade_shaders = LoadFullscreenColorShaders(directory / "color-grade", true);
     auto grade_blend = RenderBlendDesc::Copy();
@@ -542,7 +571,7 @@ void ReplayColor(const mc2::native::SceneDepthDraw& prepass, const mc2::native::
     std::array<std::unique_ptr<SampledTexture>, 2> textures;
     std::array<const SampledTexture*, 2> bindings;
     for (uint32_t slot = 0; slot < textures.size(); ++slot) {
-        const auto& description = draw.textures[slot];
+        const auto& description = std::get<mc2::texture::BlockTexture>(draw.textures[slot]);
         std::vector<std::vector<uint8_t>> mips(description.mips.size());
         for (uint32_t level = 0; level < mips.size(); ++level) {
             const auto name = "slot-0" + std::to_string(slot) + ".mip-0" + std::to_string(level);
@@ -604,7 +633,8 @@ void ReplayColor(const mc2::native::SceneDepthDraw& prepass, const mc2::native::
     }
     Check(lit_count == covered, "Lit draw coverage differs");
     // Verify that the material responds to the diffuse texture's gamma flag.
-    const uint32_t linear = PackTextureFetchMode(draw.textures[1].swizzle, 0, draw.textures[1].exp_adjust);
+    const auto& diffuse = std::get<mc2::texture::BlockTexture>(draw.textures[1]);
+    const uint32_t linear = PackTextureFetchMode(diffuse.swizzle, 0, diffuse.exp_adjust);
     std::memcpy(draw.draw.shared_constants.data() + 292, &linear, sizeof(linear));
     submit();
     const auto without_gamma = color.ReadPixels();
@@ -832,7 +862,7 @@ int main(int argc,char** argv) try {
             context.r4.u32 = 4; context.r5.u32 = 6; context.r6.u32 = 18;
             const auto scene_bytes = memory;
             const auto color_draw = ReadSceneColorDraw(context, base, color_shaders);
-            Check(memory == scene_bytes && color_draw.color_surface == hdr.surface && color_draw.tile_depth.height == 512 &&
+            Check(memory == scene_bytes && color_draw.color_surface == hdr.surface && color_draw.depth_surface.height == 512 &&
                   SameScenePositionInputs(draw.draw, color_draw.draw),
                   "First color draw did not preserve its captured geometry and attachments");
             auto altered_draw = color_draw.draw;

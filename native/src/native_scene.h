@@ -40,12 +40,12 @@ struct SceneColorClear {
     plume::RenderRect rectangle;
 };
 struct SceneColorDraw {
-    SceneSurface color_surface, tile_depth;
+    SceneSurface color_surface, depth_surface;
     const SceneColorShaders* shaders = nullptr;
     plume::RenderCullMode cull = plume::RenderCullMode::FRONT;
     DepthDraw draw;
     std::vector<uint8_t> pixel_constants;
-    std::array<mc2::texture::BlockTexture, kTiledTextureSlots> textures;
+    std::array<std::variant<mc2::texture::BlockTexture, mc2::texture::BaseRGBA8>, kTiledTextureSlots> textures;
     std::array<plume::RenderSamplerDesc, kTiledTextureSlots> samplers;
 };
 struct SceneResolveTexture {
@@ -95,7 +95,7 @@ struct SceneTileResolve {
 };
 SceneVertexShader LoadDepthShaders(const std::filesystem::path& directory);
 SceneVertexShader LoadOcclusionShader(const std::filesystem::path& directory);
-SceneColorShaders LoadColorShaders(const std::filesystem::path& directory);
+SceneColorShaders LoadColorShaders(const std::filesystem::path& directory, const char* pixel_dxil = "pixel-7e3.dxil");
 DepthConfiguration ConfigureDepth(const SceneSurface& surface, const SceneVertexShader& shader);
 DepthClear ReadDepthClear(const PPCContext& context, uint8_t* base);
 SceneSurface ReadPostprocessDepthStencilClear(const PPCContext& context, uint8_t* base);
@@ -104,7 +104,9 @@ SceneDepthDraw ReadSceneDepthDraw(const PPCContext& context, uint8_t* base, cons
 SceneDepthDraw ReadOcclusionDraw(const PPCContext& context, uint8_t* base, const SceneVertexShader& shader);
 void ReadOcclusionVertices(DepthDraw& draw, uint8_t* base, uint32_t vertices, uint32_t indices);
 SceneColorDraw ReadSceneColorDraw(const PPCContext& context, uint8_t* base, const SceneColorShaders& shaders,
-                                  std::span<const SceneColorShaders> world_shaders = {});
+                                  std::span<const SceneColorShaders> world_shaders = {},
+                                  std::span<const SceneColorShaders> additive_shaders = {});
+plume::RenderBlendDesc SceneAdditiveBlend();
 bool SameScenePositionInputs(const DepthDraw& depth, const DepthDraw& color);
 SceneTileResolve ReadSceneTileResolve(const PPCContext& context, uint8_t* base);
 ScenePassShaders LoadDepthRestoreShaders(const std::filesystem::path& directory);

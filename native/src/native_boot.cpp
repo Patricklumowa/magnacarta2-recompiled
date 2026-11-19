@@ -87,7 +87,7 @@ void RequireFirstTileDepth(const SceneSurface& prepass, const SceneSurface& tile
             "Native first tile depth does not alias the retained prepass");
 }
 
-struct TiledSceneDraw {
+struct IndexedSceneDraw {
     DepthDraw draw;
     std::vector<uint8_t> pixel_constants;
     std::array<std::shared_ptr<const SampledTexture>, kTiledTextureSlots> textures;
@@ -101,11 +101,11 @@ struct TiledSceneDraw {
         return renderer->Render(draw, pixel_constants, std::span(bindings).first(texture_count));
     }
 };
-struct CachedTiledRenderer {
+struct CachedSceneRenderer {
     const SceneColorShaders* shaders;
     std::array<float, kTiledTextureSlots> max_lod;
     plume::RenderCullMode cull;
-    uint32_t cube_slots;
+    uint32_t cube_slots, rgba_slots;
     std::unique_ptr<ColorRenderer> renderer;
 };
 
@@ -176,7 +176,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     std::optional<SceneVertexShader> depth_shaders;
     std::optional<SceneVertexShader> occlusion_shader;
     std::optional<SceneColorShaders> color_shaders;
-    std::vector<SceneColorShaders> world_color_shaders;
+    std::vector<SceneColorShaders> world_color_shaders, additive_color_shaders;
     std::optional<ScenePassShaders> depth_restore_shaders;
     std::optional<ScenePassShaders> fullscreen_shaders, color_grade_shaders;
     std::optional<ScenePassShaders> bloom_shaders, composition_shaders, back_buffer_shaders;
@@ -214,8 +214,8 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     uint32_t scanout_texture = 0;
     plume::RenderRect cleared_tile;
     std::optional<DepthDraw> prepass_draw;
-    std::vector<TiledSceneDraw> scene_draws;
-    std::vector<CachedTiledRenderer> tiled_renderers;
+    std::vector<IndexedSceneDraw> scene_draws;
+    std::vector<CachedSceneRenderer> scene_renderers;
     std::array<SceneResolveTexture, 2> scene_textures;
     uint32_t scene_copies = 0;
     bool retiring_tiles = false;
@@ -242,6 +242,12 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
                 for (const auto& material : std::filesystem::directory_iterator(world_directory))
                     if (material.is_directory() && std::filesystem::is_regular_file(material.path() / "vertex-shader.container"))
                         world_color_shaders.push_back(LoadColorShaders(material.path()));
+            }
+            const auto additive_directory = std::filesystem::path(color_directory) / "world-additive";
+            if (std::filesystem::is_directory(additive_directory)) {
+                for (const auto& material : std::filesystem::directory_iterator(additive_directory))
+                    if (material.is_directory() && std::filesystem::is_regular_file(material.path() / "vertex-shader.container"))
+                        additive_color_shaders.push_back(LoadColorShaders(material.path(), "pixel.dxil"));
             }
             const auto occlusion_directory = std::filesystem::path(color_directory) / "occlusion";
             if (std::filesystem::is_directory(occlusion_directory)) occlusion_shader = LoadOcclusionShader(occlusion_directory);
@@ -303,7 +309,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     bool has_presentation() const override { return true; }
     void Shutdown() override {
         std::lock_guard lock(mutex);
-        prepass_draw.reset(); scene_draws.clear(); tiled_renderers.clear(); pending_restore.reset();
+        prepass_draw.reset(); scene_draws.clear(); scene_renderers.clear(); pending_restore.reset();
         pending_occlusion.reset(); occlusion_query = 0;
         quad_renderers.clear();
         scene_textures_cached.clear();
@@ -441,31 +447,45 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
 
     void DrawColor(const PPCContext& ctx, uint8_t* base) {
         Require(bool(color_shaders), "Indexed color shader directory is not configured");
-        auto snapshot = ReadSceneColorDraw(ctx, base, *color_shaders, world_color_shaders);
+        auto snapshot = ReadSceneColorDraw(ctx, base, *color_shaders, world_color_shaders, additive_color_shaders);
         Flush(base, ctx.r3.u32);
         std::lock_guard lock(mutex);
-        Require(scene_copies == 0 && depth_renderer && color_target && depth_surface &&
-                color_surface && *color_surface == snapshot.color_surface &&
-                cleared_tile == plume::RenderRect(0,0,1280,512), "Native color draw requires cleared depth and color attachments");
-        // The first tile starts at (0,0), with the same depth base, format and
-        // pitch as the full prepass. Keep the lower region of that logical
-        // attachment for the matching opaque draw when the second tile runs.
-        RequireFirstTileDepth(*depth_surface, snapshot.tile_depth);
-        if (scene_draws.empty() && depth_draws != 0)
-            Require(depth_draws == 1 && prepass_draw && SameScenePositionInputs(*prepass_draw, snapshot.draw),
-                    "Tiled scene draw differs from the depth prepass geometry");
-        Require(!tile_depth_surface || *tile_depth_surface == snapshot.tile_depth,
-                "Tiled scene draw changed the depth attachment");
-        TiledSceneDraw draw;
+        const bool tiled = snapshot.color_surface.samples == 2;
+        if (!tiled) {
+            Require(scene_tiles_retired && depth_restored && !color_graded && !bloom_surface && fullscreen_target &&
+                    fullscreen_surface == snapshot.color_surface && stencil_target && stencil_surface == snapshot.depth_surface,
+                    "Additive HDR draw requires the copied color and restored depth/stencil attachments");
+        } else {
+            Require(scene_copies == 0 && depth_renderer && color_target && depth_surface &&
+                    color_surface && *color_surface == snapshot.color_surface &&
+                    cleared_tile == plume::RenderRect(0,0,1280,512), "Native color draw requires cleared depth and color attachments");
+            // Keep the lower region of the full prepass depth attachment for tile two.
+            RequireFirstTileDepth(*depth_surface, snapshot.depth_surface);
+            if (scene_draws.empty() && depth_draws != 0)
+                Require(depth_draws == 1 && prepass_draw && SameScenePositionInputs(*prepass_draw, snapshot.draw),
+                        "Tiled scene draw differs from the depth prepass geometry");
+            Require(!tile_depth_surface || *tile_depth_surface == snapshot.depth_surface,
+                    "Tiled scene draw changed the depth attachment");
+        }
+        IndexedSceneDraw draw;
         draw.draw = std::move(snapshot.draw);
         draw.pixel_constants = std::move(snapshot.pixel_constants);
         draw.texture_count = snapshot.shaders->texture_count;
-        for (uint32_t slot = 0; slot < draw.texture_count; ++slot)
-            draw.textures[slot] = SceneTextureFor(base, snapshot.textures[slot]);
-        draw.renderer = &TiledRendererFor(snapshot);
+        for (uint32_t slot = 0; slot < draw.texture_count; ++slot) {
+            draw.textures[slot] = std::visit([&](const auto& texture) { return SceneTextureFor(base, texture); },
+                                             snapshot.textures[slot]);
+        }
+        draw.renderer = &SceneRendererFor(snapshot);
+        if (!tiled) {
+            completed = draw.Render(draw.draw.scissor);
+            if (REXCVAR_GET(mc2_scene_resolve_trace))
+                REXLOG_INFO("MC2 native scene: additive HDR draw, indices={}, streams={}, textures={}, completed={}",
+                    draw.draw.index_count, draw.draw.VertexStreamCount(), draw.texture_count, completed);
+            return;
+        }
         completed = draw.Render(cleared_tile);
         scene_draws.push_back(std::move(draw));
-        tile_depth_surface = std::move(snapshot.tile_depth);
+        tile_depth_surface = std::move(snapshot.depth_surface);
         if (scene_draws.size() == 1 || REXCVAR_GET(mc2_scene_resolve_trace)) {
             const auto& rendered = scene_draws.back();
             REXLOG_INFO("MC2 native scene: indexed HDR color draw {} in first tile, indices={}, streams={}, textures={}, completed={}",
@@ -475,27 +495,35 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         prepass_draw.reset();
     }
 
-    ColorRenderer& TiledRendererFor(const SceneColorDraw& draw) {
-        // These slots use the same verified wrap/anisotropic sampler settings
-        // for this pass. Their maximum LODs vary with each texture's mip chain.
+    ColorRenderer& SceneRendererFor(const SceneColorDraw& draw) {
         const auto samplers = std::span(draw.samplers).first(draw.shaders->texture_count);
         std::array<float, kTiledTextureSlots> max_lod{};
-        uint32_t cube_slots = 0;
+        uint32_t cube_slots = 0, rgba_slots = 0;
         for (size_t i = 0; i < samplers.size(); ++i) {
             max_lod[i] = samplers[i].maxLOD;
-            if (draw.textures[i].faces == 6) cube_slots |= 1u << i;
+            const auto* block = std::get_if<mc2::texture::BlockTexture>(&draw.textures[i]);
+            if (!block) rgba_slots |= 1u << i;
+            else if (block->faces == 6) cube_slots |= 1u << i;
         }
-        const auto existing = std::find_if(tiled_renderers.begin(), tiled_renderers.end(), [&](const auto& cached) {
+        const auto existing = std::find_if(scene_renderers.begin(), scene_renderers.end(), [&](const auto& cached) {
             return cached.shaders == draw.shaders && cached.max_lod == max_lod && cached.cull == draw.cull &&
-                cached.cube_slots == cube_slots;
+                cached.cube_slots == cube_slots && cached.rgba_slots == rgba_slots;
         });
-        if (existing != tiled_renderers.end()) return *existing->renderer;
+        if (existing != scene_renderers.end()) return *existing->renderer;
         auto configuration = ConfigureDepth(draw.color_surface, draw.shaders->vertex);
         configuration.cull = draw.cull;
-        auto renderer = std::make_unique<ColorRenderer>(configuration, draw.shaders->pixel_dxil,
-            samplers, *depth_renderer, *color_target, cube_slots);
-        tiled_renderers.push_back({draw.shaders, max_lod, draw.cull, cube_slots, std::move(renderer)});
-        return *tiled_renderers.back().renderer;
+        std::unique_ptr<ColorRenderer> renderer;
+        if (draw.color_surface.samples == 2) {
+            renderer = std::make_unique<ColorRenderer>(configuration, draw.shaders->pixel_dxil,
+                samplers, *depth_renderer, *color_target, cube_slots);
+        } else {
+            configuration.write = false;
+            configuration.stencil_comparison = plume::RenderComparisonFunction::EQUAL;
+            renderer = std::make_unique<ColorRenderer>(configuration, draw.shaders->pixel_dxil,
+                samplers, *fullscreen_target, *stencil_target, SceneAdditiveBlend(), cube_slots);
+        }
+        scene_renderers.push_back({draw.shaders, max_lod, draw.cull, cube_slots, rgba_slots, std::move(renderer)});
+        return *scene_renderers.back().renderer;
     }
 
     bool HasColorDraw() {

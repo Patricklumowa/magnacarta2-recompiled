@@ -584,7 +584,30 @@ additional packed 44-byte format and advanced through draw 1,492.
 
 The next mesh binds three vertex streams with 16-, 80- and 12-byte strides.
 The renderer follows the shader's fetch order and retains every stream for
-the second tile. A live run completed draw 1,493 using all three streams.
+the second tile. A live run without Xenos rendered all 1,573 draws in each
+tile and resolved both the color and the depth targets.
+
+## Additive world lighting
+
+After copying the tiled color resolve into the single-sample HDR target, the
+game submits indexed geometry with additive RGB blending and preserves the
+destination alpha. It tests reversed depth and accepts stencil value zero
+while keeping both depth and stencil. The native pass uses the restored
+depth/stencil attachment and retains the copied color. It uses the native
+float16 blend target for the accumulation.
+
+Place the captured containers, `vertex.dxil`, `pixel.dxil`, and
+`texture-count.txt` in a material subdirectory of `world-additive`. Compile
+the pixel shader with specialization flags 0 so its output retains precision
+until the hardware blend. The first captured pair has vertex container SHA-256
+`d3edcffd94d4da455f12655b77130980d9aed414b9b5165b498c3a232f6d4d6d` and pixel
+container SHA-256
+`4b7d9a564dec4169c65f478c77b48e610471179011e33ee138113fad3f343351`. Its
+three textures are a 1 x 1 RGBA8 texture, BC1 and BC3.
+
+The GPU readback check verifies additive RGB, unchanged alpha and rejection
+by either depth or stencil. A live run without Xenos completed two draws of
+1,224 indices with this pair and reached the next additive material.
 
 ## Scene presentation
 

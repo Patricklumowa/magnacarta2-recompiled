@@ -147,8 +147,8 @@ struct IndexedPipeline {
         desc.depthFunction = c.comparison; desc.cullMode = c.cull;
         desc.multisampling = RenderMultisampling(c.sample_count);
         desc.depthTargetFormat = depth_format;
-        // The depth restore uses Always with Keep for all stencil outcomes.
         desc.stencilEnabled = depth_format == RenderFormat::D32_FLOAT_S8_UINT;
+        desc.stencilFrontFace.compareFunction = desc.stencilBackFace.compareFunction = c.stencil_comparison;
         pipeline = device->createGraphicsPipeline(desc);
         Require(bool(pipeline), "Native indexed pipeline creation failed");
         vertex_constants = device->createBuffer(RenderBufferDesc::UploadBuffer(4096));
@@ -481,26 +481,27 @@ struct ColorRenderer::Impl {
     ColorTarget& color;
     NativeDevice& gpu;
     RenderTexture* attachment;
+    RenderTexture* depth_attachment;
     IndexedPipeline pipeline;
     std::unique_ptr<RenderFramebuffer> framebuffer;
 
     Impl(const DepthConfiguration& configuration, std::span<const uint8_t> pixel_shader,
          std::span<const RenderSamplerDesc> samplers, DepthRenderer* depth_renderer, ColorTarget& color_target,
-         RenderBlendDesc blend, uint32_t cube_slots = 0)
+         RenderBlendDesc blend, uint32_t cube_slots = 0, RenderTexture* depth_stencil = nullptr)
         : depth(depth_renderer ? depth_renderer->impl_.get() : nullptr), color(color_target), gpu(color.Device()),
           attachment(color.Attachment(gpu, configuration.width, configuration.height, configuration.sample_count)),
+          depth_attachment(depth ? depth->target.get() : depth_stencil),
           pipeline(configuration, &gpu, pixel_shader, samplers, color.Format(),
-                   depth ? RenderFormat::D32_FLOAT : RenderFormat::UNKNOWN, blend, cube_slots) {
+                   depth ? RenderFormat::D32_FLOAT : depth_stencil ? RenderFormat::D32_FLOAT_S8_UINT : RenderFormat::UNKNOWN,
+                   blend, cube_slots) {
         Require(!depth || (configuration.width == depth->width && configuration.height == depth->height &&
                 configuration.sample_count == depth->samples && depth->gpu.get() == &gpu),
                 "Native color pipeline differs from its depth attachment");
         RenderFramebufferDesc desc;
         const RenderTexture* target = attachment;
         desc.colorAttachments = &target; desc.colorAttachmentsCount = 1;
-        if (depth) {
-            desc.depthAttachment = depth->target.get();
-            desc.depthAttachmentView = depth->depth_view.get();
-        }
+        desc.depthAttachment = depth_attachment;
+        if (depth) desc.depthAttachmentView = depth->depth_view.get();
         framebuffer = gpu.device->createFramebuffer(desc);
         Require(bool(framebuffer), "Native color framebuffer creation failed");
     }
@@ -511,10 +512,10 @@ struct ColorRenderer::Impl {
         pipeline.Prepare(draw, pixel_constants, textures);
         auto& commands = gpu.commands;
         const RenderTextureBarrier barriers[] = {
-            {attachment, RenderTextureLayout::COLOR_WRITE}, {depth ? depth->target.get() : nullptr, RenderTextureLayout::DEPTH_WRITE}
+            {attachment, RenderTextureLayout::COLOR_WRITE}, {depth_attachment, RenderTextureLayout::DEPTH_WRITE}
         };
         commands->begin();
-        commands->barriers(RenderBarrierStage::GRAPHICS, barriers, depth ? 2 : 1);
+        commands->barriers(RenderBarrierStage::GRAPHICS, barriers, depth_attachment ? 2 : 1);
         commands->setFramebuffer(framebuffer.get());
         pipeline.Record(draw);
         commands->end();
@@ -528,6 +529,10 @@ ColorRenderer::ColorRenderer(const DepthConfiguration& c, std::span<const uint8_
 ColorRenderer::ColorRenderer(const DepthConfiguration& c, std::span<const uint8_t> ps,
                              std::span<const RenderSamplerDesc> samplers, ColorTarget& color, RenderBlendDesc blend)
     : impl_(std::make_unique<Impl>(c, ps, samplers, nullptr, color, blend)) {}
+ColorRenderer::ColorRenderer(const DepthConfiguration& c, std::span<const uint8_t> ps,
+                             std::span<const RenderSamplerDesc> samplers, ColorTarget& color,
+                             RenderTexture& depth_stencil, RenderBlendDesc blend, uint32_t cube_slots)
+    : impl_(std::make_unique<Impl>(c, ps, samplers, nullptr, color, blend, cube_slots, &depth_stencil)) {}
 ColorRenderer::~ColorRenderer() = default;
 uint64_t ColorRenderer::Render(const DepthDraw& draw, std::span<const uint8_t> ps,
                                std::span<const SampledTexture* const> textures) {

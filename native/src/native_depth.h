@@ -16,6 +16,7 @@ struct DepthConfiguration {
     plume::RenderComparisonFunction comparison = plume::RenderComparisonFunction::GREATER_EQUAL;
     plume::RenderCullMode cull = plume::RenderCullMode::NONE;
     bool write = true, clip = true;
+    plume::RenderComparisonFunction stencil_comparison = plume::RenderComparisonFunction::ALWAYS;
     bool operator==(const DepthConfiguration&) const = default;
 };
 struct DepthDraw {
@@ -60,8 +61,8 @@ class DepthRenderer {
     std::unique_ptr<Impl> impl_;
 };
 
-// Opaque indexed pass with one HDR color attachment and the retained depth
-// attachment. The targets must outlive the renderer. Each draw waits for its
+// Indexed color pass with an optional depth attachment. The targets must
+// outlive the renderer. Each draw waits for its
 // GPU fence, so the caller may release its sampled textures when Render returns.
 class ColorRenderer {
  public:
@@ -71,6 +72,9 @@ class ColorRenderer {
     ColorRenderer(const DepthConfiguration& configuration, std::span<const uint8_t> pixel_shader,
                   std::span<const plume::RenderSamplerDesc> samplers, ColorTarget& color,
                   plume::RenderBlendDesc blend = plume::RenderBlendDesc::Copy());
+    ColorRenderer(const DepthConfiguration& configuration, std::span<const uint8_t> pixel_shader,
+                  std::span<const plume::RenderSamplerDesc> samplers, ColorTarget& color,
+                  plume::RenderTexture& depth_stencil, plume::RenderBlendDesc blend, uint32_t cube_slots = 0);
     ~ColorRenderer();
     uint64_t Render(const DepthDraw& draw, std::span<const uint8_t> pixel_constants,
                     std::span<const SampledTexture* const> textures);

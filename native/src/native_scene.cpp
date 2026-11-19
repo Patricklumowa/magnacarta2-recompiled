@@ -167,14 +167,15 @@ SceneSurface ReadTiledColorSurface(const DeviceState& state, uint8_t* base) {
     return surface;
 }
 
-SceneSurface ReadFullscreenColorSurface(const DeviceState& state, uint8_t* base, uint32_t format_word = 0x302d0) {
+SceneSurface ReadFullscreenColorSurface(const DeviceState& state, uint8_t* base, uint32_t format_word = 0x302d0,
+                                        uint32_t blend_format_word = 0) {
     SceneSurface surface{state.Word(12448),1280,720,1,{}};
     std::vector<uint8_t> descriptor;
     Require(state.Word(12452) == 0 && state.Word(12456) == 0 && state.Word(12460) == 0 &&
             ReadGuest(base, surface.address, 48, descriptor), "Missing fullscreen color attachment");
     Require((LoadBE32(descriptor.data()) & 15) == 4 && LoadBE32(descriptor.data() + 24) == 0x14000500 &&
             LoadBE32(descriptor.data() + 28) == format_word && LoadBE32(descriptor.data() + 36) == 0x13fc1678 &&
-            state.Word(10372) == format_word, "Fullscreen color attachment layout changed");
+            state.Word(10372) == (blend_format_word ? blend_format_word : format_word), "Fullscreen color attachment layout changed");
     surface.description.assign(descriptor.begin()+24,descriptor.end());
     state.FullViewport(surface);
     Require((state.bytes[10940] & 0x30) == 0 && state.Word(12724) == 0 && state.Word(12716) == UINT32_MAX,
@@ -225,10 +226,10 @@ std::vector<uint8_t> ReadVertexStream(const DeviceState& state, uint8_t* base, u
 }
 
 DepthDraw ReadGeometry(const PPCContext& ctx, uint8_t* base, const DeviceState& state,
-                       const SceneSurface& surface, const SceneVertexShader& shader) {
+                       const SceneSurface& surface, const SceneVertexShader& shader, uint32_t depth_control = 0x00700766) {
     Require(ctx.r4.u32 == 4 && state.Word(11824) == 0,
             "Native scene requires the verified triangle-list vertex inputs");
-    Require(state.Word(10548) == 0x00700766 && state.Word(10572) == 0x43f &&
+    Require(state.Word(10548) == depth_control && state.Word(10572) == 0x43f &&
             state.Word(10564) == 0x80000 && state.Word(10452) == 0 && state.Float(12672) == 1 && state.Float(12676) == 0,
             "Depth/stencil, clipping, vertex base or viewport state differs from the verified pass");
     Require(!shader.inputs.empty(), "Native scene vertex layout is missing");
@@ -277,13 +278,13 @@ SceneVertexShader LoadOcclusionShader(const std::filesystem::path& directory) {
     Require(shader.inputs == expected, "Occlusion shader does not use the verified float3 input");
     return shader;
 }
-SceneColorShaders LoadColorShaders(const std::filesystem::path& directory) {
+SceneColorShaders LoadColorShaders(const std::filesystem::path& directory, const char* pixel_dxil) {
     auto vertex = LoadVertexShader(directory);
     // The vertex metadata gives the attribute types and offsets. Each draw
     // validates the bound fetch descriptors, and the pipeline checks its
     // supported stream count, strides and indexed range before submitting.
     SceneColorShaders shaders{std::move(vertex), ReadNativeFile(directory / "pixel-shader.container"),
-                              ReadNativeFile(directory / "pixel-7e3.dxil"), {}, {}};
+                              ReadNativeFile(directory / pixel_dxil), {}, {}};
     const auto resolve_path = directory / "color-resolve.dxil";
     if (std::filesystem::exists(resolve_path)) shaders.resolve_dxil = ReadNativeFile(resolve_path);
     const auto depth_resolve_path = directory / "depth-resolve.dxil";
@@ -387,15 +388,25 @@ void ReadOcclusionVertices(DepthDraw& draw, uint8_t* base, uint32_t vertices, ui
         draw.indices[i] = (uint32_t(index_data[i * 2]) << 8) | index_data[i * 2 + 1];
 }
 SceneColorDraw ReadSceneColorDraw(const PPCContext& ctx, uint8_t* base, const SceneColorShaders& shaders,
-                                  std::span<const SceneColorShaders> world_shaders) {
+                                  std::span<const SceneColorShaders> world_shaders,
+                                  std::span<const SceneColorShaders> additive_shaders) {
     DeviceState state(base, ctx.r3.u32);
     SceneColorDraw snapshot;
-    snapshot.color_surface = ReadTiledColorSurface(state, base);
-    snapshot.tile_depth = state.DepthSurface(base,512);
+    const bool tiled = (state.bytes[10940] & 0x20) != 0;
+    if (tiled) {
+        snapshot.color_surface = ReadTiledColorSurface(state, base);
+        snapshot.depth_surface = state.DepthSurface(base, 512);
+        Require(state.Word(12728) == 2, "Native color draw requires the verified automatic tile predicate");
+    } else {
+        // Format 12 requests higher precision blending with the same 7e3 storage as format 3.
+        snapshot.color_surface = ReadFullscreenColorSurface(state, base, 0x302d0, 0xc02d0);
+        snapshot.depth_surface = state.DepthSurface(base, 720, 1);
+        Require(state.Word(10492) == 0x00ffff00 && state.Word(10496) == 0x00ffff00,
+                "Additive HDR draw requires stencil reference zero and a full read mask");
+    }
     Require(state.Word(12724) == 0 && state.Word(12716) == UINT32_MAX && state.Word(10932) == 0 &&
-            state.Word(12728) == 2, "Native color draw requires the verified automatic tile predicate");
-    // Full color write, copy blend, and no alpha test or alpha-to-coverage.
-    Require(state.Word(10460) == 0xf && state.Word(10552) == 0x10001 && (state.Word(10556) & 0x1f) == 7,
+            state.Word(10460) == 0xf && state.Word(10552) == (tiled ? 0x10001 : 0x1000101) &&
+            (state.Word(10556) & 0x1f) == 7,
             "Native color draw has unsupported color write, blend or alpha state");
     const auto raster_mode = state.Word(10568);
     const auto cull_bits = raster_mode & 3u;
@@ -411,17 +422,47 @@ SceneColorDraw ReadSceneColorDraw(const PPCContext& ctx, uint8_t* base, const Sc
     const auto matches = [&](const SceneColorShaders& program) {
         return pixel_shader == program.pixel_reference && vertex_shader == program.vertex.reference;
     };
-    if (matches(shaders)) snapshot.shaders = &shaders;
+    if (tiled && matches(shaders)) snapshot.shaders = &shaders;
     else {
-        const auto program = std::find_if(world_shaders.begin(), world_shaders.end(), matches);
-        Require(program != world_shaders.end(), "Untranslated native scene shader pair");
+        const auto programs = tiled ? world_shaders : additive_shaders;
+        const auto program = std::find_if(programs.begin(), programs.end(), matches);
+        Require(program != programs.end(), "Untranslated native scene shader pair");
         snapshot.shaders = &*program;
     }
-    snapshot.draw = ReadGeometry(ctx, base, state, snapshot.color_surface, snapshot.shaders->vertex);
+    snapshot.draw = ReadGeometry(ctx, base, state, snapshot.color_surface, snapshot.shaders->vertex,
+                                 tiled ? 0x00700766 : 0x00700263);
     snapshot.pixel_constants = NativeVertexBytes(std::span(state.bytes).subspan(6016,4096),2);
-    for (uint32_t slot = 0; slot < snapshot.shaders->texture_count; ++slot)
-        ReadBlockSceneTexture(state, slot, 0, snapshot.draw, snapshot.textures[slot], snapshot.samplers[slot]);
+    for (uint32_t slot = 0; slot < snapshot.shaders->texture_count; ++slot) {
+        const auto fetch = std::span(state.bytes).subspan(1152 + slot * 24, 24);
+        if (!tiled && (LoadBE32(fetch.data() + 4) & 63) == 6) {
+            auto& texture = snapshot.textures[slot].emplace<mc2::texture::BaseRGBA8>();
+            std::string error;
+            if (!mc2::texture::DescribeBaseRGBA8(fetch, texture, error)) throw std::runtime_error(error);
+            Require(state.Word(12552 + slot * 4) && texture.width == 1 && texture.height == 1 &&
+                    texture.mip_min_level == 0 && texture.mip_max_level == 0 &&
+                    (texture.fetch_words[0] & 0x0007fc00) == 0 && texture.fetch_words[3] == 0xc14 &&
+                    texture.fetch_words[4] == 0 && texture.fetch_words[5] == 0x200,
+                    "Additive HDR draw needs the verified single-texel texture layout");
+            auto sampler = FullscreenColorSampler();
+            sampler.addressU = sampler.addressV = plume::RenderTextureAddressMode::WRAP;
+            snapshot.samplers[slot] = sampler;
+            // The RGBA8 upload has already applied its fetch swizzle.
+            BindSceneTexture(snapshot.draw, slot, PackTextureFetchMode(0x688, texture.gamma_mask, texture.exp_adjust));
+        } else {
+            auto& texture = std::get<mc2::texture::BlockTexture>(snapshot.textures[slot]);
+            ReadBlockSceneTexture(state, slot, 0, snapshot.draw, texture, snapshot.samplers[slot]);
+        }
+    }
     return snapshot;
+}
+
+plume::RenderBlendDesc SceneAdditiveBlend() {
+    auto blend = plume::RenderBlendDesc::Copy();
+    blend.blendEnabled = true;
+    blend.dstBlend = plume::RenderBlend::ONE;
+    blend.srcBlendAlpha = plume::RenderBlend::ZERO;
+    blend.dstBlendAlpha = plume::RenderBlend::ONE;
+    return blend;
 }
 
 bool SameScenePositionInputs(const DepthDraw& depth, const DepthDraw& color) {
