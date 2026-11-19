@@ -1,4 +1,8 @@
+#ifdef MC2_SINGLE_SAMPLE
+Texture2D<float> sourceDepth : register(t0);
+#else
 Texture2DMS<float, 2> sourceDepth : register(t0);
+#endif
 RWTexture2D<float> resolvedDepth : register(u0);
 
 cbuffer ResolveParameters : register(b0)
@@ -33,5 +37,9 @@ void main(uint3 id : SV_DispatchThreadID)
     if (any(id.xy >= extent))
         return;
     uint2 pixel = origin + id.xy;
+#ifdef MC2_SINGLE_SAMPLE
+    resolvedDepth[pixel] = quantizeDepth(sourceDepth.Load(int3(pixel, 0)));
+#else
     resolvedDepth[pixel] = quantizeDepth(sourceDepth.Load(pixel, 0));
+#endif
 }

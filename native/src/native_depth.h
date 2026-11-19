@@ -56,6 +56,7 @@ class DepthRenderer {
     uint64_t RestoreResolvedDepth(const DepthConfiguration& configuration, const DepthDraw& draw,
                     std::span<const uint8_t> pixel_shader, std::span<const uint8_t> pixel_constants,
                     plume::RenderTexture& target, plume::RenderFramebuffer& framebuffer);
+    uint64_t OverwriteResolvedDepth(plume::RenderTexture& source, std::span<const uint8_t> shader);
  private:
     friend class ColorRenderer;
     struct Impl;

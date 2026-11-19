@@ -183,7 +183,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
     std::vector<ScenePassShaders> filter_shaders;
     std::optional<ScenePassShaders> overlay_shaders;
     std::vector<SceneMenuFanProgram> menu_fan_programs;
-    std::vector<uint8_t> fullscreen_resolve_shader, bloom_resolve_shader;
+    std::vector<uint8_t> fullscreen_resolve_shader, bloom_resolve_shader, postprocess_depth_resolve_shader;
     std::vector<uint8_t> present_vertex_shader, present_pixel_shader;
     std::optional<SceneSurface> depth_surface, color_surface, tile_depth_surface;
     std::unique_ptr<DepthRenderer> depth_renderer;
@@ -242,6 +242,9 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             if (std::filesystem::is_directory(occlusion_directory)) occlusion_shader = LoadOcclusionShader(occlusion_directory);
             const auto restore_directory = std::filesystem::path(color_directory) / "depth-restore";
             if (std::filesystem::is_directory(restore_directory)) depth_restore_shaders = LoadDepthRestoreShaders(restore_directory);
+            const auto postprocess_depth_resolve_path = restore_directory / "depth-resolve.dxil";
+            if (std::filesystem::exists(postprocess_depth_resolve_path))
+                postprocess_depth_resolve_shader = ReadNativeFile(postprocess_depth_resolve_path);
             const auto fullscreen_directory = std::filesystem::path(color_directory) / "fullscreen";
             if (std::filesystem::is_directory(fullscreen_directory)) fullscreen_shaders = LoadFullscreenColorShaders(fullscreen_directory, false);
             const auto fullscreen_resolve_path = fullscreen_directory / "color-resolve.dxil";
@@ -1012,6 +1015,18 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
                     bloom_copies, destination.address, completed);
     }
 
+    void ResolvePostprocessDepth(const PPCContext& ctx, uint8_t* base) {
+        std::lock_guard lock(mutex);
+        Require(ctx.r3.u32 && ctx.r3.u32 == guest_device && depth_restored && stencil_surface && stencil_target &&
+                depth_renderer && !postprocess_depth_resolve_shader.empty(),
+                "Single-sample depth resolve requires the restored depth/stencil target and shader");
+        Require(*stencil_surface == ReadPostprocessDepthResolve(ctx, base, scene_textures[1]),
+                "Single-sample depth resolve changed the source attachment");
+        completed = depth_renderer->OverwriteResolvedDepth(*stencil_target, postprocess_depth_resolve_shader);
+        REXLOG_INFO("MC2 native scene: resolved single-sample depth into scene texture {:#x}, completed={}",
+                    scene_textures[1].address, completed);
+    }
+
     void ResolveScanout(const PPCContext& ctx, uint8_t* base) {
         std::lock_guard lock(mutex);
         Require(ctx.r3.u32 && ctx.r3.u32 == guest_device && back_buffer && back_buffer_surface &&
@@ -1299,6 +1314,7 @@ REX_HOOK_RAW(sub_823893A0) {
         try {
             if (ctx.lr == 0x827B3694 && ctx.r4.u32 == 0) Graphics().ResolveBloom(ctx, base);
             else if (ctx.lr == 0x827B3694) Graphics().ResolveFullscreen(ctx, base);
+            else if (ctx.lr == 0x827B3560) Graphics().ResolvePostprocessDepth(ctx, base);
             else if (ctx.lr == 0x8248B7AC) Graphics().ResolveScanout(ctx, base);
             else Graphics().ResolveTile(ctx, base);
         }

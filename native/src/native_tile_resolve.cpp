@@ -18,9 +18,10 @@ TileResolve::TileResolve(NativeDevice& gpu, RenderTexture& source, uint32_t widt
     CreatePipeline(bytecode, source_view);
 }
 
-TileResolve::TileResolve(NativeDevice& gpu, RenderTexture& source, RenderTexture& destination, std::span<const uint8_t> bytecode)
+TileResolve::TileResolve(NativeDevice& gpu, RenderTexture& source, RenderTexture& destination,
+                         std::span<const uint8_t> bytecode, const RenderTextureView* source_view)
     : gpu_(gpu), source_(source), destination_(&destination) {
-    CreatePipeline(bytecode, nullptr);
+    CreatePipeline(bytecode, source_view);
 }
 
 void TileResolve::CreatePipeline(std::span<const uint8_t> bytecode, const RenderTextureView* source_view) {

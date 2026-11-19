@@ -736,17 +736,33 @@ plume::RenderSamplerDesc FullscreenColorSampler(bool linear) {
     return sampler;
 }
 
+static void RequireSceneResolveDestination(const PPCContext& ctx, uint8_t* base, const SceneResolveTexture& destination) {
+    std::vector<uint8_t> descriptor;
+    Require(ctx.r6.u32 == destination.address && ReadGuest(base, ctx.r6.u32, 52, descriptor) &&
+            (LoadBE32(descriptor.data()) & 15) == 3, "Scene resolve did not reuse the scene texture");
+    for (uint32_t i = 0; i < destination.fetch_words.size(); ++i)
+        Require(LoadBE32(descriptor.data() + 28 + i * 4) == destination.fetch_words[i], "Scene resolve texture layout changed");
+}
+
 SceneSurface ReadFullscreenResolve(const PPCContext& ctx, uint8_t* base, const SceneResolveTexture& destination) {
     Require(ctx.lr == 0x827B3694 && ctx.r4.u32 == 0xf4000000 && !ctx.r5.u32 && !ctx.r7.u32 && !ctx.r8.u32 && !ctx.r9.u32,
             "Unsupported fullscreen resolve flags or region");
     const DeviceState state(base, ctx.r3.u32);
     // A full resolve covers the attachment even if the last light used a scissor.
     const auto surface = ReadFullscreenColorSurface(state, base, 0x302d0, 0xc02d0);
-    std::vector<uint8_t> descriptor;
-    Require(ctx.r6.u32 == destination.address && ReadGuest(base, ctx.r6.u32, 52, descriptor) &&
-            (LoadBE32(descriptor.data()) & 15) == 3, "Fullscreen resolve did not reuse the scene texture");
-    for (uint32_t i = 0; i < destination.fetch_words.size(); ++i)
-        Require(LoadBE32(descriptor.data() + 28 + i * 4) == destination.fetch_words[i], "Fullscreen resolve texture layout changed");
+    RequireSceneResolveDestination(ctx, base, destination);
+    return surface;
+}
+
+SceneSurface ReadPostprocessDepthResolve(const PPCContext& ctx, uint8_t* base, const SceneResolveTexture& destination) {
+    Require(ctx.lr == 0x827B3560 && ctx.r4.u32 == 4 && !ctx.r5.u32 && !ctx.r7.u32 && !ctx.r8.u32 && !ctx.r9.u32,
+            "Unsupported single-sample depth resolve flags or region");
+    const DeviceState state(base, ctx.r3.u32);
+    const auto surface = state.DepthSurface(base, 720, 1);
+    state.FullViewport(surface, true);
+    Require((state.bytes[10940] & 0x30) == 0 && state.Word(12724) == 0 && state.Word(12716) == UINT32_MAX,
+            "Single-sample depth resolve requires the untiled depth attachment");
+    RequireSceneResolveDestination(ctx, base, destination);
     return surface;
 }
 

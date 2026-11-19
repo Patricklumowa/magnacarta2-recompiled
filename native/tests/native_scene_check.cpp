@@ -99,12 +99,14 @@ void CheckDepthRestore(mc2::native::DepthRenderer& depth, mc2::native::NativeDev
     const auto* pixels = static_cast<const uint8_t*>(readback->map());
     Check(pixels != nullptr, "Restore test readback mapping failed");
     size_t match = 0, preserved = 0, covered = 0;
+    std::vector<float> restored(source.size());
     for (uint32_t y = 0; y < surface.height; ++y) {
         const auto* depth_row = pixels + layouts[0].Offset + size_t(y) * layouts[0].Footprint.RowPitch;
         const auto* stencil_row = pixels + layouts[1].Offset + size_t(y) * layouts[1].Footprint.RowPitch;
         for (uint32_t x = 0; x < surface.width; ++x) {
             float z;
             std::memcpy(&z, depth_row + size_t(x) * depth_stride, sizeof(z));
+            restored[size_t(y) * surface.width + x] = z;
             preserved += stencil_row[size_t(x) * stencil_stride + (stencil_stride == 8 ? 4 : 0)] == 0xa7;
             // The half-pixel offset places point samples on texel boundaries.
             // Either adjacent texel may win when interpolation rounds the tie.
@@ -120,6 +122,22 @@ void CheckDepthRestore(mc2::native::DepthRenderer& depth, mc2::native::NativeDev
     std::cout << "Depth restore readback: matched=" << match << ", stencil preserved=" << preserved << ", covered=" << covered << '\n';
     Check(match == source.size() && preserved == source.size() && covered > 1000,
           "Restored depth differs from the sampled source or modified the stencil plane");
+
+    const auto resolve_path = directory / "depth-resolve.dxil";
+    if (std::filesystem::is_regular_file(resolve_path)) {
+        const auto before_resolve = gpu.completed;
+        Check(depth.OverwriteResolvedDepth(*target, ReadNativeFile(resolve_path)) == before_resolve + 1,
+              "Single-sample depth export did not complete");
+        const auto exported = depth.ReadResolvedPixels();
+        Check(exported.size() == restored.size() && exported != source, "Single-sample export did not replace scene depth");
+        for (size_t i = 0; i < exported.size(); ++i) {
+            const float z = restored[i];
+            const double step = std::ldexp(1.0, (z > 0 ? std::max(std::ilogb(z), -14) : -14) - 20);
+            Check(std::abs(exported[i] - z) <= 0.5 * step && exported[i] / step == std::floor(exported[i] / step),
+                  "Single-sample depth export did not quantize the restored depth plane");
+        }
+        std::cout << "PASS: single-sample depth export replaced the scene texture with restored depth\n";
+    }
 }
 
 void CheckFullscreenColor(mc2::native::ColorTarget& source, const mc2::native::SceneSurface& surface,

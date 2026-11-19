@@ -448,6 +448,27 @@ uint64_t DepthRenderer::CountPassingSamples(const DepthConfiguration& config, co
 }
 uint64_t DepthRenderer::ResolveAndClear(const RenderRect& rectangle) { return impl_->ResolveAndClear(rectangle); }
 std::vector<float> DepthRenderer::ReadResolvedPixels() { return impl_->ReadResolvedPixels(); }
+uint64_t DepthRenderer::OverwriteResolvedDepth(RenderTexture& source, std::span<const uint8_t> shader) {
+    auto& depth = *impl_;
+    auto& gpu = *depth.gpu;
+    const RenderRect full(0, 0, depth.width, depth.height);
+    Require(depth.tile_resolve && depth.tile_resolve->CompletedRegion() == full && !shader.empty(),
+            "Single-sample depth copy requires a complete scene depth resolve and a copy shader");
+    const auto& source_depth = static_cast<const D3D12Texture&>(source);
+    Require(source_depth.device == gpu.device.get() && source_depth.desc.width == depth.width &&
+            source_depth.desc.height == depth.height && source_depth.desc.multisampling.sampleCount == 1 &&
+            source_depth.desc.format == RenderFormat::D32_FLOAT_S8_UINT,
+            "Single-sample depth copy requires the matching D32/S8 source");
+    // Plume maps this typed view to the depth plane of the combined resource.
+    const auto source_view = source.createTextureView(RenderTextureViewDesc::Texture2D(RenderFormat::D32_FLOAT_S8_UINT));
+    Require(bool(source_view), "Single-sample depth view creation failed");
+    TileResolve copy(gpu, source, *depth.tile_resolve->Output(), shader, source_view.get());
+    gpu.commands->begin();
+    copy.Record(full, 1);
+    gpu.commands->end();
+    gpu.queue->executeCommandLists(gpu.commands.get(), gpu.fence.get());
+    return gpu.Complete();
+}
 
 uint64_t DepthRenderer::RestoreResolvedDepth(const DepthConfiguration& config, const DepthDraw& draw,
         std::span<const uint8_t> pixel_shader, std::span<const uint8_t> constants,

@@ -632,7 +632,19 @@ draws before the fullscreen resolve. This included seven-texture draws of
 The fullscreen resolve now publishes the lit HDR image into the scene
 texture using the same exponent as the grade and composition passes. This
 feeds subsequent passes from the updated color data. The live run completed
-that copy and reached the next resolve at `0x827B3560`.
+that copy and reached the single-sample depth resolve at `0x827B3560`.
+
+That depth resolve copies the restored depth plane back into the scene depth
+texture. It uses the existing 20e4 conversion and a typed depth view of the
+D32/S8 attachment. The captured GPU replay compares the complete export with
+the restored depth readback. A live run completed the depth export without
+Xenos and reached another fullscreen draw before the bloom pass.
+
+Compile the single-sample shader alongside the depth-restore shaders:
+
+```text
+dxc -T cs_6_0 -E main -HV 2021 -D MC2_SINGLE_SAMPLE=1 native/src/native_depth_resolve.hlsl -Fo <color-shaders>/depth-restore/depth-resolve.dxil
+```
 
 ## Scene presentation
 

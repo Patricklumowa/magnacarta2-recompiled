@@ -11,7 +11,7 @@ class TileResolve {
                 plume::RenderFormat format, std::span<const uint8_t> bytecode,
                 const plume::RenderTextureView* source_view = nullptr);
     TileResolve(NativeDevice& gpu, plume::RenderTexture& source, plume::RenderTexture& destination,
-                std::span<const uint8_t> bytecode);
+                std::span<const uint8_t> bytecode, const plume::RenderTextureView* source_view = nullptr);
     void Record(const plume::RenderRect& rectangle, float scale);
     uint64_t Complete(const plume::RenderRect& rectangle);
     const plume::RenderRect& CompletedRegion() const { return completed_region_; }

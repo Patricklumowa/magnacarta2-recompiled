@@ -25,13 +25,11 @@ Xenos backend remains the reference. Shadows and other effects are required.
 
 An optional [standalone D3D12 probe](native-draw-probe.md) now renders a captured
 movie draw using its translated shaders, three video planes, vertices, and pixel
-constants. Its 1280Ã—720 output agrees with an independent CPU calculation to
+constants. Its 1280 x 720 output agrees with an independent CPU calculation to
 within one UNORM channel step. The probe can also present that draw through a
 native resizable D3D12 swapchain without per-frame CPU readback. This remains
-validation of one draw family. An opt-in experimental backend now also plays
-live startup movies with the Xenos plugin unavailable. It stops at the first
-unsupported scene operation; native menu/gameplay rendering is not implemented.
-Captures are not a speedup, and full scene compatibility remains unverified.
+validation of one draw family. The live experimental backend plays the startup
+movies with the Xenos plugin unavailable.
 
 The first indexed scene draw also has a [native depth path](native-depth.md),
 including bounded mini-fetch layouts and a shared native device/queue. Its
@@ -52,6 +50,11 @@ The native backend also runs depth restore, bloom, scene composition, and
 RGBA8 presentation for the animated title screen and the downloadable content
 validation dialog that follows Start. The native main menu uses the same
 presentation path. See [scene presentation](native-depth.md#scene-presentation).
+
+The first 3D scene completes both geometry tiles and the additive world
+lighting pass without Xenos. It exports the lit HDR image and the restored
+depth texture. The live run reached the next fullscreen draw before bloom.
+Full scene presentation and visual parity remain in development.
 
 The optional bounded live movie comparison uses the same native drawing code
 on live guest inputs. Two movie draws passed the CPU comparison during a clean

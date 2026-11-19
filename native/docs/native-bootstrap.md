@@ -167,7 +167,10 @@ downloadable content validation dialog. Reclaiming CPU draw staging after
 the native fence kept the allocator available through more than 2,100
 presented scene frames. Selecting New Game reached its opening movie.
 The original subtitle draw now blends over the video in the same native
-back buffer.
+back buffer. Skipping the opening movies reaches the first 3D scene, where
+the native path renders both geometry tiles and the additive lighting pass.
+The native queue exports the lit HDR and restored depth textures before the
+next fullscreen draw. [Native scene rendering](native-depth.md#additive-world-lighting)
 An empty color shader directory setting keeps the depth-only checkpoint.
 
 Other indexed and nonindexed scene draws and raw or indirect GPU submission
