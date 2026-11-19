@@ -15,6 +15,7 @@ namespace {
 using mc2::capture::ReadGuest;
 using mc2::capture::LoadBE32;
 void Require(bool value, const char* error) { if (!value) throw std::runtime_error(error); }
+constexpr uint32_t kOcclusionBoxVertices = 8, kOcclusionBoxIndices = 36;
 struct DeviceState {
     std::vector<uint8_t> bytes;
     DeviceState(uint8_t* base, uint32_t address) {
@@ -323,7 +324,9 @@ SceneDepthDraw ReadSceneDepthDraw(const PPCContext& ctx, uint8_t* base, const Sc
     return {surface, ReadGeometry(ctx, base, state, surface, shader)};
 }
 SceneDepthDraw ReadOcclusionDraw(const PPCContext& ctx, uint8_t* base, const SceneVertexShader& shader) {
-    Require(ctx.r4.u32 == 4 && ctx.r5.u32 == 0 && ctx.r6.u32 == 8 && ctx.r7.u32 == 36 &&
+    const auto vertices = ctx.r6.u32;
+    Require(ctx.r4.u32 == 4 && ctx.r5.u32 == 0 && vertices && vertices <= 65536 &&
+            !(vertices % kOcclusionBoxVertices) && ctx.r7.u32 == (vertices / kOcclusionBoxVertices) * kOcclusionBoxIndices &&
             ctx.r8.u32 == 1 && ctx.r9.u32 == 12, "Unsupported occlusion box geometry");
     const DeviceState state(base, ctx.r3.u32);
     state.NoColorAttachments();
@@ -338,18 +341,20 @@ SceneDepthDraw ReadOcclusionDraw(const PPCContext& ctx, uint8_t* base, const Sce
     Require(state.Word(12700) == 0 && ReadBoundShader(base, state.Word(12704), true) == shader.reference,
             "Untranslated occlusion shaders");
     ReadDepthTransform(pass.draw, state, pass.surface);
+    pass.draw.index_count = ctx.r7.u32;
     return pass;
 }
 
 void ReadOcclusionVertices(DepthDraw& draw, uint8_t* base, uint32_t vertices, uint32_t indices) {
+    const auto box_count = draw.index_count / kOcclusionBoxIndices;
     std::vector<uint8_t> vertex_data, index_data;
-    Require(ReadGuest(base, vertices, 8 * 12, vertex_data) && ReadGuest(base, indices, 36 * 2, index_data),
+    Require(ReadGuest(base, vertices, box_count * kOcclusionBoxVertices * 12, vertex_data) &&
+            ReadGuest(base, indices, draw.index_count * 2, index_data),
             "Unreadable occlusion box vertices or indices");
     draw.vertices = NativeVertexBytes(vertex_data, 2);
-    draw.indices.resize(36);
+    draw.indices.resize(draw.index_count);
     for (size_t i = 0; i < draw.indices.size(); ++i)
         draw.indices[i] = (uint32_t(index_data[i * 2]) << 8) | index_data[i * 2 + 1];
-    draw.index_count = uint32_t(draw.indices.size());
 }
 SceneColorDraw ReadSceneColorDraw(const PPCContext& ctx, uint8_t* base, const SceneColorShaders& shaders) {
     DeviceState state(base, ctx.r3.u32);

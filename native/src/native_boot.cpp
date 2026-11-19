@@ -676,6 +676,11 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         pending_occlusion = PendingOcclusionDraw{std::move(scene.draw), vertices, indices, endpoint};
     }
 
+    bool HasActiveOcclusionQuery() {
+        std::lock_guard lock(mutex);
+        return occlusion_query != 0;
+    }
+
     void IssueOcclusion(PPCContext& ctx, uint8_t* base, bool begin) {
         const uint32_t query = ctx.r3.u32;
         std::vector<uint8_t> state;
@@ -1302,16 +1307,20 @@ REX_HOOK_RAW(sub_828648A8) {
 REX_HOOK_RAW(sub_82864D88) {
     if (!NativeBootActive()) { __imp__sub_82864D88(ctx, base); return; }
     try {
-        if (ctx.lr == 0x826D9B00 || ctx.lr == 0x826D9BA0) Graphics().BeginOcclusionDraw(ctx, base);
-        else Graphics().BeginIndexedUp(ctx, base);
+        auto& graphics = Graphics();
+        if (ctx.lr == 0x826D9B00 || ctx.lr == 0x826D9BA0 ||
+            (ctx.lr == 0x826D9CC0 && graphics.HasActiveOcclusionQuery())) graphics.BeginOcclusionDraw(ctx, base);
+        else graphics.BeginIndexedUp(ctx, base);
     }
     catch (const std::exception& error) { UnsupportedNativeOperation(error.what(), ctx); }
 }
 REX_HOOK_RAW(sub_8237D5F0) {
-    if (!NativeBootActive() || (ctx.lr != 0x8247FE10 && ctx.lr != 0x82480008)) {
+    const bool begin = ctx.lr == 0x8247FE10 || ctx.lr == 0x8247F544;
+    const bool end = ctx.lr == 0x82480008 || ctx.lr == 0x8247F588;
+    if (!NativeBootActive() || !(begin || end)) {
         __imp__sub_8237D5F0(ctx, base);
         return;
     }
-    try { Graphics().IssueOcclusion(ctx, base, ctx.lr == 0x8247FE10); }
+    try { Graphics().IssueOcclusion(ctx, base, begin); }
     catch (const std::exception& error) { UnsupportedNativeOperation(error.what(), ctx); }
 }

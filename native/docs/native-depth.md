@@ -466,9 +466,10 @@ and accepted Skip.
 
 The first scene after the opening movies tests bounding boxes against the
 cleared two-sample depth target. The host uses the original eight float3
-vertices, 36 sixteen-bit indices, vertex constants and reversed-depth
-comparison. A D3D12 occlusion query counts passing samples without writing
-depth. After the host fence completes, the guest's existing query getter
+vertices and 36 sixteen-bit indices per box, vertex constants and
+reversed-depth comparison. The game submits both individual boxes and an
+indexed user-memory draw for a batch of boxes. A D3D12 occlusion query counts
+passing samples without writing depth. After the host fence completes, the guest's existing query getter
 can read the begin and end reports and apply its original visibility logic.
 
 Capture and translate the position-only vertex shader into
@@ -477,7 +478,8 @@ same directory. The captured container has SHA-256
 `286b5b75dbce0c9fcd0ac909bddd977767f8a68d22446baf61f9763b5fe2b4e5`.
 The depth check verifies a fully occluded quad, 32 passing samples for a
 visible quad, and an unchanged depth target after queries. A live run
-completed the first 25 box queries and reached the next overlay draw.
+completed 403 occlusion queries and cleared the tiled HDR target for the
+first post-movie material draw.
 
 ## Scene presentation
 
