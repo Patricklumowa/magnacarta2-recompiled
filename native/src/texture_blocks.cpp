@@ -26,7 +26,8 @@ bool DescribeBlockTexture(std::span<const uint8_t> bytes,BlockTexture& output,st
                               uint32_t(bytes[i*4+2])<<8|bytes[i*4+3];
     xenos::xe_gpu_texture_fetch_t fetch;
     std::memcpy(&fetch,result.fetch_words.data(),sizeof(fetch));
-    if (fetch.type!=xenos::FetchConstantType::kTexture || fetch.dimension!=xenos::DataDimension::k2DOrStacked ||
+    const bool cube=fetch.dimension==xenos::DataDimension::kCube;
+    if (fetch.type!=xenos::FetchConstantType::kTexture || (!cube && fetch.dimension!=xenos::DataDimension::k2DOrStacked) ||
         fetch.stacked || fetch.num_format || !fetch.pitch)
         return Fail(error,"Unsupported compressed texture dimensionality, pitch or number format");
     result.format=uint32_t(fetch.format);
@@ -44,14 +45,18 @@ bool DescribeBlockTexture(std::span<const uint8_t> bytes,BlockTexture& output,st
             return Fail(error,"Signed compressed texture sampling is not implemented");
     }
     const uint32_t width=fetch.size_2d.width+1,height=fetch.size_2d.height+1;
-    if (uint64_t(width)*height*4>kLimit) return Fail(error,"Compressed texture exceeds capture limits");
+    result.faces=cube ? 6 : 1;
+    if ((cube && width!=height) || uint64_t(width)*height*4*result.faces>kLimit)
+        return Fail(error,"Invalid compressed texture extent");
     uint32_t base_page=0,mip_page=0;
     layout::GetSubresourcesFromFetchConstant(fetch,nullptr,nullptr,nullptr,&base_page,&mip_page,
                                             &result.mip_min_level,&result.mip_max_level);
     if (!base_page || (result.mip_max_level && !mip_page)) return Fail(error,"Compressed texture has missing storage");
     if (result.mip_max_level>=xenos::kTextureMaxMips) return Fail(error,"Invalid compressed mip range");
-    const auto guest=layout::GetGuestTextureLayout(fetch.dimension,fetch.pitch,width,height,1,result.tiled,
+    const auto guest=layout::GetGuestTextureLayout(fetch.dimension,fetch.pitch,width,height,result.faces,result.tiled,
                                                    fetch.format,fetch.packed_mips,true,result.mip_max_level);
+    const uint32_t levels=result.mip_max_level+1;
+    result.mips.resize(result.faces*levels);
     uint64_t total=0;
     for (uint32_t level=0;level<=result.mip_max_level;++level) {
         BlockMip mip;
@@ -73,11 +78,16 @@ bool DescribeBlockTexture(std::span<const uint8_t> bytes,BlockTexture& output,st
             for (uint32_t y=0;y<rows;++y) for (uint32_t x=0;x<columns;++x)
                 extent=std::max(extent,Offset(result,mip,x,y)+result.block_bytes);
         } else extent=Offset(result,mip,columns-1,rows-1)+result.block_bytes;
-        total+=uint64_t(columns)*rows*result.block_bytes;
-        if (!extent || extent>kLimit || address+extent>0x20000000ull || total>kLimit)
+        total+=uint64_t(columns)*rows*result.block_bytes*result.faces;
+        if (!extent || extent>kLimit || total>kLimit || (cube && extent>storage.array_slice_stride_bytes))
             return Fail(error,"Compressed mip exceeds physical memory or capture limits");
-        mip.physical_address=uint32_t(address); mip.source_bytes=uint32_t(extent);
-        result.mips.push_back(mip);
+        mip.source_bytes=uint32_t(extent);
+        for (uint32_t face=0;face<result.faces;++face) {
+            const uint64_t face_address=address+uint64_t(face)*storage.array_slice_stride_bytes;
+            if (face_address+extent>0x20000000ull) return Fail(error,"Compressed mip exceeds physical memory");
+            mip.physical_address=uint32_t(face_address);
+            result.mips[face*levels+level]=mip;
+        }
     }
     output=std::move(result); return true;
 }

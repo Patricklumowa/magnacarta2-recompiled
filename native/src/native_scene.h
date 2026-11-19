@@ -12,7 +12,7 @@ struct SceneVertexShader {
     std::vector<uint8_t> reference, dxil;
     std::vector<VertexInput> inputs;
 };
-inline constexpr uint32_t kTiledTextureSlots = 3;
+inline constexpr uint32_t kTiledTextureSlots = 6;
 struct SceneColorShaders {
     SceneVertexShader vertex;
     std::vector<uint8_t> pixel_reference, pixel_dxil, resolve_dxil, depth_resolve_dxil;

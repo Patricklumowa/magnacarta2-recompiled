@@ -59,7 +59,7 @@ std::shared_ptr<const SampledTexture> UploadSceneTexture(const mc2::texture::Blo
     }
     const auto& top = description.mips.front();
     const auto format = description.format == 18 ? plume::RenderFormat::BC1_UNORM : plume::RenderFormat::BC3_UNORM;
-    return std::make_shared<SampledTexture>(format, top.width, top.height, levels, gpu);
+    return std::make_shared<SampledTexture>(format, top.width, top.height, levels, gpu, description.faces);
 }
 
 std::shared_ptr<const SampledTexture> UploadSceneTexture(const mc2::texture::BaseRGBA8& description,
@@ -105,6 +105,7 @@ struct CachedTiledRenderer {
     const SceneColorShaders* shaders;
     std::array<float, kTiledTextureSlots> max_lod;
     plume::RenderCullMode cull;
+    uint32_t cube_slots;
     std::unique_ptr<ColorRenderer> renderer;
 };
 
@@ -479,16 +480,21 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         // for this pass. Their maximum LODs vary with each texture's mip chain.
         const auto samplers = std::span(draw.samplers).first(draw.shaders->texture_count);
         std::array<float, kTiledTextureSlots> max_lod{};
-        for (size_t i = 0; i < samplers.size(); ++i) max_lod[i] = samplers[i].maxLOD;
+        uint32_t cube_slots = 0;
+        for (size_t i = 0; i < samplers.size(); ++i) {
+            max_lod[i] = samplers[i].maxLOD;
+            if (draw.textures[i].faces == 6) cube_slots |= 1u << i;
+        }
         const auto existing = std::find_if(tiled_renderers.begin(), tiled_renderers.end(), [&](const auto& cached) {
-            return cached.shaders == draw.shaders && cached.max_lod == max_lod && cached.cull == draw.cull;
+            return cached.shaders == draw.shaders && cached.max_lod == max_lod && cached.cull == draw.cull &&
+                cached.cube_slots == cube_slots;
         });
         if (existing != tiled_renderers.end()) return *existing->renderer;
         auto configuration = ConfigureDepth(draw.color_surface, draw.shaders->vertex);
         configuration.cull = draw.cull;
         auto renderer = std::make_unique<ColorRenderer>(configuration, draw.shaders->pixel_dxil,
-            samplers, *depth_renderer, *color_target);
-        tiled_renderers.push_back({draw.shaders, max_lod, draw.cull, std::move(renderer)});
+            samplers, *depth_renderer, *color_target, cube_slots);
+        tiled_renderers.push_back({draw.shaders, max_lod, draw.cull, cube_slots, std::move(renderer)});
         return *tiled_renderers.back().renderer;
     }
 

@@ -14,8 +14,10 @@ struct BlockTexture {
     std::array<uint32_t,6> fetch_words{};
     uint32_t format=0,block_bytes=0,endianness=0,swizzle=0,gamma_mask=0;
     uint32_t mip_min_level=0,mip_max_level=0;
+    uint32_t faces=1;
     int32_t exp_adjust=0;
     bool tiled=false;
+    // All mips of face zero, then all mips of each following face.
     std::vector<BlockMip> mips;
 };
 // BC1/BC3 retain their compressed blocks for native GPU sampling. Only storage

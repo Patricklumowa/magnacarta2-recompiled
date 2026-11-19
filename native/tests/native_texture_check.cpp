@@ -74,6 +74,16 @@ int main(int argc,char** argv) try {
             Check(texture.ReadBlocks()==expected,"Native BC texture did not retain independent GPU contents");
         }
     }
+    std::vector<std::vector<uint8_t>> faces;
+    for (uint8_t face=0;face<6;++face) {
+        faces.emplace_back(32,uint8_t(2*face+1));
+        faces.emplace_back(8,uint8_t(2*face+2));
+    }
+    SampledTexture cube(RenderFormat::BC1_UNORM,8,8,faces,gpu,6);
+    const auto cube_desc=static_cast<const D3D12Texture*>(cube.Texture())->d3d->GetDesc();
+    Check(cube.CubeView() && cube_desc.DepthOrArraySize==6 && cube_desc.MipLevels==2 && cube.ReadBlocks()==faces,
+          "Native cubemap face and mip roundtrip differs");
+    std::cout<<"PASS: all six cubemap faces and two mips byte-exact after GPU upload/readback\n";
     const std::vector<std::vector<uint8_t>> one{{0,1,2,3,4,5,6,7}};
     const auto prior=gpu->completed;
     Reject([&] { SampledTexture invalid(RenderFormat::BC1_UNORM,0,4,one,gpu); });

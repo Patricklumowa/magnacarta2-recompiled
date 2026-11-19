@@ -537,6 +537,22 @@ vertex container SHA-256 is
 With the corresponding material pairs loaded, a live run completed 1,351
 draws in the first tile.
 
+## World cubemaps
+
+The next material samples five 2D textures and a BC1 cubemap. The cube's
+six faces keep their original per-level storage and packed mip offsets.
+The native upload orders the payloads by face and mip for D3D12. The cube
+view stays in the shader's cube descriptor table while the other views
+remain in the 2D table.
+
+Set `texture-count.txt` to `6` for the captured pair. The vertex container
+SHA-256 is `d66d788cd1fa8a9cb43bafe7ac7edd497611a143f76e37939b54989330d144ec`
+and the pixel container SHA-256 is
+`6e1b45018f69b7a4f73ff07af05e8eb58a6f67309b987d1a0f34ce33f138cac5`.
+The texture checks cover face strides, packed mips and byte-exact GPU
+roundtrips of all six faces. The live run completed two six-slot draws
+and advanced through draw 1,397 in the first tile.
+
 ## Scene presentation
 
 The display resolve validates a full, same-size RGBA8 source and destination.

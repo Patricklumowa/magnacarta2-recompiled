@@ -6,6 +6,7 @@
 #include <wrl/client.h>
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
@@ -29,6 +30,10 @@ void Upload(RenderBuffer* buffer, const void* bytes, size_t size) {
     std::memcpy(mapped, bytes, size);
     buffer->unmap();
 }
+struct TextureBinding {
+    const RenderTexture* texture = nullptr;
+    const RenderTextureView* cube_view = nullptr;
+};
 struct IndexedPipeline {
     struct VertexStream {
         RenderInputSlot slot;
@@ -41,7 +46,8 @@ struct IndexedPipeline {
     std::unique_ptr<RenderShader> vertex_shader, pixel_shader;
     std::unique_ptr<RenderPipelineLayout> layout;
     std::unique_ptr<RenderPipeline> pipeline;
-    std::unique_ptr<RenderDescriptorSet> texture_set, sampler_set;
+    std::unique_ptr<RenderDescriptorSet> texture_set, cube_set, sampler_set;
+    uint32_t cube_slots;
     std::vector<std::unique_ptr<RenderSampler>> samplers;
     std::unique_ptr<RenderBuffer> index_buffer, vertex_constants, shared_constants, pixel_constants, dummy_input;
     std::array<VertexStream, 2> streams;
@@ -51,8 +57,9 @@ struct IndexedPipeline {
 
     IndexedPipeline(const DepthConfiguration& c, NativeDevice* device_context, std::span<const uint8_t> ps = {},
                     std::span<const RenderSamplerDesc> sampler_descs = {}, RenderFormat color_format = RenderFormat::UNKNOWN,
-                    RenderFormat depth_format = RenderFormat::D32_FLOAT, RenderBlendDesc blend = RenderBlendDesc::Copy())
-        : gpu(device_context), width(c.width), height(c.height) {
+                    RenderFormat depth_format = RenderFormat::D32_FLOAT, RenderBlendDesc blend = RenderBlendDesc::Copy(),
+                    uint32_t cubes = 0)
+        : gpu(device_context), width(c.width), height(c.height), cube_slots(cubes) {
         Require(gpu && c.width && c.height && c.width <= 8192 && c.height <= 8192,
                 "Invalid native indexed target");
         Require(c.sample_count == 1 || c.sample_count == 2 || c.sample_count == 4, "Unsupported native sample count");
@@ -88,6 +95,8 @@ struct IndexedPipeline {
             {1, 4, RenderRootDescriptorType::CONSTANT_BUFFER}
         };
         const uint32_t count = uint32_t(sampler_descs.size());
+        Require(!(cube_slots >> count), "Native cubemap slot exceeds its sampler count");
+        const bool has_2d = uint32_t(std::popcount(cube_slots)) < count;
         const RenderDescriptorRange texture_range(RenderDescriptorRangeType::TEXTURE, 0, count);
         const RenderDescriptorRange sampler_range(RenderDescriptorRangeType::SAMPLER, 0, count);
         std::array<RenderDescriptorSetDesc, 4> sets{};
@@ -96,13 +105,16 @@ struct IndexedPipeline {
         layout_desc.rootDescriptorDescsCount = ps.empty() ? 2 : 3;
         layout_desc.allowInputLayout = true;
         if (count) {
-            sets[0] = RenderDescriptorSetDesc(&texture_range, 1, true, count);
+            if (has_2d) sets[0] = RenderDescriptorSetDesc(&texture_range, 1, true, count);
+            if (cube_slots) sets[2] = RenderDescriptorSetDesc(&texture_range, 1, true, count);
             sets[3] = RenderDescriptorSetDesc(&sampler_range, 1, true, count);
             layout_desc.descriptorSetDescs = sets.data();
             layout_desc.descriptorSetDescsCount = uint32_t(sets.size());
-            texture_set = device->createDescriptorSet(sets[0]);
+            if (has_2d) texture_set = device->createDescriptorSet(sets[0]);
+            if (cube_slots) cube_set = device->createDescriptorSet(sets[2]);
             sampler_set = device->createDescriptorSet(sets[3]);
-            Require(texture_set && sampler_set, "Native indexed descriptor creation failed");
+            Require((!has_2d || texture_set) && (!cube_slots || cube_set) && sampler_set,
+                    "Native indexed descriptor creation failed");
             for (const auto& sampler_desc : sampler_descs) {
                 auto sampler = device->createSampler(sampler_desc);
                 Require(bool(sampler), "Native indexed sampler creation failed");
@@ -145,19 +157,21 @@ struct IndexedPipeline {
         Require(vertex_constants && shared_constants && dummy_input, "Native indexed resource creation failed");
         const float dummy[] = {0,0,0,1}; Upload(dummy_input.get(), dummy, sizeof(dummy));
     }
-    void Prepare(const DepthDraw& draw, std::span<const uint8_t> ps = {}, std::span<const RenderTexture* const> textures = {}) {
+    void Prepare(const DepthDraw& draw, std::span<const uint8_t> ps = {}, std::span<const TextureBinding> textures = {}) {
         Require(draw.vertex_constants.size() == 4096 && draw.shared_constants.size() == 512,
                 "Invalid native vertex constants");
         Require(ps.size() == (pixel_shader ? 4096u : 0u) && textures.size() == samplers.size(),
                 "Invalid native pixel constants or texture count");
-        for (const auto* texture : textures)
-            Require(texture != nullptr, "Missing native sampled texture");
+        for (uint32_t slot = 0; slot < textures.size(); ++slot)
+            Require(textures[slot].texture && bool(textures[slot].cube_view) == bool(cube_slots & (1u << slot)),
+                    "Native sampled texture is missing or has a different dimension");
         if (!textures.empty()) {
             for (uint32_t slot = 0; slot < 16; ++slot) {
-                uint32_t texture_index, sampler_index;
+                uint32_t texture_index, cube_index, sampler_index;
                 std::memcpy(&texture_index, draw.shared_constants.data() + slot * 4, 4);
+                std::memcpy(&cube_index, draw.shared_constants.data() + 128 + slot * 4, 4);
                 std::memcpy(&sampler_index, draw.shared_constants.data() + 192 + slot * 4, 4);
-                Require(texture_index < textures.size() && sampler_index < samplers.size(),
+                Require(texture_index < textures.size() && cube_index < textures.size() && sampler_index < samplers.size(),
                         "Native texture or sampler index is out of range");
             }
         }
@@ -207,8 +221,19 @@ struct IndexedPipeline {
         Upload(vertex_constants.get(), draw.vertex_constants.data(), 4096);
         Upload(shared_constants.get(), draw.shared_constants.data(), 512);
         if (pixel_shader) Upload(pixel_constants.get(), ps.data(), ps.size());
-        for (uint32_t i = 0; i < textures.size(); ++i)
-            texture_set->setTexture(i, textures[i], RenderTextureLayout::SHADER_READ);
+        // Both tables keep the original slot numbers. Fill unused entries
+        // with another view of the same dimension so the tables remain valid.
+        const auto first_2d = std::find_if(textures.begin(), textures.end(), [](const auto& binding) { return !binding.cube_view; });
+        const auto first_cube = std::find_if(textures.begin(), textures.end(), [](const auto& binding) { return binding.cube_view; });
+        for (uint32_t i = 0; i < textures.size(); ++i) {
+            const auto& binding = textures[i];
+            if (texture_set)
+                texture_set->setTexture(i, binding.cube_view ? first_2d->texture : binding.texture, RenderTextureLayout::SHADER_READ);
+            if (cube_set) {
+                const auto& cube = binding.cube_view ? binding : *first_cube;
+                cube_set->setTexture(i, cube.texture, RenderTextureLayout::SHADER_READ, cube.cube_view);
+            }
+        }
     }
     void Record(const DepthDraw& draw) const {
         auto& commands = gpu->commands;
@@ -217,10 +242,9 @@ struct IndexedPipeline {
         commands->setGraphicsRootDescriptor(vertex_constants.get(), 0);
         commands->setGraphicsRootDescriptor(shared_constants.get(), 1);
         if (pixel_shader) commands->setGraphicsRootDescriptor(pixel_constants.get(), 2);
-        if (texture_set) {
-            commands->setGraphicsDescriptorSet(texture_set.get(), 0);
-            commands->setGraphicsDescriptorSet(sampler_set.get(), 3);
-        }
+        if (texture_set) commands->setGraphicsDescriptorSet(texture_set.get(), 0);
+        if (cube_set) commands->setGraphicsDescriptorSet(cube_set.get(), 2);
+        if (sampler_set) commands->setGraphicsDescriptorSet(sampler_set.get(), 3);
         const std::array vertex_sizes{draw.vertices.size(), draw.secondary_vertices.size()};
         for (uint32_t i = 0; i < stream_count; ++i) {
             const RenderVertexBufferView vertex_view(streams[i].buffer.get(), vertex_sizes[i]);
@@ -441,7 +465,7 @@ uint64_t DepthRenderer::RestoreResolvedDepth(const DepthConfiguration& config, c
     auto& gpu = *state.gpu;
     IndexedPipeline pipeline(config, &gpu, pixel_shader, std::span(&sampler, 1), RenderFormat::UNKNOWN,
                              RenderFormat::D32_FLOAT_S8_UINT);
-    const RenderTexture* source = state.tile_resolve->Output();
+    const TextureBinding source{state.tile_resolve->Output()};
     pipeline.Prepare(draw, constants, std::span(&source, 1));
     auto& commands = gpu.commands;
     commands->begin();
@@ -462,11 +486,12 @@ struct ColorRenderer::Impl {
     std::unique_ptr<RenderFramebuffer> framebuffer;
 
     Impl(const DepthConfiguration& configuration, std::span<const uint8_t> pixel_shader,
-         std::span<const RenderSamplerDesc> samplers, DepthRenderer* depth_renderer, ColorTarget& color_target, RenderBlendDesc blend)
+         std::span<const RenderSamplerDesc> samplers, DepthRenderer* depth_renderer, ColorTarget& color_target,
+         RenderBlendDesc blend, uint32_t cube_slots = 0)
         : depth(depth_renderer ? depth_renderer->impl_.get() : nullptr), color(color_target), gpu(color.Device()),
           attachment(color.Attachment(gpu, configuration.width, configuration.height, configuration.sample_count)),
           pipeline(configuration, &gpu, pixel_shader, samplers, color.Format(),
-                   depth ? RenderFormat::D32_FLOAT : RenderFormat::UNKNOWN, blend) {
+                   depth ? RenderFormat::D32_FLOAT : RenderFormat::UNKNOWN, blend, cube_slots) {
         Require(!depth || (configuration.width == depth->width && configuration.height == depth->height &&
                 configuration.sample_count == depth->samples && depth->gpu.get() == &gpu),
                 "Native color pipeline differs from its depth attachment");
@@ -481,7 +506,7 @@ struct ColorRenderer::Impl {
         Require(bool(framebuffer), "Native color framebuffer creation failed");
     }
     uint64_t Render(const DepthDraw& draw, std::span<const uint8_t> pixel_constants,
-                    std::span<const RenderTexture* const> textures) {
+                    std::span<const TextureBinding> textures) {
         Require(!depth || depth->initialized, "Native depth target has not been cleared");
         color.RequireCleared(draw.scissor);
         pipeline.Prepare(draw, pixel_constants, textures);
@@ -499,24 +524,24 @@ struct ColorRenderer::Impl {
     }
 };
 ColorRenderer::ColorRenderer(const DepthConfiguration& c, std::span<const uint8_t> ps,
-                             std::span<const RenderSamplerDesc> samplers, DepthRenderer& depth, ColorTarget& color)
-    : impl_(std::make_unique<Impl>(c, ps, samplers, &depth, color, RenderBlendDesc::Copy())) {}
+                             std::span<const RenderSamplerDesc> samplers, DepthRenderer& depth, ColorTarget& color, uint32_t cube_slots)
+    : impl_(std::make_unique<Impl>(c, ps, samplers, &depth, color, RenderBlendDesc::Copy(), cube_slots)) {}
 ColorRenderer::ColorRenderer(const DepthConfiguration& c, std::span<const uint8_t> ps,
                              std::span<const RenderSamplerDesc> samplers, ColorTarget& color, RenderBlendDesc blend)
     : impl_(std::make_unique<Impl>(c, ps, samplers, nullptr, color, blend)) {}
 ColorRenderer::~ColorRenderer() = default;
 uint64_t ColorRenderer::Render(const DepthDraw& draw, std::span<const uint8_t> ps,
                                std::span<const SampledTexture* const> textures) {
-    std::array<const RenderTexture*, 16> views{};
+    std::array<TextureBinding, 16> views{};
     Require(textures.size() <= views.size(), "Too many native sampled textures");
     for (size_t i = 0; i < textures.size(); ++i) {
         Require(textures[i] && &textures[i]->Device() == &impl_->gpu, "Native sampled texture belongs to a different device or is missing");
-        views[i] = textures[i]->Texture();
+        views[i] = TextureBinding{textures[i]->Texture(), textures[i]->CubeView()};
     }
     return impl_->Render(draw, ps, std::span(views).first(textures.size()));
 }
 uint64_t ColorRenderer::RenderResolved(const DepthDraw& draw, std::span<const uint8_t> ps, const ColorTarget& source) {
-    const RenderTexture* texture = source.ResolvedTexture(impl_->gpu);
+    const TextureBinding texture{source.ResolvedTexture(impl_->gpu)};
     return impl_->Render(draw, ps, std::span(&texture, 1));
 }
 uint64_t ColorRenderer::RenderResolved(const DepthDraw& draw, std::span<const uint8_t> ps,
@@ -525,8 +550,8 @@ uint64_t ColorRenderer::RenderResolved(const DepthDraw& draw, std::span<const ui
     Require(depth.gpu.get() == &impl_->gpu && depth.tile_resolve &&
             depth.tile_resolve->CompletedRegion() == RenderRect(0,0,depth.width,depth.height),
             "Native color pass requires the complete depth resolve on its device");
-    const RenderTexture* textures[] = {depth.tile_resolve->Output(), color_source.ResolvedTexture(impl_->gpu),
-                                      bloom_source ? bloom_source->ResolvedTexture(impl_->gpu) : nullptr};
+    const TextureBinding textures[] = {{depth.tile_resolve->Output()}, {color_source.ResolvedTexture(impl_->gpu)},
+                                      {bloom_source ? bloom_source->ResolvedTexture(impl_->gpu) : nullptr}};
     return impl_->Render(draw, ps, std::span(textures).first(bloom_source ? 3 : 2));
 }
 }

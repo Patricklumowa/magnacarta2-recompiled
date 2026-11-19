@@ -80,9 +80,9 @@ void RequireSceneTexture(const DeviceState& state, const SceneResolveTexture& so
     }
 }
 
-void BindSceneTexture(DepthDraw& draw, uint32_t slot, uint32_t mode = PackTextureFetchMode(0x688, 0, 0)) {
+void BindSceneTexture(DepthDraw& draw, uint32_t slot, uint32_t mode = PackTextureFetchMode(0x688, 0, 0), bool cube = false) {
     auto* shared = draw.shared_constants.data();
-    std::memcpy(shared + slot * 4, &slot, sizeof(slot));
+    std::memcpy(shared + (cube ? 128 : 0) + slot * 4, &slot, sizeof(slot));
     std::memcpy(shared + 192 + slot * 4, &slot, sizeof(slot));
     std::memcpy(shared + 288 + slot * 4, &mode, sizeof(mode));
 }
@@ -129,7 +129,7 @@ void ReadBlockSceneTexture(const DeviceState& state, uint32_t slot, uint32_t exp
             words[0], words[3], words[4], words[5]));
     }
     sampler = OverlaySampler(texture.mip_max_level, clamp_uv);
-    BindSceneTexture(draw, slot, PackTextureFetchMode(texture.swizzle, texture.gamma_mask, texture.exp_adjust));
+    BindSceneTexture(draw, slot, PackTextureFetchMode(texture.swizzle, texture.gamma_mask, texture.exp_adjust), texture.faces == 6);
 }
 
 SceneVertexShader LoadVertexShader(const std::filesystem::path& directory) {

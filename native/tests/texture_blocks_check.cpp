@@ -80,6 +80,20 @@ int main() try {
     Check(!DescribeBlockTexture(Fetch(64,64,6,false),texture,error) && texture.fetch_words==prior,"Unsupported format changed output");
     fetch=Fetch(64,64,18,false); fetch[3]|=4;
     Check(!DescribeBlockTexture(fetch,texture,error),"Signed BC sampling was accepted as UNORM");
+    auto cube=Fetch(512,512,18,true,1,true,9,16);
+    cube[8]|=0x14; // Six faces in the size word.
+    cube[22]|=4;   // Cubemap dimension.
+    Check(DescribeBlockTexture(cube,texture,error),error.c_str());
+    Check(texture.faces==6 && texture.mips.size()==60,"Cubemap did not expose six complete mip chains");
+    for (uint32_t face=0;face<6;++face) {
+        Check(texture.mips[face*10].physical_address==0x100000+face*0x20000 &&
+              texture.mips[face*10+1].physical_address==0x200000+face*0x8000,
+              "Cubemap base or mip storage used the wrong face stride");
+    }
+    const std::vector<uint8_t> cube_mip(texture.mips.back().source_bytes,0x45);
+    Check(LinearizeBlockMip(texture,59,cube_mip,blocks,error) && blocks==std::vector<uint8_t>(8,0x45),
+          "The last cubemap face's packed mip was not decoded");
+    std::cout<<"PASS: face-major cubemap mips, independent face strides and packed tail\n";
     std::cout<<"PASS: BC1/BC3 blocks, all endian modes, partial blocks, packed mips, separate storage, gamma metadata and bounds\n";
     return 0;
 } catch (const std::exception& error) { std::cerr<<"Texture block check: "<<error.what()<<'\n'; return 1; }
