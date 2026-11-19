@@ -122,6 +122,9 @@ struct PendingMovieDraw {
 struct QuadSamplerState {
     float max_lod;
     plume::RenderTextureAddressMode address_u, address_v;
+    plume::RenderFilter min_filter, mag_filter;
+    plume::RenderMipmapMode mipmap_mode;
+    uint32_t anisotropy;
     bool operator==(const QuadSamplerState&) const = default;
 };
 struct CachedQuadRenderer {
@@ -662,12 +665,13 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             std::span<const plume::RenderSamplerDesc> samplers, ColorTarget& target,
             plume::RenderBlendDesc blend = plume::RenderBlendDesc::Copy(),
             plume::RenderCullMode cull = plume::RenderCullMode::NONE) {
-        // Filtering is fixed by the program. The bound images can change
-        // their U/V addressing and maximum sampled mip level.
+        // The same shader can read point-sampled UI shapes and filtered
+        // textures. Reuse a pipeline only with matching bound samplers.
         std::array<QuadSamplerState, 3> sampler_states{};
         Require(samplers.size() <= sampler_states.size(), "Too many native fullscreen samplers");
         std::transform(samplers.begin(), samplers.end(), sampler_states.begin(), [](const plume::RenderSamplerDesc& sampler) {
-            return QuadSamplerState{sampler.maxLOD, sampler.addressU, sampler.addressV};
+            return QuadSamplerState{sampler.maxLOD, sampler.addressU, sampler.addressV, sampler.minFilter,
+                sampler.magFilter, sampler.mipmapMode, sampler.anisotropyEnabled ? sampler.maxAnisotropy : 0};
         });
         const auto existing = std::find_if(quad_renderers.begin(), quad_renderers.end(), [&](const CachedQuadRenderer& cache) {
             return cache.program == &program && cache.samplers == sampler_states;

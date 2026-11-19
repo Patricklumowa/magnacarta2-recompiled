@@ -457,6 +457,10 @@ share that target through the normal display resolve and DXGI swap, with no
 pixel readback during playback. The native quad check verifies the movie's
 RGBA output into a shared color target. A live run displayed the original
 subtitles over the opening movie before the timed smoke check closed.
+The movie's pause and skip controls also use a point-sampled RGBA8
+overlay. The pipeline cache distinguishes that sampler from the filtered
+subtitle and menu samplers. A live test displayed the pause controls
+and accepted Skip.
 
 ## Scene presentation
 

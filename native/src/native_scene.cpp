@@ -650,16 +650,21 @@ SceneFullscreenDraw ReadBackBufferOverlay(const PPCContext& ctx, uint8_t* base,
     const auto word0 = state.Word(1152), word3 = state.Word(1164), word4 = state.Word(1168), word5 = state.Word(1172);
     constexpr uint32_t mip_max_mask = 15u << 6;
     const uint32_t addressing = word0 & 0x0007fc00;
-    if (!state.Word(12552) || (addressing != 0 && addressing != 0x00004800) || (word3 & 0xffffe000) != 0x06280000 ||
-        (word4 & ~mip_max_mask) != 0x803 || (word5 & 0x1ff)) {
+    const uint32_t format = state.Word(1156) & 63;
+    const uint32_t filtering = word3 & 0xffffe000;
+    const bool point = format == 6 && !filtering && !word4;
+    const bool anisotropic = filtering == 0x06280000 && (word4 & ~mip_max_mask) == 0x803;
+    if (!state.Word(12552) || (addressing != 0 && addressing != 0x00004800) || (!point && !anisotropic) || (word5 & 0x1ff)) {
         throw std::runtime_error(std::format("Unsupported overlay texture format {} sampler {:#x}/{:#x}/{:#x}/{:#x}",
-                                            state.Word(1156) & 63, word0, word3, word4, word5));
+                                            format, word0, word3, word4, word5));
     }
     ReadFullscreenConstants(state, pass.surface, pass.draw, pass.pixel_constants, false);
-    binding.sampler = OverlaySampler(0, addressing == 0x00004800);
+    binding.sampler = point ? FullscreenColorSampler() : OverlaySampler();
+    binding.sampler.addressU = binding.sampler.addressV = addressing
+        ? plume::RenderTextureAddressMode::CLAMP : plume::RenderTextureAddressMode::WRAP;
     std::string error;
     uint32_t mode;
-    if ((state.Word(1156) & 63) == 6) {
+    if (format == 6) {
         mc2::texture::BaseRGBA8 texture;
         if (!mc2::texture::DescribeBaseRGBA8(fetch, texture, error)) throw std::runtime_error(error);
         Require(texture.mip_min_level == 0 && texture.mip_max_level == 0, "Overlay texture needs its base level");
