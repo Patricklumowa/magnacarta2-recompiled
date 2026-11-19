@@ -102,6 +102,7 @@ struct TiledSceneDraw {
 struct CachedTiledRenderer {
     const SceneColorShaders* shaders;
     std::array<float, 2> max_lod;
+    plume::RenderCullMode cull;
     std::unique_ptr<ColorRenderer> renderer;
 };
 
@@ -473,12 +474,14 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         // for this pass. Their maximum LODs vary with each texture's mip chain.
         const std::array max_lod{draw.samplers[0].maxLOD, draw.samplers[1].maxLOD};
         const auto existing = std::find_if(tiled_renderers.begin(), tiled_renderers.end(), [&](const auto& cached) {
-            return cached.shaders == draw.shaders && cached.max_lod == max_lod;
+            return cached.shaders == draw.shaders && cached.max_lod == max_lod && cached.cull == draw.cull;
         });
         if (existing != tiled_renderers.end()) return *existing->renderer;
-        auto renderer = std::make_unique<ColorRenderer>(ConfigureDepth(draw.color_surface, draw.shaders->vertex),
-            draw.shaders->pixel_dxil, draw.samplers, *depth_renderer, *color_target);
-        tiled_renderers.push_back({draw.shaders, max_lod, std::move(renderer)});
+        auto configuration = ConfigureDepth(draw.color_surface, draw.shaders->vertex);
+        configuration.cull = draw.cull;
+        auto renderer = std::make_unique<ColorRenderer>(configuration, draw.shaders->pixel_dxil,
+            draw.samplers, *depth_renderer, *color_target);
+        tiled_renderers.push_back({draw.shaders, max_lod, draw.cull, std::move(renderer)});
         return *tiled_renderers.back().renderer;
     }
 

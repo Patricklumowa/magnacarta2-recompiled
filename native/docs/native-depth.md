@@ -508,8 +508,12 @@ Each first-tile draw retains its constants, indices, vertices and texture
 references in draw order. The lower tile replays that order after its clear.
 Draws in this pass share pipelines by shader pair and sampler LOD limits.
 With the two observed world materials loaded, a live run completed 12 first-tile
-draws and reached the next material. The game still needs more material
-coverage before it can present the first world frame.
+draws and reached the next material. Later draws reverse the front-face
+winding. The renderer maps that winding and the guest cull selection to the
+D3D12 cull mode and includes it in the pipeline cache key. The material
+snapshot check covers both winding values. A live run with the additional
+two-texture materials completed 113 world draws in the first tile and reached
+a mesh with a second vertex stream and a third texture.
 
 ## Scene presentation
 

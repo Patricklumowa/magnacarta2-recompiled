@@ -40,6 +40,7 @@ struct SceneColorClear {
 struct SceneColorDraw {
     SceneSurface color_surface, tile_depth;
     const SceneColorShaders* shaders = nullptr;
+    plume::RenderCullMode cull = plume::RenderCullMode::FRONT;
     DepthDraw draw;
     std::vector<uint8_t> pixel_constants;
     std::array<mc2::texture::BlockTexture, 2> textures;

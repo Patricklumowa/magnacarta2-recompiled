@@ -212,9 +212,9 @@ DepthDraw ReadGeometry(const PPCContext& ctx, uint8_t* base, const DeviceState& 
                        const SceneSurface& surface) {
     Require(ctx.r4.u32 == 4 && state.Word(11824) == 0,
             "Native scene requires the verified triangle-list vertex inputs");
-    Require(state.Word(10548) == 0x00700766 && state.Word(10568) == 0x00018002 && state.Word(10572) == 0x43f &&
+    Require(state.Word(10548) == 0x00700766 && state.Word(10572) == 0x43f &&
             state.Word(10564) == 0x80000 && state.Word(10452) == 0 && state.Float(12672) == 1 && state.Float(12676) == 0,
-            "Depth/stencil, culling, clipping, vertex base or viewport state differs from the verified pass");
+            "Depth/stencil, clipping, vertex base or viewport state differs from the verified pass");
     Require(uint32_t(state.bytes[12536])*4 == 40, "Native scene vertex stride changed");
     std::vector<uint8_t> vertex_descriptor, index_descriptor, raw;
     uint32_t address=0,size=0;
@@ -328,7 +328,7 @@ SceneDepthDraw ReadSceneDepthDraw(const PPCContext& ctx, uint8_t* base, const Sc
     state.NoColorAttachments();
     const auto surface = state.DepthSurface(base,720);
     state.FullViewport(surface);
-    Require(state.Word(12700) == 0, "Native depth pass has a bound pixel shader");
+    Require(state.Word(12700) == 0 && state.Word(10568) == 0x18002, "Native depth pass requires the verified shader and winding");
     Require(ReadBoundShader(base, state.Word(12704), true) == shader.reference, "Untranslated native scene depth shader");
     return {surface, ReadGeometry(ctx, base, state, surface)};
 }
@@ -376,6 +376,15 @@ SceneColorDraw ReadSceneColorDraw(const PPCContext& ctx, uint8_t* base, const Sc
     // Full color write, copy blend, and no alpha test or alpha-to-coverage.
     Require(state.Word(10460) == 0xf && state.Word(10552) == 0x10001 && (state.Word(10556) & 0x1f) == 7,
             "Native color draw has unsupported color write, blend or alpha state");
+    const auto raster_mode = state.Word(10568);
+    const auto cull_bits = raster_mode & 3u;
+    Require((raster_mode & ~7u) == 0x18000 && cull_bits != 3, "Unsupported native color raster state");
+    // The D3D12 pipeline uses clockwise front faces. Convert the guest's
+    // winding and cull selection together to keep the same triangles.
+    const bool clockwise_front = (raster_mode & 4) != 0;
+    const bool culls_clockwise = clockwise_front == ((cull_bits & 1) != 0);
+    snapshot.cull = !cull_bits ? plume::RenderCullMode::NONE :
+        culls_clockwise ? plume::RenderCullMode::FRONT : plume::RenderCullMode::BACK;
     const auto pixel_shader = ReadBoundShader(base, state.Word(12700), false);
     const auto vertex_shader = ReadBoundShader(base, state.Word(12704), true);
     const auto matches = [&](const SceneColorShaders& program) {

@@ -871,6 +871,10 @@ int main(int argc,char** argv) try {
                 for (size_t i = 0; i < world.draw.indices.size(); ++i)
                     Check(world.draw.indices[i] == (uint32_t(world_indices[i * 2]) * 256 + world_indices[i * 2 + 1]),
                           "World index byte order differs");
+                Check(world.cull == plume::RenderCullMode::FRONT, "Captured world cull mode differs");
+                store(device + 10568, 0x18006);
+                const auto reversed = ReadSceneColorDraw(context, base, color_shaders, std::span(&world_shaders, 1));
+                Check(reversed.cull == plume::RenderCullMode::BACK, "Reversed guest winding kept the wrong cull mode");
                 std::cout << "PASS: captured world material selection and 16-bit indices\n";
             }
         }
