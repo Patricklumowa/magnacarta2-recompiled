@@ -397,6 +397,7 @@ the original color and gamma constants to the unspecialized pixel shader.
 The renderer samples the original RGBA8 and BC3 textures and blends RGB
 with source alpha while retaining the destination alpha. The BC3 path
 retains the full mip chain and selects a sampler with the bound upper level.
+The title uses both wrapping and clamp-to-edge on these overlays.
 Put the shader containers, `vertex.dxil`, and `pixel.dxil` in `fullscreen/overlay`.
 
 The GPU check verifies the RGBA8 upload and blend result. The live run
@@ -412,12 +413,18 @@ The second fan adds source color scaled by source alpha and retains the
 destination alpha. Its shader reads one BC1 texture. Put this shader pair
 in `fullscreen/menu-fan/additive`. The next additive material samples
 mipmapped BC3 and BC1 textures and clamps its BC3 detail texture to the edge.
-Put that shader pair in `fullscreen/menu-fan/additive-detail`.
+Put that shader pair in `fullscreen/menu-fan/additive-detail`. The masked
+additive material uses BC1, BC3, and BC3 in that order. Put its shader pair
+in `fullscreen/menu-fan/additive-mask`. Two additional fan materials use
+source alpha over the destination and preserve destination alpha. Put
+their shader pairs in `fullscreen/menu-fan/alpha-detail` for the three-texture
+material and `fullscreen/menu-fan/alpha-clamp` for the one-texture material.
 
-A live Start test completed the three fan materials on the native queue.
-The first four displayed frames were black. A readback before the final
-overlays showed the title background and its additive effect. Another
-shader pair still stops the transition before the title screen is visible.
+A live test with the Xenos DLL absent displayed the animated logo,
+background, and Press START prompt at a 2560 x 1600 window size. The native
+backend presented 46 scene frames after the movie skip. Pressing Start on
+that screen advanced into a transition that encounters another menu fan
+shader. The main menu and gameplay are still incomplete on this backend.
 
 ## Scene presentation
 

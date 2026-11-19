@@ -48,9 +48,9 @@ complete the draw and their color and depth resolves in a live boot without
 Xenos. The guest then retires its staging chunks on the CPU. See
 [indexed color replay](native-depth.md#indexed-color-replay).
 
-The native backend also runs the initial depth restore, bloom, scene
-composition, and RGBA8 presentation. The title transition still encounters
-an unsupported shader. See [scene presentation](native-depth.md#scene-presentation).
+The native backend also runs depth restore, bloom, scene composition, and
+RGBA8 presentation for the animated title screen. The main-menu transition
+still encounters an unsupported shader. See [scene presentation](native-depth.md#scene-presentation).
 
 The optional bounded live movie comparison uses the same native drawing code
 on live guest inputs. Two movie draws passed the CPU comparison during a clean

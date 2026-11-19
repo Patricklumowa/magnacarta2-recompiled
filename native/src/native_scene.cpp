@@ -126,8 +126,7 @@ void ReadBlockSceneTexture(const DeviceState& state, uint32_t slot, uint32_t for
             slot, texture.format, texture.mip_min_level, texture.mip_max_level,
             words[0], words[3], words[4], words[5]));
     }
-    sampler = OverlaySampler(texture.mip_max_level);
-    if (clamp_uv) sampler.addressU = sampler.addressV = plume::RenderTextureAddressMode::CLAMP;
+    sampler = OverlaySampler(texture.mip_max_level, clamp_uv);
     BindSceneTexture(draw, slot, PackTextureFetchMode(texture.swizzle, texture.gamma_mask, texture.exp_adjust));
 }
 
@@ -650,12 +649,14 @@ SceneFullscreenDraw ReadBackBufferOverlay(const PPCContext& ctx, uint8_t* base,
     const auto fetch = std::span(state.bytes).subspan(1152, 24);
     const auto word0 = state.Word(1152), word3 = state.Word(1164), word4 = state.Word(1168), word5 = state.Word(1172);
     constexpr uint32_t mip_max_mask = 15u << 6;
-    if (!state.Word(12552) || (word0 & 0x0007fc00) || (word3 & 0xffffe000) != 0x06280000 ||
+    const uint32_t addressing = word0 & 0x0007fc00;
+    if (!state.Word(12552) || (addressing != 0 && addressing != 0x00004800) || (word3 & 0xffffe000) != 0x06280000 ||
         (word4 & ~mip_max_mask) != 0x803 || (word5 & 0x1ff)) {
         throw std::runtime_error(std::format("Unsupported overlay texture format {} sampler {:#x}/{:#x}/{:#x}/{:#x}",
                                             state.Word(1156) & 63, word0, word3, word4, word5));
     }
     ReadFullscreenConstants(state, pass.surface, pass.draw, pass.pixel_constants, false);
+    binding.sampler = OverlaySampler(0, addressing == 0x00004800);
     std::string error;
     uint32_t mode;
     if ((state.Word(1156) & 63) == 6) {
@@ -669,7 +670,7 @@ SceneFullscreenDraw ReadBackBufferOverlay(const PPCContext& ctx, uint8_t* base,
         mc2::texture::BlockTexture texture;
         if (!mc2::texture::DescribeBlockTexture(fetch, texture, error)) throw std::runtime_error(error);
         Require(texture.mip_min_level == 0, "Overlay atlas needs its base level");
-        binding.max_mip_level = texture.mip_max_level;
+        binding.sampler.maxLOD = float(texture.mip_max_level);
         mode = PackTextureFetchMode(texture.swizzle, texture.gamma_mask, texture.exp_adjust);
         binding.texture = std::move(texture);
     }
@@ -698,11 +699,12 @@ plume::RenderBlendDesc OverlayBlend() {
     return blend;
 }
 
-plume::RenderSamplerDesc OverlaySampler(uint32_t max_mip_level) {
+plume::RenderSamplerDesc OverlaySampler(uint32_t max_mip_level, bool clamp_uv) {
     plume::RenderSamplerDesc sampler;
     sampler.anisotropyEnabled = true;
     sampler.maxAnisotropy = 4;
     sampler.maxLOD = float(max_mip_level);
+    if (clamp_uv) sampler.addressU = sampler.addressV = plume::RenderTextureAddressMode::CLAMP;
     return sampler;
 }
 
@@ -732,11 +734,8 @@ SceneMenuFan ReadMenuFan(const PPCContext& ctx, uint8_t* base, std::span<const S
     RequireFullscreenDrawState(state, pass.surface, false, 15, 0x18002, program->blend_control);
     pass.shaders = &program->shaders;
     ReadFullscreenConstants(state, pass.surface, pass.draw, pass.pixel_constants, false);
-    menu.blend = plume::RenderBlendDesc::Copy();
-    if (program->blend_control == 0x01000106) {
-        menu.blend = OverlayBlend();
-        menu.blend.dstBlend = plume::RenderBlend::ONE;
-    }
+    menu.blend = program->blend_control == 0x10001 ? plume::RenderBlendDesc::Copy() : OverlayBlend();
+    if (program->blend_control == 0x01000106) menu.blend.dstBlend = plume::RenderBlend::ONE;
     for (uint32_t format : program->block_formats) {
         if (!format) break;
         const auto slot = menu.texture_count++;

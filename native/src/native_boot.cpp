@@ -101,9 +101,14 @@ struct PendingMenuFan {
     SceneMenuFan scene;
     uint32_t vertices, endpoint;
 };
+struct QuadSamplerState {
+    float max_lod;
+    plume::RenderTextureAddressMode address_u, address_v;
+    bool operator==(const QuadSamplerState&) const = default;
+};
 struct CachedQuadRenderer {
     const ScenePassShaders* program;
-    std::array<float, 3> max_lods;
+    std::array<QuadSamplerState, 3> samplers;
     std::unique_ptr<ColorRenderer> renderer;
 };
 
@@ -184,14 +189,18 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             const auto overlay_directory = fullscreen_directory / "overlay";
             if (std::filesystem::is_directory(overlay_directory)) overlay_shaders = LoadFullscreenColorShaders(overlay_directory, false, "pixel.dxil");
             const auto menu_fan_directory = fullscreen_directory / "menu-fan";
-            if (std::filesystem::is_directory(menu_fan_directory))
-                menu_fan_programs.push_back({LoadMenuFanShaders(menu_fan_directory), {20,18,18}, 0x10001});
-            const auto menu_additive_directory = menu_fan_directory / "additive";
-            if (std::filesystem::is_directory(menu_additive_directory))
-                menu_fan_programs.push_back({LoadMenuFanShaders(menu_additive_directory), {18}, 0x01000106});
-            const auto menu_detail_directory = menu_fan_directory / "additive-detail";
-            if (std::filesystem::is_directory(menu_detail_directory))
-                menu_fan_programs.push_back({LoadMenuFanShaders(menu_detail_directory), {20,18,20}, 0x01000106, 1u << 2});
+            const auto load_menu_fan = [&](const char* name, std::array<uint32_t, 3> formats,
+                                           uint32_t blend, uint32_t clamp_slots = 0) {
+                const auto directory = menu_fan_directory / name;
+                if (std::filesystem::is_directory(directory))
+                    menu_fan_programs.push_back({LoadMenuFanShaders(directory), formats, blend, clamp_slots});
+            };
+            load_menu_fan(".", {20,18,18}, 0x10001);
+            load_menu_fan("additive", {18}, 0x01000106);
+            load_menu_fan("additive-detail", {20,18,20}, 0x01000106, 1u << 2);
+            load_menu_fan("additive-mask", {18,20,20}, 0x01000106);
+            load_menu_fan("alpha-detail", {18,18,20}, 0x01000706);
+            load_menu_fan("alpha-clamp", {20}, 0x01000706, 1);
             const auto present_directory = fullscreen_directory / "present";
             if (std::filesystem::is_directory(present_directory)) {
                 present_vertex_shader = ReadNativeFile(present_directory / "vertex.dxil");
@@ -574,22 +583,22 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             std::span<const plume::RenderSamplerDesc> samplers, ColorTarget& target,
             plume::RenderBlendDesc blend = plume::RenderBlendDesc::Copy(),
             plume::RenderCullMode cull = plume::RenderCullMode::NONE) {
-        // Addressing and filtering are fixed by the program. Any bound image
-        // can change the maximum sampled mip level.
-        std::array<float, 3> max_lods{};
-        Require(samplers.size() <= max_lods.size(), "Too many native fullscreen samplers");
-        std::transform(samplers.begin(), samplers.end(), max_lods.begin(), [](const plume::RenderSamplerDesc& sampler) {
-            return sampler.maxLOD;
+        // Filtering is fixed by the program. The bound images can change
+        // their U/V addressing and maximum sampled mip level.
+        std::array<QuadSamplerState, 3> sampler_states{};
+        Require(samplers.size() <= sampler_states.size(), "Too many native fullscreen samplers");
+        std::transform(samplers.begin(), samplers.end(), sampler_states.begin(), [](const plume::RenderSamplerDesc& sampler) {
+            return QuadSamplerState{sampler.maxLOD, sampler.addressU, sampler.addressV};
         });
         const auto existing = std::find_if(quad_renderers.begin(), quad_renderers.end(), [&](const CachedQuadRenderer& cache) {
-            return cache.program == &program && cache.max_lods == max_lods;
+            return cache.program == &program && cache.samplers == sampler_states;
         });
         if (existing != quad_renderers.end()) return *existing->renderer;
         auto configuration = ConfigureDepth(surface, program.vertex);
         configuration.cull = cull;
         auto pipeline = std::make_unique<ColorRenderer>(configuration, program.pixel_dxil, samplers, target, blend);
         auto* result = pipeline.get();
-        quad_renderers.push_back({&program, max_lods, std::move(pipeline)});
+        quad_renderers.push_back({&program, sampler_states, std::move(pipeline)});
         return *result;
     }
 
@@ -630,11 +639,12 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             std::span(scene.samplers).first(scene.texture_count), *back_buffer, scene.blend, plume::RenderCullMode::FRONT);
         completed = renderer.Render(scene.pass.draw, scene.pass.pixel_constants, std::span(bindings).first(scene.texture_count));
         const auto texture_count = scene.texture_count;
-        const bool additive = scene.blend.blendEnabled;
+        const char* blend = !scene.blend.blendEnabled ? "opaque" :
+            scene.blend.dstBlend == plume::RenderBlend::ONE ? "additive" : "alpha-blended";
         ++overlay_draws;
         pending_menu_fan.reset();
         REXLOG_INFO("MC2 native scene: drew {} menu triangle fan, bindings={}, completed={}",
-                    additive ? "additive" : "base", texture_count, completed);
+                    blend, texture_count, completed);
     }
 
     void CompleteIndexedUp(uint8_t* base) {
@@ -681,8 +691,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             back_buffer_surface = surface;
             REXLOG_INFO("MC2 native scene: drew gamma and overlay into RGBA8 back buffer {:#x}, completed={}", surface.address, completed);
         } else if (up.pass == SceneQuadPass::Overlay) {
-            const auto overlay_sampler = OverlaySampler(up.overlay->max_mip_level);
-            auto& renderer = QuadRendererFor(surface, *overlay_shaders, std::span(&overlay_sampler,1), *back_buffer, OverlayBlend());
+            auto& renderer = QuadRendererFor(surface, *overlay_shaders, std::span(&up.overlay->sampler,1), *back_buffer, OverlayBlend());
             auto texture = std::visit([&](const auto& source) { return UploadSceneTexture(base, source, gpu); }, up.overlay->texture);
             const auto* sampled = texture.get();
             completed = renderer.Render(up.scene.draw, up.scene.pixel_constants, std::span(&sampled,1));
