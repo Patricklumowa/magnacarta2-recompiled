@@ -54,8 +54,10 @@ struct SceneColorClear {
     plume::RenderColor value;
     plume::RenderRect rectangle;
 };
+enum class SceneColorPass { TiledOpaque, Opaque, Additive };
 struct SceneColorDraw {
     SceneSurface color_surface, depth_surface;
+    SceneColorPass pass = SceneColorPass::TiledOpaque;
     const SceneColorShaders* shaders = nullptr;
     plume::RenderCullMode cull = plume::RenderCullMode::FRONT;
     DepthDraw draw;

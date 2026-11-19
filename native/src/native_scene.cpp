@@ -460,13 +460,15 @@ SceneColorDraw ReadSceneColorDraw(const PPCContext& ctx, uint8_t* base, const Sc
     } else {
         // Format 12 requests higher precision blending with the same 7e3 storage as format 3.
         snapshot.color_surface = ReadFullscreenColorSurface(state, base, 0x302d0, 0xc02d0);
-        Require(state.Word(10372) == 0xc02d0, "Additive HDR draw requires the verified blend format");
+        snapshot.pass = state.Word(10372) == 0xc02d0 ? SceneColorPass::Additive : SceneColorPass::Opaque;
         snapshot.depth_surface = state.DepthSurface(base, 720, 1);
-        Require(state.Word(10492) == 0x00ffff00 && state.Word(10496) == 0x00ffff00,
-                "Additive HDR draw requires stencil reference zero and a full read mask");
+        if (snapshot.pass == SceneColorPass::Additive)
+            Require(state.Word(10492) == 0x00ffff00 && state.Word(10496) == 0x00ffff00,
+                    "Additive HDR draw requires stencil reference zero and a full read mask");
     }
+    const bool additive = snapshot.pass == SceneColorPass::Additive;
     Require(state.Word(12724) == 0 && state.Word(12716) == UINT32_MAX && state.Word(10932) == 0 &&
-            state.Word(10460) == 0xf && state.Word(10552) == (tiled ? 0x10001 : 0x1000101) &&
+            state.Word(10460) == 0xf && state.Word(10552) == (additive ? 0x1000101 : 0x10001) &&
             (state.Word(10556) & 0x1f) == 7,
             "Native color draw has unsupported color write, blend or alpha state");
     const auto raster_mode = state.Word(10568);
@@ -480,19 +482,19 @@ SceneColorDraw ReadSceneColorDraw(const PPCContext& ctx, uint8_t* base, const Sc
         culls_clockwise ? plume::RenderCullMode::FRONT : plume::RenderCullMode::BACK;
     const auto pixel_shader = ReadBoundShader(base, state.Word(12700), false);
     const auto vertex_shader = ReadBoundShader(base, state.Word(12704), true);
-    if (tiled && pixel_shader == shaders.pixel_reference && vertex_shader == shaders.vertex.reference) snapshot.shaders = &shaders;
+    if (!additive && pixel_shader == shaders.pixel_reference && vertex_shader == shaders.vertex.reference) snapshot.shaders = &shaders;
     else {
-        auto* programs = tiled ? world_shaders : additive_shaders;
+        auto* programs = additive ? additive_shaders : world_shaders;
         if (programs) snapshot.shaders = programs->Find(vertex_shader, pixel_shader);
         Require(snapshot.shaders, "Untranslated native scene shader pair");
     }
     snapshot.draw = ReadGeometry(ctx, base, state, snapshot.color_surface, snapshot.shaders->vertex,
-                                 tiled ? 0x00700766 : 0x00700263);
+                                 additive ? 0x00700263 : 0x00700766);
     if (!tiled && state.Word(11864)) {
         const auto left = state.Word(12684), top = state.Word(12688);
         const auto right = state.Word(12692), bottom = state.Word(12696);
         Require(left < right && top < bottom && right <= snapshot.color_surface.width && bottom <= snapshot.color_surface.height,
-                "Additive HDR scissor is outside the color attachment");
+                "Native HDR scissor is outside the color attachment");
         snapshot.draw.scissor = plume::RenderRect(left, top, right, bottom);
     }
     snapshot.pixel_constants = NativeVertexBytes(std::span(state.bytes).subspan(6016,4096),2);

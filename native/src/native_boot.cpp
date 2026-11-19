@@ -103,6 +103,7 @@ struct IndexedSceneDraw {
 };
 struct CachedSceneRenderer {
     const SceneColorShaders* shaders;
+    SceneColorPass pass;
     std::array<float, kNativeTextureSlotLimit> max_lod;
     plume::RenderCullMode cull;
     uint32_t cube_slots, rgba_slots;
@@ -448,7 +449,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         if (!tiled) {
             Require(scene_tiles_retired && depth_restored && !color_graded && !bloom_surface && fullscreen_target &&
                     fullscreen_surface == snapshot.color_surface && stencil_target && stencil_surface == snapshot.depth_surface,
-                    "Additive HDR draw requires the copied color and restored depth/stencil attachments");
+                    "Single-sample HDR draw requires the copied color and restored depth/stencil attachments");
         } else {
             Require(scene_copies == 0 && depth_renderer && color_target && depth_surface &&
                     color_surface && *color_surface == snapshot.color_surface &&
@@ -475,7 +476,8 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             scene_color_needs_resolve = true;
             if (REXCVAR_GET(mc2_scene_resolve_trace)) {
                 const auto& rect = draw.draw.scissor;
-                REXLOG_INFO("MC2 native scene: additive HDR draw, indices={}, streams={}, textures={}, scissor=[{},{},{},{}], completed={}",
+                REXLOG_INFO("MC2 native scene: {} HDR draw, indices={}, streams={}, textures={}, scissor=[{},{},{},{}], completed={}",
+                    snapshot.pass == SceneColorPass::Additive ? "additive" : "opaque",
                     draw.draw.index_count, draw.draw.VertexStreamCount(), draw.texture_count,
                     rect.left, rect.top, rect.right, rect.bottom, completed);
             }
@@ -504,23 +506,25 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             else if (block->faces == 6) cube_slots |= 1u << i;
         }
         const auto existing = std::find_if(scene_renderers.begin(), scene_renderers.end(), [&](const auto& cached) {
-            return cached.shaders == draw.shaders && cached.max_lod == max_lod && cached.cull == draw.cull &&
+            return cached.shaders == draw.shaders && cached.pass == draw.pass && cached.max_lod == max_lod && cached.cull == draw.cull &&
                 cached.cube_slots == cube_slots && cached.rgba_slots == rgba_slots;
         });
         if (existing != scene_renderers.end()) return *existing->renderer;
         auto configuration = ConfigureDepth(draw.color_surface, draw.shaders->vertex);
         configuration.cull = draw.cull;
         std::unique_ptr<ColorRenderer> renderer;
-        if (draw.color_surface.samples == 2) {
+        if (draw.pass == SceneColorPass::TiledOpaque) {
             renderer = std::make_unique<ColorRenderer>(configuration, draw.shaders->pixel_dxil,
                 samplers, *depth_renderer, *color_target, cube_slots);
         } else {
-            configuration.write = false;
-            configuration.stencil_comparison = plume::RenderComparisonFunction::EQUAL;
+            const bool additive = draw.pass == SceneColorPass::Additive;
+            configuration.write = !additive;
+            if (additive) configuration.stencil_comparison = plume::RenderComparisonFunction::EQUAL;
             renderer = std::make_unique<ColorRenderer>(configuration, draw.shaders->pixel_dxil,
-                samplers, *fullscreen_target, *stencil_target, SceneAdditiveBlend(), cube_slots);
+                samplers, *fullscreen_target, *stencil_target,
+                additive ? SceneAdditiveBlend() : plume::RenderBlendDesc::Copy(), cube_slots);
         }
-        scene_renderers.push_back({draw.shaders, max_lod, draw.cull, cube_slots, rgba_slots, std::move(renderer)});
+        scene_renderers.push_back({draw.shaders, draw.pass, max_lod, draw.cull, cube_slots, rgba_slots, std::move(renderer)});
         return *scene_renderers.back().renderer;
     }
 

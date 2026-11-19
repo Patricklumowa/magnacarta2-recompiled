@@ -19,7 +19,7 @@ Magna Carta 2 Recompiled (MC2Recomp) uses static recompilation to run the game's
 | PC settings | F4 menu with 720p, 1440p, and 4K rendering presets |
 | Frame rate | 30 FPS, 60 FPS, and experimental unlocked modes; targets are not performance guarantees |
 | Graphics | Default D3D12 compatibility renderer with original shadows and tiling |
-| Native graphics | The experimental D3D12 renderer presents movies, the animated Press START screen, and the main menu without Xenos. It renders and resolves the first 3D scene's geometry and lighting. End-to-end presentation of that scene is in development. [Native bootstrap](native/docs/native-bootstrap.md) |
+| Native graphics | D3D12 presents movies, the animated Press START screen, and the main menu without Xenos. A GPU readback of the first 3D scene shows the player, dock, trees, and buildings after lighting and the first sky draw. Final on-screen presentation of that scene is still in development. [Native bootstrap](native/docs/native-bootstrap.md) |
 | Performance | The native renderer loads world shaders on demand. Steady gameplay frame delivery remains a work in progress. |
 | Audio | Not working in current gameplay tests; enabling output does not resolve missing audio support |
 | Saves and progression | Full save/load, combat, and chapter coverage remain unverified |

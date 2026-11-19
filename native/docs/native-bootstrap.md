@@ -169,8 +169,10 @@ presented scene frames. Selecting New Game reached its opening movie.
 The original subtitle draw now blends over the video in the same native
 back buffer. Skipping the opening movies reaches the first 3D scene, where
 the native path renders both geometry tiles and the additive lighting pass.
-The native queue exports the lit HDR and restored depth textures before the
-next fullscreen draw. [Native scene rendering](native-depth.md#additive-world-lighting)
+The native queue exports the lit HDR and restored depth textures, then runs
+the depth mask and opaque sky draws. A 1280×720 GPU readback shows the player
+on the wooden dock, with trees and buildings in the background. This capture
+precedes final scene composition and presentation. [Native scene rendering](native-depth.md#additive-world-lighting)
 An empty color shader directory setting keeps the depth-only checkpoint.
 
 Other indexed and nonindexed scene draws and raw or indirect GPU submission

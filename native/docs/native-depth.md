@@ -649,6 +649,14 @@ order. Place the locally translated mask shaders in `<color-shaders>/depth-mask/
 as `vertex-shader.container`, `pixel-shader.container`, `vertex.dxil` and
 `pixel.dxil`.
 
+The following opaque geometry uses the single-sample HDR and depth/stencil
+attachments. It replaces the target color and writes depth with the original
+GREATER_EQUAL comparison. An opaque shader can also appear in a tiled pass.
+The native pipeline cache distinguishes those targets by pass. A live run
+completed the 96-index sky draw and four more opaque draws. The pixel shader
+for the sky samples a BC1 texture and uses the game's upper and lower sky
+colors.
+
 Compile the single-sample shader alongside the depth-restore shaders:
 
 ```text
