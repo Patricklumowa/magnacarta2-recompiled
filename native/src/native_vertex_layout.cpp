@@ -67,16 +67,21 @@ std::vector<VertexInput> ReadVertexInputs(std::span<const uint8_t> bytes) {
         }
         Require(((w1 >> 24) & 63) == 0 && !(w1 & (1u << 15)), "Unsupported vertex scaling or rounding");
         const auto format = (w1 >> 16) & 63;
-        const uint32_t components = format == 36 ? 1 : format == 37 ? 2 : format == 57 ? 3 : (format == 38 || format == 6) ? 4 : 0;
+        const uint32_t components = format == 36 ? 1 : (format == 37 || format == 25) ? 2 :
+                                    format == 57 ? 3 : (format == 38 || format == 6) ? 4 : 0;
         Require(components != 0, "Unsupported native vertex format");
         auto storage=VertexStorage::Float32;
         if (format==6) {
             Require(!(w1&(1u<<12)),"Signed native byte inputs are not implemented");
             storage=(w1&(1u<<13)) ? VertexStorage::UInt8 : VertexStorage::UNorm8;
+        } else if (format == 25) {
+            Require((w1 & 0x3000) == 0x3000, "Native short2 input requires signed integer components");
+            storage = VertexStorage::SInt16;
         }
         const uint64_t offset = uint64_t((w2 >> 8) & 0x7fffff) * 4;
-        Require(offset + components * (storage==VertexStorage::Float32 ? 4 : 1) <= stride, "Vertex element exceeds its stride");
-        result.push_back({usage, usage_index, fetch, stride, uint32_t(offset), components,false,storage});
+        const VertexInput input{usage, usage_index, fetch, stride, uint32_t(offset), components, false, storage};
+        Require(offset + input.ByteSize() <= stride, "Vertex element exceeds its stride");
+        result.push_back(input);
     }
     Require(!result.empty(), "Vertex shader has no supported inputs");
     return result;

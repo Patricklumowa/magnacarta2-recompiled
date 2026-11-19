@@ -657,6 +657,13 @@ completed the 96-index sky draw and four more opaque draws. The pixel shader
 for the sky samples a BC1 texture and uses the game's upper and lower sky
 colors.
 
+The next terrain material draws 282 indices without a texture. Its 12-byte
+vertex holds four unsigned bytes, one float, and two signed 16-bit integers.
+The last attribute binds as `R16G16_SINT` with an integer vertex shader
+input. Its original shader converts those components to floats for the
+terrain transform. This draw completed in the live scene with
+`texture-count.txt` set to `0`.
+
 Compile the single-sample shader alongside the depth-restore shaders:
 
 ```text

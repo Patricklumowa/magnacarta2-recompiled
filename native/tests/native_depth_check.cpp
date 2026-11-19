@@ -53,6 +53,27 @@ int main(int argc, char** argv) try {
     const auto shader = mc2::capture::LoadBE32(damaged.data() + 24);
     damaged[shader + 24] = 255;
     Reject([&] { ReadVertexInputs(damaged); });
+    // Change the captured COLOR fetch to the packed signed short pair used by terrain.
+    auto packed = container;
+    const auto word = [&](size_t offset) { return mc2::capture::LoadBE32(packed.data() + offset); };
+    const auto table = shader + 36 + 4 * word(shader + 24);
+    const auto code = word(4) + word(shader);
+    bool checked_short = false;
+    for (uint32_t i=0; i<word(shader+28); ++i) {
+        const auto element = word(table+4*i);
+        if (((element >> 12) & 15) != 10) continue;
+        const auto instruction = code+12*(element & 4095);
+        packed[instruction+5] = 25;
+        packed[instruction+6] |= 0x30;
+        const auto layout = ReadVertexInputs(packed);
+        Check(layout[1].storage == VertexStorage::SInt16 && layout[1].components == 2 &&
+              layout[1].ByteSize() == 4 && layout[1].stride == 40, "Terrain short2 layout differs");
+        packed[instruction+6] &= ~0x20;
+        Reject([&] { ReadVertexInputs(packed); });
+        checked_short = true;
+        break;
+    }
+    Check(checked_short, "Terrain short2 test could not locate its input");
     const std::array<uint8_t, 4> endian_test{1,2,3,4};
     Check(NativeVertexBytes(endian_test, 0) == std::vector<uint8_t>({1,2,3,4}) &&
           NativeVertexBytes(endian_test, 1) == std::vector<uint8_t>({2,1,4,3}) &&

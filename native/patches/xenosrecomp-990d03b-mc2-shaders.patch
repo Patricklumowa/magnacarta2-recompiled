@@ -501,7 +501,7 @@ index 698a418..8f60391 100644
 +            const uint32_t fetchWords[] = {fetchCode[0], fetchCode[1], fetchCode[2]};
 +            VertexFetchInstruction fetch;
 +            std::memcpy(&fetch, fetchWords, sizeof(fetch));
-+            if (hasFetchSourceComponents(fetch.dstSwizzle) && fetch.format == 6 && fetch.numFormatAll)
++            if (hasFetchSourceComponents(fetch.dstSwizzle) && (fetch.format == 6 || fetch.format == 25) && fetch.numFormatAll)
 +                usageType = fetch.formatCompAll ? "int4" : "uint4";
          #endif
  

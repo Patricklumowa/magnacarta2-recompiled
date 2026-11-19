@@ -305,7 +305,7 @@ static SceneColorShaders LoadMaterialShaders(const std::filesystem::path& vertex
     if (std::filesystem::exists(count_path)) {
         std::ifstream input(count_path);
         std::string trailing;
-        Require((input >> shaders.texture_count) && shaders.texture_count && shaders.texture_count <= kNativeTextureSlotLimit &&
+        Require((input >> shaders.texture_count) && shaders.texture_count <= kNativeTextureSlotLimit &&
                 !(input >> trailing), "Invalid native material texture count");
     }
     return shaders;

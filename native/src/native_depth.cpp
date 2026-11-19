@@ -77,13 +77,19 @@ struct IndexedPipeline {
                 streams.push_back({RenderInputSlot(stream_index, input.stride), input.fetch_index});
             }
             const auto& stream = streams[stream_index];
-            const auto element_bytes=input.components*(input.storage==VertexStorage::Float32 ? 4 : 1);
             Require(input.stride && input.stride <= 1020 && input.stride == stream.slot.stride &&
-                    (input.constant_only || uint64_t(input.offset) + element_bytes <= input.stride),
+                    (input.constant_only || uint64_t(input.offset) + input.ByteSize() <= input.stride),
                     "Native indexed pass requires bounded vertex streams with matching strides");
-            Require(input.storage==VertexStorage::Float32 || input.components==4,"Invalid native byte vertex input");
-            const auto format=input.storage==VertexStorage::UInt8 ? RenderFormat::R8G8B8A8_UINT :
-                input.storage==VertexStorage::UNorm8 ? RenderFormat::R8G8B8A8_UNORM : FloatFormat(input.components);
+            RenderFormat format;
+            if (input.storage == VertexStorage::SInt16) {
+                Require(input.components == 2, "Invalid native short2 vertex input");
+                format = RenderFormat::R16G16_SINT;
+            } else if (input.storage == VertexStorage::Float32) {
+                format = FloatFormat(input.components);
+            } else {
+                Require(input.components == 4, "Invalid native byte vertex input");
+                format = input.storage == VertexStorage::UInt8 ? RenderFormat::R8G8B8A8_UINT : RenderFormat::R8G8B8A8_UNORM;
+            }
             elements.emplace_back(VertexSemantic(input.usage), input.usage_index, uint32_t(elements.size()),
                                   format, input.constant_only ? dummy_slot.index : stream_index, input.offset);
         }
