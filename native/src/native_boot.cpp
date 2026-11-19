@@ -218,6 +218,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
             load_menu_fan("additive-mask", {18,20,20}, 0x01000106);
             load_menu_fan("alpha-detail", {18,18,20}, 0x01000706);
             load_menu_fan("alpha-clamp", {20}, 0x01000706, 1);
+            load_menu_fan("menu-transition", {20}, 0x01000706, 1);
             const auto present_directory = fullscreen_directory / "present";
             if (std::filesystem::is_directory(present_directory)) {
                 present_vertex_shader = ReadNativeFile(present_directory / "vertex.dxil");

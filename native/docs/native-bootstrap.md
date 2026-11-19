@@ -163,7 +163,8 @@ completed two scene swaps through [native presentation](native-depth.md#scene-pr
 and continued into the next movie. The second frame reused the attachments
 and exercised the three-tap bloom shaders. A later test skipped the movie,
 displayed the animated title screen and Press START prompt, and advanced
-on Start until the main-menu transition encountered an unsupported shader.
+on Start to the downloadable content validation dialog. The main-menu
+transition still encounters an unsupported shader after that dialog.
 An empty color shader directory setting keeps the depth-only checkpoint.
 
 Other indexed and nonindexed scene draws and raw or indirect GPU submission

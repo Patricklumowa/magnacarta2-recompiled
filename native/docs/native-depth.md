@@ -423,8 +423,10 @@ material and `fullscreen/menu-fan/alpha-clamp` for the one-texture material.
 A live test with the Xenos DLL absent displayed the animated logo,
 background, and Press START prompt at a 2560 x 1600 window size. The native
 backend presented 46 scene frames after the movie skip. Pressing Start on
-that screen advanced into a transition that encounters another menu fan
-shader. The main menu and gameplay are still incomplete on this backend.
+that screen now shows "Validating downloadable content." This dialog uses
+a clamp-to-edge BC3 shader pair in `fullscreen/menu-fan/menu-transition`.
+Another menu fan shader follows the dialog. The main menu and gameplay are
+still incomplete on this backend.
 
 The native renderer reuses scene textures when all six fetch words and
 every source mip match. The cache retains up to 64 entries and 32 MiB of
