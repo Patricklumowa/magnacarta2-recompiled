@@ -90,20 +90,20 @@ void RequireFirstTileDepth(const SceneSurface& prepass, const SceneSurface& tile
 struct IndexedSceneDraw {
     DepthDraw draw;
     std::vector<uint8_t> pixel_constants;
-    std::array<std::shared_ptr<const SampledTexture>, kTiledTextureSlots> textures;
+    std::array<std::shared_ptr<const SampledTexture>, kNativeTextureSlotLimit> textures;
     uint32_t texture_count = 0;
     ColorRenderer* renderer = nullptr;
 
     uint64_t Render(const plume::RenderRect& rectangle) {
         draw.scissor = rectangle;
-        std::array<const SampledTexture*, kTiledTextureSlots> bindings{};
+        std::array<const SampledTexture*, kNativeTextureSlotLimit> bindings{};
         for (uint32_t slot = 0; slot < texture_count; ++slot) bindings[slot] = textures[slot].get();
         return renderer->Render(draw, pixel_constants, std::span(bindings).first(texture_count));
     }
 };
 struct CachedSceneRenderer {
     const SceneColorShaders* shaders;
-    std::array<float, kTiledTextureSlots> max_lod;
+    std::array<float, kNativeTextureSlotLimit> max_lod;
     plume::RenderCullMode cull;
     uint32_t cube_slots, rgba_slots;
     std::unique_ptr<ColorRenderer> renderer;
@@ -489,7 +489,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
 
     ColorRenderer& SceneRendererFor(const SceneColorDraw& draw) {
         const auto samplers = std::span(draw.samplers).first(draw.shaders->texture_count);
-        std::array<float, kTiledTextureSlots> max_lod{};
+        std::array<float, kNativeTextureSlotLimit> max_lod{};
         uint32_t cube_slots = 0, rgba_slots = 0;
         for (size_t i = 0; i < samplers.size(); ++i) {
             max_lod[i] = samplers[i].maxLOD;

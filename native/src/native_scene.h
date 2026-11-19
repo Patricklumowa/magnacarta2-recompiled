@@ -16,7 +16,6 @@ struct SceneVertexShader {
     std::vector<uint8_t> reference, dxil;
     std::vector<VertexInput> inputs;
 };
-inline constexpr uint32_t kTiledTextureSlots = 6;
 struct SceneColorShaders {
     SceneVertexShader vertex;
     std::vector<uint8_t> pixel_reference, pixel_dxil, resolve_dxil, depth_resolve_dxil;
@@ -61,8 +60,8 @@ struct SceneColorDraw {
     plume::RenderCullMode cull = plume::RenderCullMode::FRONT;
     DepthDraw draw;
     std::vector<uint8_t> pixel_constants;
-    std::array<std::variant<mc2::texture::BlockTexture, mc2::texture::BaseRGBA8>, kTiledTextureSlots> textures;
-    std::array<plume::RenderSamplerDesc, kTiledTextureSlots> samplers;
+    std::array<std::variant<mc2::texture::BlockTexture, mc2::texture::BaseRGBA8>, kNativeTextureSlotLimit> textures;
+    std::array<plume::RenderSamplerDesc, kNativeTextureSlotLimit> samplers;
 };
 struct SceneResolveTexture {
     uint32_t address = 0;

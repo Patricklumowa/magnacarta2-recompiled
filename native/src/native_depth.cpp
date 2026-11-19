@@ -64,7 +64,7 @@ struct IndexedPipeline {
         Require(c.sample_count == 1 || c.sample_count == 2 || c.sample_count == 4, "Unsupported native sample count");
         Require(!c.vertex_shader.empty() && !c.inputs.empty() && c.inputs.size() <= 32,
                 "Missing native vertex shader or inputs");
-        Require((!ps.empty() || color_format == RenderFormat::UNKNOWN) && sampler_descs.size() <= 16 &&
+        Require((!ps.empty() || color_format == RenderFormat::UNKNOWN) && sampler_descs.size() <= kNativeTextureSlotLimit &&
                 (!ps.empty() || sampler_descs.empty()), "Invalid native pixel pipeline");
         std::vector<RenderInputElement> elements;
         for (const auto& input : c.inputs) {
@@ -166,7 +166,7 @@ struct IndexedPipeline {
             Require(textures[slot].texture && bool(textures[slot].cube_view) == bool(cube_slots & (1u << slot)),
                     "Native sampled texture is missing or has a different dimension");
         if (!textures.empty()) {
-            for (uint32_t slot = 0; slot < 16; ++slot) {
+            for (uint32_t slot = 0; slot < kNativeTextureSlotLimit; ++slot) {
                 uint32_t texture_index, cube_index, sampler_index;
                 std::memcpy(&texture_index, draw.shared_constants.data() + slot * 4, 4);
                 std::memcpy(&cube_index, draw.shared_constants.data() + 128 + slot * 4, 4);
@@ -536,7 +536,7 @@ ColorRenderer::ColorRenderer(const DepthConfiguration& c, std::span<const uint8_
 ColorRenderer::~ColorRenderer() = default;
 uint64_t ColorRenderer::Render(const DepthDraw& draw, std::span<const uint8_t> ps,
                                std::span<const SampledTexture* const> textures) {
-    std::array<TextureBinding, 16> views{};
+    std::array<TextureBinding, kNativeTextureSlotLimit> views{};
     Require(textures.size() <= views.size(), "Too many native sampled textures");
     for (size_t i = 0; i < textures.size(); ++i) {
         Require(textures[i] && &textures[i]->Device() == &impl_->gpu, "Native sampled texture belongs to a different device or is missing");

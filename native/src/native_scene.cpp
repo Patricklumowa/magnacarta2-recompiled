@@ -291,24 +291,29 @@ SceneVertexShader LoadOcclusionShader(const std::filesystem::path& directory) {
     Require(shader.inputs == expected, "Occlusion shader does not use the verified float3 input");
     return shader;
 }
-SceneColorShaders LoadColorShaders(const std::filesystem::path& directory, std::string_view pixel_dxil) {
-    auto vertex = LoadVertexShader(directory);
+static SceneColorShaders LoadMaterialShaders(const std::filesystem::path& vertex_directory,
+                                            const std::filesystem::path& pixel_directory, std::string_view pixel_dxil) {
+    auto vertex = LoadVertexShader(vertex_directory);
     // The vertex metadata gives the attribute types and offsets. Each draw
     // validates the bound fetch descriptors, and the pipeline checks its
     // supported stream count, strides and indexed range before submitting.
-    SceneColorShaders shaders{std::move(vertex), ReadNativeFile(directory / "pixel-shader.container"),
-                              ReadNativeFile(directory / pixel_dxil), {}, {}};
+    SceneColorShaders shaders{std::move(vertex), ReadNativeFile(pixel_directory / "pixel-shader.container"),
+                              ReadNativeFile(pixel_directory / pixel_dxil), {}, {}};
+    const auto count_path = pixel_directory / "texture-count.txt";
+    if (std::filesystem::exists(count_path)) {
+        std::ifstream input(count_path);
+        std::string trailing;
+        Require((input >> shaders.texture_count) && shaders.texture_count && shaders.texture_count <= kNativeTextureSlotLimit &&
+                !(input >> trailing), "Invalid native material texture count");
+    }
+    return shaders;
+}
+SceneColorShaders LoadColorShaders(const std::filesystem::path& directory, std::string_view pixel_dxil) {
+    auto shaders = LoadMaterialShaders(directory, directory, pixel_dxil);
     const auto resolve_path = directory / "color-resolve.dxil";
     if (std::filesystem::exists(resolve_path)) shaders.resolve_dxil = ReadNativeFile(resolve_path);
     const auto depth_resolve_path = directory / "depth-resolve.dxil";
     if (std::filesystem::exists(depth_resolve_path)) shaders.depth_resolve_dxil = ReadNativeFile(depth_resolve_path);
-    const auto count_path = directory / "texture-count.txt";
-    if (std::filesystem::exists(count_path)) {
-        std::ifstream input(count_path);
-        std::string trailing;
-        Require((input >> shaders.texture_count) && shaders.texture_count && shaders.texture_count <= kTiledTextureSlots &&
-                !(input >> trailing), "Invalid tiled material texture count");
-    }
     return shaders;
 }
 SceneMaterialLibrary::SceneMaterialLibrary(const std::filesystem::path& directory, std::string_view pixel_dxil)
@@ -324,9 +329,17 @@ const SceneColorShaders* SceneMaterialLibrary::Find(const std::vector<uint8_t>& 
     const auto cached = std::find_if(loaded_.begin(), loaded_.end(), matches);
     if (cached != loaded_.end()) return &*cached;
 
-    const auto path = directory_ / (ShaderHashPrefix(vertex) + '-' + ShaderHashPrefix(pixel));
+    const auto vertex_prefix = ShaderHashPrefix(vertex), pixel_prefix = ShaderHashPrefix(pixel);
+    const auto path = directory_ / (vertex_prefix + '-' + pixel_prefix);
     if (std::filesystem::is_regular_file(path / "vertex-shader.container")) {
         auto program = LoadColorShaders(path, pixel_dxil_);
+        if (matches(program)) return &loaded_.emplace_back(std::move(program));
+    }
+    const auto vertex_path = directory_ / "vertex" / vertex_prefix;
+    const auto pixel_path = directory_ / "pixel" / pixel_prefix;
+    if (std::filesystem::is_regular_file(vertex_path / "vertex-shader.container") &&
+        std::filesystem::is_regular_file(pixel_path / "pixel-shader.container")) {
+        auto program = LoadMaterialShaders(vertex_path, pixel_path, pixel_dxil_);
         if (matches(program)) return &loaded_.emplace_back(std::move(program));
     }
     // Keep support for older shader banks whose subdirectory names were chosen by hand.

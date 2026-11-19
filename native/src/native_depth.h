@@ -5,6 +5,7 @@
 
 namespace mc2::native {
 inline constexpr uint32_t kNativeVertexStreamLimit = 16;
+inline constexpr uint32_t kNativeTextureSlotLimit = 16;
 class ColorTarget;
 class SampledTexture;
 class ColorRenderer;

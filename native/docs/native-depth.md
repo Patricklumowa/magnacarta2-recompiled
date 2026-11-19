@@ -506,6 +506,13 @@ compares both full containers with the guest bindings. A path miss also
 checks manually named material directories. The same lookup applies to
 `world-additive`.
 
+When multiple materials reuse the same programs, place the vertex container
+and `vertex.dxil` in `vertex/<vertex-hash-prefix>`. Place the pixel container,
+the pass-specific pixel DXIL, and `texture-count.txt` in
+`pixel/<pixel-hash-prefix>`. Both paths are relative to the material bank.
+The renderer also accepts the paired directories and uses an exact container
+match in either layout. The texture count can specify up to sixteen slots.
+
 The next observed pair uses the same world vertex shader and pixel container SHA-256
 `90083832b46de285c180a78c88fa0745adb2fc24568714ffe8dec7a9d041c329`, with
 BC1 textures in both slots. The renderer selects the full vertex and pixel
@@ -618,6 +625,9 @@ the original viewport and restricting writes to the selected pixels. The
 readback checks both sides of the scissor boundary. A live run without Xenos
 completed 16 additive draws, including a 1,093 x 720 scissor and a
 1,034 x 579 scissor, and reached the first four-texture additive material.
+With the separate shader banks loaded, a live run completed all 65 additive
+draws before the fullscreen resolve. This included seven-texture draws of
+14,556 and 8,472 indices.
 
 ## Scene presentation
 
