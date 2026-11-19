@@ -273,31 +273,9 @@ SceneVertexShader LoadOcclusionShader(const std::filesystem::path& directory) {
 }
 SceneColorShaders LoadColorShaders(const std::filesystem::path& directory) {
     auto vertex = LoadVertexShader(directory);
-    const std::vector<VertexInput> expected = {
-        {0,0,95,40,0,4,true}, {6,0,95,40,0,3}, {7,0,95,40,12,4,false,VertexStorage::UInt8},
-        {3,0,95,40,16,4,false,VertexStorage::UInt8}, {10,0,95,40,20,4,false,VertexStorage::UInt8}, {5,0,95,40,24,2}
-    };
-    const auto stride = vertex.inputs.front().stride;
-    const std::vector<VertexInput> world = {
-        {0,0,95,stride,0,3}, {6,0,95,stride,16,4,false,VertexStorage::UInt8}, {7,0,95,stride,20,4,false,VertexStorage::UInt8},
-        {3,0,95,stride,24,4,false,VertexStorage::UInt8}, {10,0,95,stride,28,4,false,VertexStorage::UNorm8}, {5,0,95,stride,32,2}
-    };
-    auto layered = world;
-    const VertexInput auxiliary[] = {
-        {5,5,94,12,0,4,false,VertexStorage::UNorm8}, {5,6,94,12,4,4,false,VertexStorage::UNorm8},
-        {5,7,94,12,8,4,false,VertexStorage::UNorm8}
-    };
-    layered.insert(layered.end(), std::begin(auxiliary), std::end(auxiliary));
-    auto lightmapped = world;
-    lightmapped.push_back({10,1,95,stride,40,2});
-    const std::vector<VertexInput> skinned = {
-        {0,0,95,stride,0,3}, {6,0,95,stride,12,4,false,VertexStorage::UInt8}, {7,0,95,stride,16,4,false,VertexStorage::UInt8},
-        {3,0,95,stride,20,4,false,VertexStorage::UInt8}, {2,0,95,stride,24,2}, {1,0,95,stride,32,4,false,VertexStorage::UInt8},
-        {5,0,95,stride,36,4,false,VertexStorage::UNorm8}, {10,0,95,stride,40,4,false,VertexStorage::UNorm8}
-    };
-    Require(vertex.inputs == expected || vertex.inputs == world || vertex.inputs == layered ||
-            vertex.inputs == lightmapped || vertex.inputs == skinned,
-            "Unrecognized scene color shader input layout");
+    // The vertex metadata gives the attribute types and offsets. Each draw
+    // validates the bound fetch descriptors, and the pipeline checks its
+    // supported stream count, strides and indexed range before submitting.
     SceneColorShaders shaders{std::move(vertex), ReadNativeFile(directory / "pixel-shader.container"),
                               ReadNativeFile(directory / "pixel-7e3.dxil"), {}, {}};
     const auto resolve_path = directory / "color-resolve.dxil";

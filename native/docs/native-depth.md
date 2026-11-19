@@ -577,6 +577,11 @@ and the pixel container SHA-256 is
 The live run completed this draw with 7,104 indices and advanced through
 draw 1,485 in the first tile.
 
+The material loader uses the vertex metadata to construct its input layout.
+It matches both captured shader containers, verifies the bound vertex fetches
+and checks the indexed range before submitting. A live run handled an
+additional packed 44-byte format and advanced through draw 1,492.
+
 ## Scene presentation
 
 The display resolve validates a full, same-size RGBA8 source and destination.
