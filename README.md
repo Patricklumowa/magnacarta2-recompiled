@@ -2,10 +2,10 @@
 
 **An experimental PC port of the Xbox 360 version of Magna Carta 2, built with static recompilation.**
 
-Magna Carta 2 Recompiled (MC2Recomp) uses [ReXGlue](https://github.com/rexglue/rexglue-sdk) to translate the game's PowerPC executable into C++ and compile it for Windows. Game-specific hooks provide controller fixes, frame pacing, and PC settings. Graphics currently use ReXGlue's Xenos compatibility renderer; replacing the CPU execution path does not remove the cost of translating the original GPU workload.
+Magna Carta 2 Recompiled (MC2Recomp) uses static recompilation to run the game's PowerPC code on Windows x64. Game-specific hooks provide controller fixes, frame pacing, and PC settings. The default build uses the Xenos compatibility renderer. An opt-in native Direct3D 12 renderer is in development. [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk)
 
 > [!IMPORTANT]
-> This is an early development project. Boot, movies, the title menu, and initial gameplay have been reached, but audio and performance remain unfinished. There are no packaged releases yet.
+> The Windows compatibility build has reached initial gameplay. Audio, frame pacing, saves, and two-disc progression still need development and testing. This is a source-only development project.
 >
 > You must supply game files extracted from your own copy. This repository contains project source, configuration, and SDK patches. It does not include game assets, executables, disc images, or generated game code.
 
@@ -14,13 +14,13 @@ Magna Carta 2 Recompiled (MC2Recomp) uses [ReXGlue](https://github.com/rexglue/r
 | Area | Status |
 | --- | --- |
 | Boot and movies | Startup logos, intro movie, and title screen reached |
-| Gameplay | Initial gameplay and movement tested; a complete playthrough is unverified |
+| Gameplay | Initial player movement tested on the Xenos compatibility renderer. A complete playthrough remains unverified. |
 | Controllers | Input and disconnect/reconnect tested; device compatibility is not exhaustive |
 | PC settings | F4 menu with 720p, 1440p, and 4K rendering presets |
 | Frame rate | 30 FPS, 60 FPS, and experimental unlocked modes; targets are not performance guarantees |
-| Graphics | D3D12 compatibility renderer; original shadow/tiling behavior retained |
-| Native graphics migration | Experimental D3D12 backend runs the movies, animated Press START screen, and main menu without Xenos. Gameplay coverage is incomplete. See [native bootstrap](native/docs/native-bootstrap.md). |
-| Performance | Substantial overhead and stutter remain; optimization is in progress |
+| Graphics | Default D3D12 compatibility renderer with original shadows and tiling |
+| Native graphics | The experimental D3D12 renderer presents movies, the animated Press START screen, and the main menu without Xenos. It renders and resolves the first 3D scene's geometry and lighting. End-to-end presentation of that scene is in development. [Native bootstrap](native/docs/native-bootstrap.md) |
+| Performance | The native renderer loads world shaders on demand. Steady gameplay frame delivery remains a work in progress. |
 | Audio | Not working in current gameplay tests; enabling output does not resolve missing audio support |
 | Saves and progression | Full save/load, combat, and chapter coverage remain unverified |
 | Multiple discs | Content catalog tooling exists; automatic disc switching is not implemented |
@@ -145,16 +145,20 @@ The launcher writes logs beneath `out/boot-<timestamp>/`, shares the cache under
 
 ## Known limitations and development goals
 
-The renderer still translates Xbox 360 draw commands, shaders, and render-target behavior. High host presentation counts do not necessarily mean equally high game-frame delivery. Use `--frame-stats` to log guest frame intervals when investigating pacing; report the scene, resolution, frame-rate mode, and hardware with any performance comparison.
+The default Xenos renderer translates Xbox 360 draw commands, shaders, and render-target behavior. Host presentation and guest frame delivery are measured separately. Use `--frame-stats` to log guest frame intervals and report the scene, resolution, frame-rate mode, and hardware with performance comparisons.
 
 The current priorities are consistent frame delivery while preserving the original visuals, working audio, broader gameplay/save testing, and automatic access to both discs' content. Unlocked timing needs validation across gameplay and cutscenes. No completion date or whole-game performance target is promised.
 
 Experimental shader output/sample specialization and the fast constant-copy hook remain opt-in. Their presence in the source does not establish a validated whole-game improvement. GPU timing capture is also off by default.
 
-Native graphics migration includes opt-in shader capture and a Windows D3D12
-backend. It presents the startup movies, animated title screen, and main menu through DXGI.
-The playable default uses Xenos. See the
-[implementation status and capture workflow](native/docs/native-renderer.md).
+### Experimental native graphics
+
+The native path presents the startup movies and menus through DXGI. Live runs
+have rendered both tiles of the first 3D scene, including skinned meshes,
+cubemaps, and additive lighting, and resolved the lit image into the scene's
+HDR texture. Development is now focused on the remaining postprocessing
+passes, gameplay coverage, and visual parity. [Renderer status and capture workflow](native/docs/native-renderer.md),
+[native scene rendering](native/docs/native-depth.md)
 
 ## Development
 
