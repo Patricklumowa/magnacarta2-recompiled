@@ -232,13 +232,19 @@ DepthDraw ReadGeometry(const PPCContext& ctx, uint8_t* base, const DeviceState& 
             state.Word(10564) == 0x80000 && state.Word(10452) == 0 && state.Float(12672) == 1 && state.Float(12676) == 0,
             "Depth/stencil, clipping, vertex base or viewport state differs from the verified pass");
     Require(!shader.inputs.empty(), "Native scene vertex layout is missing");
-    const auto& primary = shader.inputs.front();
     DepthDraw draw;
-    draw.vertices = ReadVertexStream(state, base, 0, primary);
-    const auto secondary = std::find_if(shader.inputs.begin(), shader.inputs.end(), [&](const auto& input) {
-        return input.fetch_index != primary.fetch_index;
-    });
-    if (secondary != shader.inputs.end()) draw.secondary_vertices = ReadVertexStream(state, base, 1, *secondary);
+    std::array<bool, 96> bound{};
+    uint32_t stream = 0;
+    for (const auto& input : shader.inputs) {
+        Require(input.fetch_index < bound.size(), "Native scene vertex fetch index is out of range");
+        if (bound[input.fetch_index]) continue;
+        Require(stream < kNativeVertexStreamLimit, "Too many native scene vertex streams");
+        auto bytes = ReadVertexStream(state, base, stream, input);
+        if (stream == 0) draw.vertices = std::move(bytes);
+        else draw.additional_vertices.push_back(std::move(bytes));
+        bound[input.fetch_index] = true;
+        ++stream;
+    }
     std::vector<uint8_t> index_descriptor, raw;
     uint32_t address=0,size=0;
     Require(ReadGuest(base,state.Word(12444),32,index_descriptor), "Unreadable native scene index descriptor");

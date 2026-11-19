@@ -582,6 +582,10 @@ It matches both captured shader containers, verifies the bound vertex fetches
 and checks the indexed range before submitting. A live run handled an
 additional packed 44-byte format and advanced through draw 1,492.
 
+The next mesh binds three vertex streams with 16-, 80- and 12-byte strides.
+The renderer follows the shader's fetch order and retains every stream for
+the second tile. A live run completed draw 1,493 using all three streams.
+
 ## Scene presentation
 
 The display resolve validates a full, same-size RGBA8 source and destination.

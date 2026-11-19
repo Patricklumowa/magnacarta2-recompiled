@@ -4,6 +4,7 @@
 #include <vector>
 
 namespace mc2::native {
+inline constexpr uint32_t kNativeVertexStreamLimit = 16;
 class ColorTarget;
 class SampledTexture;
 class ColorRenderer;
@@ -18,11 +19,16 @@ struct DepthConfiguration {
     bool operator==(const DepthConfiguration&) const = default;
 };
 struct DepthDraw {
-    std::vector<uint8_t> vertices, secondary_vertices, vertex_constants, shared_constants;
+    std::vector<uint8_t> vertices, vertex_constants, shared_constants;
+    std::vector<std::vector<uint8_t>> additional_vertices;
     std::vector<uint32_t> indices;
     uint32_t first_index = 0, index_count = 0;
     plume::RenderViewport viewport;
     plume::RenderRect scissor;
+    size_t VertexStreamCount() const { return 1 + additional_vertices.size(); }
+    const std::vector<uint8_t>& VertexBytes(size_t stream) const {
+        return stream ? additional_vertices[stream - 1] : vertices;
+    }
 };
 struct DepthResult {
     std::vector<float> pixels;

@@ -50,9 +50,8 @@ struct IndexedPipeline {
     uint32_t cube_slots;
     std::vector<std::unique_ptr<RenderSampler>> samplers;
     std::unique_ptr<RenderBuffer> index_buffer, vertex_constants, shared_constants, pixel_constants, dummy_input;
-    std::array<VertexStream, 2> streams;
-    uint32_t stream_count = 1;
-    RenderInputSlot dummy_slot{2, 0};
+    std::vector<VertexStream> streams;
+    RenderInputSlot dummy_slot{kNativeVertexStreamLimit, 0};
     size_t index_capacity = 0;
 
     IndexedPipeline(const DepthConfiguration& c, NativeDevice* device_context, std::span<const uint8_t> ps = {},
@@ -67,20 +66,20 @@ struct IndexedPipeline {
                 "Missing native vertex shader or inputs");
         Require((!ps.empty() || color_format == RenderFormat::UNKNOWN) && sampler_descs.size() <= 16 &&
                 (!ps.empty() || sampler_descs.empty()), "Invalid native pixel pipeline");
-        streams[0].slot = RenderInputSlot(0, c.inputs.front().stride);
-        streams[0].fetch = c.inputs.front().fetch_index;
         std::vector<RenderInputElement> elements;
         for (const auto& input : c.inputs) {
-            const uint32_t stream_index = input.fetch_index == streams[0].fetch ? 0 : 1;
-            auto& stream = streams[stream_index];
-            if (stream_index == 1 && stream_count == 1) {
-                stream.slot = RenderInputSlot(1, input.stride);
-                stream.fetch = input.fetch_index;
-                stream_count = 2;
+            const auto existing = std::find_if(streams.begin(), streams.end(), [&](const auto& stream) {
+                return stream.fetch == input.fetch_index;
+            });
+            const uint32_t stream_index = uint32_t(existing - streams.begin());
+            if (existing == streams.end()) {
+                Require(streams.size() < kNativeVertexStreamLimit, "Too many native vertex streams");
+                streams.push_back({RenderInputSlot(stream_index, input.stride), input.fetch_index});
             }
+            const auto& stream = streams[stream_index];
             const auto element_bytes=input.components*(input.storage==VertexStorage::Float32 ? 4 : 1);
             Require(input.stride && input.stride <= 1020 && input.stride == stream.slot.stride &&
-                    input.fetch_index == stream.fetch && (input.constant_only || uint64_t(input.offset) + element_bytes <= input.stride),
+                    (input.constant_only || uint64_t(input.offset) + element_bytes <= input.stride),
                     "Native indexed pass requires bounded vertex streams with matching strides");
             Require(input.storage==VertexStorage::Float32 || input.components==4,"Invalid native byte vertex input");
             const auto format=input.storage==VertexStorage::UInt8 ? RenderFormat::R8G8B8A8_UINT :
@@ -138,9 +137,10 @@ struct IndexedPipeline {
             desc.renderTargetFormat[0] = color_format;
             desc.renderTargetBlend[0] = blend;
         }
-        std::array slots{streams[0].slot, streams[1].slot, dummy_slot};
-        slots[stream_count] = dummy_slot;
-        desc.inputSlots = slots.data(); desc.inputSlotsCount = stream_count + 1;
+        std::array<RenderInputSlot, kNativeVertexStreamLimit + 1> slots{};
+        std::transform(streams.begin(), streams.end(), slots.begin(), [](const auto& stream) { return stream.slot; });
+        slots[streams.size()] = dummy_slot;
+        desc.inputSlots = slots.data(); desc.inputSlotsCount = uint32_t(streams.size() + 1);
         desc.inputElements = elements.data(); desc.inputElementsCount = uint32_t(elements.size());
         desc.depthEnabled = depth_format != RenderFormat::UNKNOWN;
         desc.depthWriteEnabled = desc.depthEnabled && c.write; desc.depthClipEnabled = c.clip;
@@ -175,15 +175,15 @@ struct IndexedPipeline {
                         "Native texture or sampler index is out of range");
             }
         }
-        Require((stream_count == 2) == !draw.secondary_vertices.empty() && draw.indices.size() <= 4 * 1024 * 1024,
+        Require(draw.VertexStreamCount() == streams.size() && draw.indices.size() <= 4 * 1024 * 1024,
                 "Invalid native indexed stream count or index extent");
-        const std::array<std::span<const uint8_t>, 2> vertices{draw.vertices, draw.secondary_vertices};
         size_t vertex_count = SIZE_MAX;
-        for (uint32_t i = 0; i < stream_count; ++i) {
+        for (size_t i = 0; i < streams.size(); ++i) {
             const auto stride = streams[i].slot.stride;
-            Require(!vertices[i].empty() && vertices[i].size() <= 16 * 1024 * 1024 && vertices[i].size() % stride == 0,
+            const auto size = draw.VertexBytes(i).size();
+            Require(size && size <= 16 * 1024 * 1024 && size % stride == 0,
                     "Invalid native indexed vertex extent");
-            vertex_count = std::min(vertex_count, vertices[i].size() / stride);
+            vertex_count = std::min(vertex_count, size / stride);
         }
         Require(draw.index_count && draw.index_count % 3 == 0 &&
                 uint64_t(draw.first_index) + draw.index_count <= draw.indices.size(), "Invalid native triangle range");
@@ -200,9 +200,9 @@ struct IndexedPipeline {
         Require(draw.scissor.left >= 0 && draw.scissor.top >= 0 && draw.scissor.right > draw.scissor.left &&
                 draw.scissor.bottom > draw.scissor.top && uint32_t(draw.scissor.right) <= width &&
                 uint32_t(draw.scissor.bottom) <= height, "Native scissor is out of bounds");
-        for (uint32_t i = 0; i < stream_count; ++i) {
+        for (size_t i = 0; i < streams.size(); ++i) {
             auto& stream = streams[i];
-            const auto bytes = vertices[i];
+            const auto& bytes = draw.VertexBytes(i);
             if (bytes.size() > stream.capacity) {
                 auto buffer = gpu->device->createBuffer(RenderBufferDesc::VertexBuffer(bytes.size(), RenderHeapType::UPLOAD));
                 Require(bool(buffer), "Native vertex stream allocation failed");
@@ -245,9 +245,8 @@ struct IndexedPipeline {
         if (texture_set) commands->setGraphicsDescriptorSet(texture_set.get(), 0);
         if (cube_set) commands->setGraphicsDescriptorSet(cube_set.get(), 2);
         if (sampler_set) commands->setGraphicsDescriptorSet(sampler_set.get(), 3);
-        const std::array vertex_sizes{draw.vertices.size(), draw.secondary_vertices.size()};
-        for (uint32_t i = 0; i < stream_count; ++i) {
-            const RenderVertexBufferView vertex_view(streams[i].buffer.get(), vertex_sizes[i]);
+        for (uint32_t i = 0; i < streams.size(); ++i) {
+            const RenderVertexBufferView vertex_view(streams[i].buffer.get(), draw.VertexBytes(i).size());
             commands->setVertexBuffers(i, &vertex_view, 1, &streams[i].slot);
         }
         const RenderIndexBufferView index_view(index_buffer.get(), draw.indices.size() * 4, RenderFormat::R32_UINT);

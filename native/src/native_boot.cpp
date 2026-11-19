@@ -469,7 +469,7 @@ class NativeGraphics final : public rex::system::IGraphicsSystem {
         if (scene_draws.size() == 1 || REXCVAR_GET(mc2_scene_resolve_trace)) {
             const auto& rendered = scene_draws.back();
             REXLOG_INFO("MC2 native scene: indexed HDR color draw {} in first tile, indices={}, streams={}, textures={}, completed={}",
-                scene_draws.size(), rendered.draw.index_count, rendered.draw.secondary_vertices.empty() ? 1 : 2,
+                scene_draws.size(), rendered.draw.index_count, rendered.draw.VertexStreamCount(),
                 rendered.texture_count, completed);
         }
         prepass_draw.reset();
