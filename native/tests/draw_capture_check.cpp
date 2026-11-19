@@ -1,5 +1,6 @@
 #include "generated/default/magnacarta2_init.h"
 #include "../src/draw_capture.h"
+#include "../src/guest_graphics_read.h"
 #include <rex/cvar.h>
 #include <rex/hook.h>
 #include <array>
@@ -130,6 +131,24 @@ int main() {
     VirtualFree(memory, 0, MEM_RELEASE);
     return 1;
   }
+  SYSTEM_INFO info;
+  GetSystemInfo(&info);
+  const auto boundary = 2 * info.dwPageSize;
+  memory[boundary - 1] = 0xA6;
+  memory[boundary] = 0x4D;
+  std::vector<uint8_t> snapshot;
+  Check(mc2::capture::ReadGuest(memory, boundary - 1, 2, snapshot) &&
+        snapshot == std::vector<uint8_t>{0xA6, 0x4D});
+  DWORD previous;
+  if (!VirtualProtect(memory + boundary, info.dwPageSize, PAGE_READWRITE | PAGE_GUARD, &previous)) {
+    VirtualFree(memory, 0, MEM_RELEASE);
+    return 1;
+  }
+  Check(!mc2::capture::ReadGuest(memory, boundary - 1, 2, snapshot));
+  MEMORY_BASIC_INFORMATION guarded{};
+  Check(VirtualQuery(memory + boundary, &guarded, sizeof(guarded)) && (guarded.Protect & PAGE_GUARD));
+  Check(VirtualProtect(memory + boundary, info.dwPageSize, previous, &previous));
+  Check(!mc2::capture::ReadGuest(memory, uint32_t(kMemorySize) - 1, 2, snapshot));
   expected_memory.fill(0);
   StoreBE32(kDevice + 12704, 0x7000);
   StoreBE32(kDevice + 12700, 0x7800);

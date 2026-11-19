@@ -433,8 +433,19 @@ every source mip match. The cache retains up to 64 entries and 32 MiB of
 source bytes. The live title screen reused 48 texture bindings per steady
 frame, reducing GPU submissions from 115 to 67. Median time between
 presented title frames was 418 ms before the cache and 379 ms after it
-in sequential runs at a 2560 x 1600 window size. Gameplay performance
-has yet to be measured on this backend.
+in sequential runs at a 2560 x 1600 window size.
+
+The Windows guest reader checks the protection of resident pages in a
+single batch before taking each graphics snapshot. It uses the region
+query when the resident-page check is inconclusive. The draw-capture
+test checks a read crossing page boundaries, rejects a guarded page
+without accessing it, and rejects an uncommitted range.
+
+With the batched checks, median time between presented title frames
+with 38 overlays fell from 379 ms to 30 ms in another run at the same
+window size. The run presented 86 scene frames and then stopped at an
+unsupported user-memory allocation. Gameplay performance has yet to
+be measured on this backend.
 
 ## Scene presentation
 
