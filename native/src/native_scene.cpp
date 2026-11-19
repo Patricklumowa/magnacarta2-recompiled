@@ -290,7 +290,13 @@ SceneColorShaders LoadColorShaders(const std::filesystem::path& directory) {
     layered.insert(layered.end(), std::begin(auxiliary), std::end(auxiliary));
     auto lightmapped = world;
     lightmapped.push_back({10,1,95,stride,40,2});
-    Require(vertex.inputs == expected || vertex.inputs == world || vertex.inputs == layered || vertex.inputs == lightmapped,
+    const std::vector<VertexInput> skinned = {
+        {0,0,95,stride,0,3}, {6,0,95,stride,12,4,false,VertexStorage::UInt8}, {7,0,95,stride,16,4,false,VertexStorage::UInt8},
+        {3,0,95,stride,20,4,false,VertexStorage::UInt8}, {2,0,95,stride,24,2}, {1,0,95,stride,32,4,false,VertexStorage::UInt8},
+        {5,0,95,stride,36,4,false,VertexStorage::UNorm8}, {10,0,95,stride,40,4,false,VertexStorage::UNorm8}
+    };
+    Require(vertex.inputs == expected || vertex.inputs == world || vertex.inputs == layered ||
+            vertex.inputs == lightmapped || vertex.inputs == skinned,
             "Unrecognized scene color shader input layout");
     SceneColorShaders shaders{std::move(vertex), ReadNativeFile(directory / "pixel-shader.container"),
                               ReadNativeFile(directory / "pixel-7e3.dxil"), {}, {}};

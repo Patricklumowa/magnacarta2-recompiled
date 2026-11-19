@@ -565,6 +565,18 @@ and the pixel container SHA-256 is
 The live run completed 13 draws with this layout and passed draw 1,410
 in the first tile.
 
+## Skinned meshes
+
+The first skinned draw uses a 44-byte stream with packed tangent, normal,
+bone, and color inputs. The host supplies the original vertex constants,
+including the bone matrix palette, to the translated vertex shader.
+The captured vertex container SHA-256 is
+`7e87f672e3647230dbbcf5e2cea19986681db3b90054741d469e39991b226184`
+and the pixel container SHA-256 is
+`2df29e208da893715d1dc6cbdd8ef46ec9c35f9ecfd307a0afcbd8ba13a4a32a`.
+The live run completed this draw with 7,104 indices and advanced through
+draw 1,485 in the first tile.
+
 ## Scene presentation
 
 The display resolve validates a full, same-size RGBA8 source and destination.
